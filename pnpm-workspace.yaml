@@ -1,0 +1,7 @@
+packages:
+  - .
+overrides:
+  '@cqu-moe/theme': 'file:./.design/cqu-moe-theme-1.1.0.tgz'
+allowBuilds:
+  esbuild: true
+  '@parcel/watcher': true
