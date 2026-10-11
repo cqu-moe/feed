@@ -14,7 +14,7 @@ const run=args=>{
 };
 const rows=run(['--command',query]).flatMap(result=>result.results??[]);
 const changed=rows.map(row=>({...row,cleaned:readingText(row.body_text)})).filter(row=>row.cleaned!==row.body_text);
-console.log(JSON.stringify({mode:apply?'apply':'dry-run',articles:rows.length,changed:changed.length,scannedPdf:changed.filter(row=>row.cleaned.startsWith('正文为扫描版 PDF')).length}));
+console.log(JSON.stringify({mode:apply?'apply':'dry-run',articles:rows.length,changed:changed.length,missingPdfText:changed.filter(row=>row.cleaned.includes('暂未提取到可搜索文字')).length}));
 if(apply&&changed.length){
   await mkdir('.private',{recursive:true});
   const stamp=new Date().toISOString().replace(/[:.]/g,'-');

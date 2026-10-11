@@ -38,11 +38,11 @@ D1 读回：63 个附件全部 `complete`，合计 29,133,750 字节；33 个 `s
 - 只允许已存档 PDF 的 iframe，重写为鉴权后的 Feed 文件地址；移除 SingleFile 附加 sandbox，使用自托管 React-PDF 11 / PDF.js 6.3.289，其他源站脚本、事件、未知 frame 保持禁用。
 - 原貌存档中已实际显示已保存 PDF 的第一页，并点击翻页到 2 / 2。阅读器直接解析 R2 原始 PDF 字节，未把文件替换为截图。
 - 清理 PDF 元数据、阅读器提示与导航噪声，更新 D1 正文和 FTS；R2 原始产物保持不变，清理前派生文本已有本地可恢复备份。
-- 12 篇 PDF 没有可提取文本层，明确显示扫描版提示，支持原 PDF 阅读和标题搜索；未实现扫描件正文 OCR。普通 Office、压缩包附件也未索引内容。
+- 初始转换器有 12 篇 PDF 未取得正文；换用 Workers 内的 unpdf 后，从 R2 补建了其中 11 篇的正文索引。最终 32/33 篇有正文文本，剩余 `4ffc0415b5f4ba168a847f01` 没有可提取文字层，仍可阅读原 PDF、按标题搜索。没有文字层的扫描 PDF 和普通 Office、压缩包附件尚不做 OCR/全文索引。
 
 ## 代码验证
 
-- `pnpm test`：12 个测试，覆盖中文搜索、PDF Range/HEAD/416、快照安全与 PDF 保留、OAuth PKCE/state/nonce/浏览器绑定和权益、R2 多 MiB 上传、全局限流延期与单篇尝试次数、非完整任务不能标 complete。
+- `pnpm test`：13 个测试，覆盖中文搜索、PDF Range/HEAD/416、快照安全与 PDF 保留、OAuth PKCE/state/nonce/浏览器绑定和权益、R2 多 MiB 上传、全局限流延期与单篇尝试次数、非完整任务不能标 complete。
 - 快照 form 和 PDF sandbox 两项回归均先观察失败，再修复通过。
 - `pnpm build`、`pnpm check:design`、`git diff --check`：均通过。Vite 主包超过 500 KiB 的警告尚存。
 - 学工部已切换为官方公示公告列表，补充翻页复核完成；未发现额外30天通知，所有来源最近一次运行均无错误。
@@ -56,4 +56,6 @@ D1 读回：63 个附件全部 `complete`，合计 29,133,750 字节；33 个 `s
 - 已完成 URL 不重复抓取，暂不自动检测原文更新。R2 旧版本保留，尚无自动保留期清理。
 - Firecrawl keyless 曾返回公共 IP 限制 403，重试后成功；可配置已有 API key，当前未配置。每日限额是请求尝试边界，并非整个 Cloudflare 账单硬封顶。
 
-最终应用版本：`e97cb011-62f5-4e0b-8716-32a96f2e49c1`。PDF.js 采用独立懒加载包，字体、CMaps、WASM 与 Worker 脚本都随应用自托管；仅阅读器页面允许同源嵌入与 WASM。
+最终应用版本：`32833335-94c9-4c5a-bd0d-7c1a1c4838ba`。PDF.js 采用独立懒加载包，字体、CMaps、WASM 与 Worker 脚本都随应用自托管；仅阅读器页面允许同源嵌入与 WASM。
+
+PDF 正文补索引在生产 Worker 内执行，未新增 Firecrawl/OCR 调用；`unpdf@1.8.1` 的 Workers 运行时测试通过，完整测试最终为 13/13。管理接口仅接受已有通知 ID，使用原有 ADMIN_TOKEN 鉴权，不接受外部文件 URL。

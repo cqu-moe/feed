@@ -20,7 +20,7 @@ Cloudflare Cron
   -> FeedIngest Workflow（每个来源一个实例）
   -> Firecrawl scrape（列表解析 / 正文抓取 / 源站内附件下载）
   -> Worker 桥接（CAPTCHA OCR、超大附件流式上传）
-  -> Workers AI（CAPTCHA 识别、正文型 PDF 转 Markdown）
+  -> Workers AI（CAPTCHA 识别） / unpdf（PDF 文字层）
   -> R2（正文、原貌、截图、附件、manifest）
   -> D1（来源、通知、附件、运行记录、额度、OAuth BFF 会话、FTS5 索引）
   -> Worker API + React SPA（私有阅读、搜索和存档预览）
@@ -28,7 +28,7 @@ Cloudflare Cron
 
 调度配置为 `0 0 * * *`。Cloudflare Cron 使用 UTC，因此每天 UTC 00:00 运行，即北京时间 08:00。初始补抓窗口是运行时往前 30 天；这不是全量历史导入，更早通知不会被猜测或采集。
 
-搜索使用 D1 SQLite FTS5 `article_search` 的 trigram 分词，索引字段为通知标题和正文文本。少于 3 个字符的查询回退到标题/正文 `LIKE`。正文型 PDF 会尝试用 Workers AI 转成 Markdown 并并入 `body_text`，因此可搜索；普通 Office、压缩包等附件只保存和提供下载，不做通用 Office 文本抽取，也不会并入搜索索引。
+搜索使用 D1 SQLite FTS5 `article_search` 的 trigram 分词，索引字段为通知标题和正文文本。少于 3 个字符的查询回退到标题/正文 `LIKE`。正文型 PDF 会用 unpdf 读取文字层并并入 `body_text`，因此可搜索；普通 Office、压缩包等附件只保存和提供下载，不做通用 Office 文本抽取，也不会并入搜索索引。
 
 ## 日常使用
 
@@ -87,6 +87,6 @@ pnpm check:design
 - 原貌存档依赖 SingleFile 生成的 `offline.html`；截图或快照失败会把通知标为 partial。
 - 通知日期无法可靠解析时不会入队，避免把无法确定日期的条目误认为 30 天窗口内。
 
-已知限制：12 篇正文 PDF 为扫描版，当前可阅读原文件、按标题搜索，尚无正文 OCR 索引。完成的 URL 不会每天重复采集，暂不自动追踪原文后续修改。当前使用 Firecrawl 无密钥入口，曾出现一次 IP 限制 403；后续可配置已有 API key 提高稳定性，未购买服务。
+已知限制：当前 33 篇中有 1 份 PDF 未提取到文字层，尚无正文 OCR 索引，仍可阅读原文件并按标题搜索。完成的 URL 不会每天重复采集，暂不自动追踪原文后续修改。当前使用 Firecrawl 无密钥入口，曾出现一次 IP 限制 403；后续可配置已有 API key 提高稳定性，未购买服务。
 
 这些边界用于控制外部请求和存储成本：快照、正文、截图、manifest 等小对象写入没有纳入 `archive_bytes` 日额度，R2 总存储和 D1 增长仍需要运维监控。

@@ -1,5 +1,6 @@
 import {Buffer} from 'node:buffer';
 import {readingText,readingExcerpt} from './reading.mjs';
+import {pdfText,PDF_TEXT_UNAVAILABLE} from './pdf-text.mjs';
 import {script as bundle} from 'single-file-cli/lib/single-file-bundle.js';
 import options from './singlefile-options.json';
 import {captchaPage} from './page-action.mjs';
@@ -38,10 +39,9 @@ export async function collectArticle(env,source,article){
     if(saved&&row.role==='body-pdf'&&row.kind==='pdf'){
       try{
         const object=await env.ARCHIVE.get(saved.key);
-        const converted=await env.AI.toMarkdown({name:saved.name,blob:new Blob([await object.arrayBuffer()],{type:'application/pdf'})});
-        if(converted.error||!converted.data)throw new Error('PDF text conversion failed');
-        body+='\n\n'+converted.data;
-        report.artifacts.push(await put(env,prefix,`${saved.name}.md`,converted.data,'text/markdown; charset=utf-8'));
+        const converted=await pdfText(await object.arrayBuffer());
+        body+='\n\n'+(converted.text||PDF_TEXT_UNAVAILABLE);
+        report.artifacts.push(await put(env,prefix,`${saved.name}.txt`,converted.text,'text/plain; charset=utf-8'));
       }catch(error){report.errors.push(cleanError(error));}
     }
   }

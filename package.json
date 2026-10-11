@@ -20,7 +20,8 @@
     "react-dom": "19.3.0",
     "react-pdf": "11.0.0",
     "react-router": "7.18.4",
-    "single-file-cli": "2.18.0"
+    "single-file-cli": "2.18.0",
+    "unpdf": "1.8.1"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261010.1",

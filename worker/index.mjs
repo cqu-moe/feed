@@ -5,6 +5,7 @@ import {bridgeRoute} from './bridge.mjs';
 import {apiRoute} from './api.mjs';
 import {json,equal,encoder,cleanError} from './utils.mjs';
 import {startDaily} from './workflow.mjs';
+import {repairPdfText} from './pdf-text.mjs';
 export {FeedIngest} from './workflow.mjs';
 
 export default {
@@ -16,6 +17,8 @@ export default {
       const bridge=await bridgeRoute(request,env);if(bridge)return bridge;
       if(url.pathname.startsWith('/internal/')){
         if(!env.ADMIN_TOKEN||!await equal(request.headers.get('Authorization'),`Bearer ${env.ADMIN_TOKEN}`))return json({error:'Unauthorized'},401);
+        const repair=/^\/internal\/repair-text\/([a-f0-9]{24})$/.exec(url.pathname);
+        if(repair&&request.method==='POST')return json(await repairPdfText(env,repair[1]));
         if(url.pathname==='/internal/run'&&request.method==='POST')return json({ids:await startDaily(env,crypto.randomUUID().slice(0,8))},202);
         if(url.pathname==='/internal/auth-check'&&request.method==='GET'){
           const r=await env.AUTH.fetch(new URL('/api/v1/auth/oauth2/introspect',env.AUTH_BASE_URL),{method:'POST',headers:{Authorization:'Basic '+Buffer.from(env.FEED_AUTH_CLIENT_ID+':'+env.FEED_AUTH_CLIENT_SECRET).toString('base64'),'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({token:'feed-readiness-invalid-token'}),signal:AbortSignal.timeout(10000)});

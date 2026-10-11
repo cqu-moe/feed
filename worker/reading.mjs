@@ -13,6 +13,6 @@ export function readingText(value) {
     .replace(/^(?:上一条|下一条)[：:][^\n]*$/gm, '')
     .replace(/\n[ \t]*\n(?:[ \t]*\n)+/g, '\n\n')
     .trim();
-  return result || (pdfAt >= 0 ? '正文为扫描版 PDF，暂未提取到可搜索文字；可在下方阅读原文件。' : '');
+  return result || (pdfAt >= 0 ? 'PDF 正文暂未提取到可搜索文字；可在下方阅读原文件。' : '');
 }
 export const readingExcerpt = value => readingText(value).replace(/\s+/g, ' ').slice(0,180);

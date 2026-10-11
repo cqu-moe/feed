@@ -183,7 +183,7 @@ articles/{articleId}/{runId}/
 - `snapshot.html`、`offline.html`
 - `original.png`
 - `attachment-1.pdf`、`attachment-2.docx` 等
-- `attachment-N.pdf.md`（仅正文型 PDF 转换成功时）
+- `attachment-N.pdf.txt`（正文型 PDF 文字层；早期记录为 `.md`）
 - `manifest.json`
 
 R2 桶不公共开放。所有读取都由 Worker 查 D1 后代理，响应为 `private, no-store`，附件支持 `Range`、`HEAD`、ETag/If-Range 和 416。
@@ -208,7 +208,7 @@ CREATE VIRTUAL TABLE article_search USING fts5(
 - 通知标题；
 - 页面正文文本；
 - Firecrawl Markdown 正文；
-- 被识别为正文 PDF、且 Workers AI `toMarkdown` 成功的 PDF 文本。
+- 被识别为正文 PDF、且 unpdf 成功提取的 PDF 文本。
 
 不索引：
 
@@ -294,6 +294,6 @@ node scripts/clean-reading.mjs --remote --apply
 
 第一条只预览。第二条先把原始派生文本备份到忽略的 `.private/`，再用 content hash 条件更新 D1；FTS 触发器自动同步索引。R2 原始产物和 manifest 保持不变。后续新采集会直接保存清理后的 `body.txt`。
 
-当前正文 PDF 转换使用 Cloudflare 文本层提取；扫描件可能没有可提取的文字，会明确显示扫描版提示并保留 PDF 阅读，不宣称其正文可搜索。原始 PDF 是权威副本。[Cloudflare 转换说明](https://developers.cloudflare.com/workers-ai/features/markdown-conversion/how-it-works/)
+正文 PDF 使用 unpdf 的 serverless PDF.js 在 Worker 内提取文字层，最大 12 MiB / 100 页，无额外转换服务调用。有文字层但被第三方转换器遗漏的历史文件，可执行 `node scripts/manage.mjs repair-text <article-id>`：在云端读取 R2，写入独立 `reading-v2.txt` 和派生 manifest，再更新 D1/FTS。没有文字层的扫描件仍需 OCR，阅读器可直接显示原文件。
 
 PDF.js 阅读页为 `/reader/{articleId}/{filename}`，仍先验证 Feed 会话，再从受保护文件路由读取 R2。React-PDF/PDF.js 版本严格配对；构建脚本 `copy-pdf-assets.mjs` 复制 CMaps、字体、WASM 和许可证到静态资源，不依赖 CDN。阅读器单独懒加载；只有该页面的 CSP 允许同源 frame-ancestors 和 wasm-unsafe-eval，脚本字符串 eval 仍禁用。
