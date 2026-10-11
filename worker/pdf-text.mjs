@@ -1,7 +1,27 @@
-import {extractText,getDocumentProxy} from 'unpdf';
+import {extractText,getDocumentProxy,getResolvedPDFJS} from 'unpdf';
 import {put,sha} from './utils.mjs';
 import {readingExcerpt} from './reading.mjs';
 export const PDF_TEXT_UNAVAILABLE='PDF 正文暂未提取到可搜索文字；可在下方阅读原文件。';
+export async function pdfPages(buffer){
+  if(buffer.byteLength>12*1024*1024)throw new Error('PDF text extraction exceeds 12 MiB');
+  const pdf=await getDocumentProxy(new Uint8Array(buffer),{isEvalSupported:false,disableFontFace:true});
+  try{
+    if(pdf.numPages>100)throw new Error('PDF text extraction exceeds 100 pages');
+    const {OPS}=await getResolvedPDFJS(),pages=[];
+    const imageOps=new Set(['paintImageXObject','paintInlineImageXObject','paintImageMaskXObject','paintImageXObjectRepeat','paintImageMaskXObjectRepeat','paintSolidColorImageMask'].map(key=>OPS[key]).filter(Number.isInteger));
+    for(let number=1;number<=pdf.numPages;number++){
+      const page=await pdf.getPage(number),content=await page.getTextContent();
+      const text=content.items.filter(item=>'str' in item).map(item=>item.str+(item.hasEOL?'\n':' ')).join('').trim();
+      const operators=await page.getOperatorList(),hasImages=operators.fnArray.some(op=>imageOps.has(op));
+      const chars=text.replace(/\s/g,''),corrupt=(chars.match(/[\uFFFD\u0000-\u0008]/g)||[]).length;
+      // A sparse caption/page number does not make an otherwise scanned page searchable.
+      const needsOcr=(hasImages&&chars.length<80)||corrupt>Math.max(2,chars.length*.1);
+      pages.push({index:number-1,text,hasImages,needsOcr});
+      page.cleanup();
+    }
+    return {pages,totalPages:pdf.numPages};
+  }finally{await pdf.loadingTask.destroy();}
+}
 export async function pdfText(buffer){
   if(buffer.byteLength>12*1024*1024)throw new Error('PDF text extraction exceeds 12 MiB');
   const pdf=await getDocumentProxy(new Uint8Array(buffer),{isEvalSupported:false,disableFontFace:true});

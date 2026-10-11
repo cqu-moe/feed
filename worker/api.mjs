@@ -26,10 +26,15 @@ export async function apiRoute(request,env){
   }
   const detail=/^\/api\/articles\/([a-f0-9]{24})$/.exec(path);
   if(detail){
-    const article=await env.DB.prepare(`SELECT ${columns},a.body_text AS bodyText,a.error,a.snapshot_key,a.screenshot_key FROM articles a JOIN sources s ON s.id=a.source_id WHERE a.id=?`).bind(detail[1]).first();
+    const article=await env.DB.prepare(`SELECT ${columns},a.body_text AS bodyText,a.error,a.snapshot_key,a.screenshot_key,a.ocr_result_key FROM articles a JOIN sources s ON s.id=a.source_id WHERE a.id=?`).bind(detail[1]).first();
     if(!article)return json({error:'通知不存在'},404);
     const rows=await env.DB.prepare('SELECT id,name,bytes,content_type AS contentType,status,error,filename,role,original_url AS originalUrl FROM attachments WHERE article_id=? ORDER BY id').bind(article.id).all();
     article.bodyHtml=null;article.snapshotUrl=article.snapshot_key?`/api/snapshots/${article.id}`:null;article.screenshotUrl=article.screenshot_key?`/api/screenshots/${article.id}`:null;
+    if(article.ocr_result_key){
+      const reading=await env.ARCHIVE.get(article.ocr_result_key);
+      if(reading)article.ocr=await reading.json();
+    }
+    delete article.ocr_result_key;
     delete article.snapshot_key;delete article.screenshot_key;
     return json({article,attachments:rows.results.map(row=>{const file=row.filename?`/api/files/${article.id}/${row.filename}`:null;return {...row,url:file,downloadUrl:file?file+'?download=1':null};})});
   }

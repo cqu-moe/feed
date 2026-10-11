@@ -10,6 +10,7 @@
 - 使用 Firecrawl 云页面抓取列表和正文，并在原始源站会话中下载附件。
 - 遇到四位数字附件验证码时，通过带时限 HMAC 授权的 Worker 桥接调用 Workers AI OCR，再用源站会话重试下载。
 - 将正文、正文型 PDF 文本、原貌 HTML、截图和附件保存到 R2；通知元数据和索引进 D1。
+- 扫描正文 PDF 自动进入云端 Mistral OCR 4.1 Workflow，按页阅读和搜索，保留原 PDF 对照；[实测与成本](docs/ocr-comparison.md)。
 - 提供中文统一阅读、关键词搜索、来源筛选、分页、原始通知链接、附件下载、PDF 在线预览和原貌存档。
 - 所有业务 API、附件、截图和原貌存档都要求 Feed 登录且实时拥有 `feed.access`。
 
@@ -28,7 +29,7 @@ Cloudflare Cron
 
 调度配置为 `0 0 * * *`。Cloudflare Cron 使用 UTC，因此每天 UTC 00:00 运行，即北京时间 08:00。初始补抓窗口是运行时往前 30 天；这不是全量历史导入，更早通知不会被猜测或采集。
 
-搜索使用 D1 SQLite FTS5 `article_search` 的 trigram 分词，索引字段为通知标题和正文文本。少于 3 个字符的查询回退到标题/正文 `LIKE`。正文型 PDF 会用 unpdf 读取文字层并并入 `body_text`，因此可搜索；普通 Office、压缩包等附件只保存和提供下载，不做通用 Office 文本抽取，也不会并入搜索索引。
+搜索使用 D1 SQLite FTS5 `article_search` 的 trigram 分词，索引字段为通知标题和正文文本。少于 3 个字符的查询回退到标题/正文 `LIKE`。正文型 PDF 会用 unpdf 读取文字层，扫描页由 Mistral OCR 4.1 补识别并并入 `body_text`，因此可搜索；普通 Office、压缩包等附件只保存和提供下载，不做通用 Office 文本抽取，也不会并入搜索索引。
 
 ## 日常使用
 
@@ -36,7 +37,7 @@ Cloudflare Cron
 2. 点击登录，跳转到 auth.cqu.moe。
 3. 使用拥有 `feed.access` 权益的账号完成授权。
 4. 在“通知”页搜索、筛选来源和翻页；URL 会保留 `q`、`source`、`page`。
-5. 打开通知查看统一阅读正文。正文在前端只渲染 `bodyText`，不渲染源站 HTML。
+5. 打开通知查看统一阅读正文。普通正文渲染纯文本；OCR 结果使用安全 Markdown 表格按页展示，不渲染源站 HTML。
 6. 附件区可下载已保存文件；PDF 附件用自托管 PDF.js 阅读器在 iframe 中预览，原文件由受保护的 `/api/files/{articleId}/{filename}` 提供。
 7. “原貌存档”在新窗口打开。快照会移除源站脚本和表单外壳、保留正文并限制外部请求，并把已保存的 PDF 阅读区替换为 Feed 自己的受保护 PDF 地址。
 
@@ -87,6 +88,6 @@ pnpm check:design
 - 原貌存档依赖 SingleFile 生成的 `offline.html`；截图或快照失败会把通知标为 partial。
 - 通知日期无法可靠解析时不会入队，避免把无法确定日期的条目误认为 30 天窗口内。
 
-已知限制：当前 33 篇中有 1 份 PDF 未提取到文字层，尚无正文 OCR 索引，仍可阅读原文件并按标题搜索。完成的 URL 不会每天重复采集，暂不自动追踪原文后续修改。当前使用 Firecrawl 无密钥入口，曾出现一次 IP 限制 403；后续可配置已有 API key 提高稳定性，未购买服务。
+已知限制：扫描 PDF 已接 OCR，但自动识别会有姓名等错字，应对照原 PDF。只处理正文型 PDF，普通附件尚未全文索引。完成的 URL 不会每天重复采集，暂不自动追踪原文后续修改。当前使用 Firecrawl 无密钥入口，曾出现一次 IP 限制 403；后续可配置已有 API key 提高稳定性，未购买服务。
 
 这些边界用于控制外部请求和存储成本：快照、正文、截图、manifest 等小对象写入没有纳入 `archive_bytes` 日额度，R2 总存储和 D1 增长仍需要运维监控。

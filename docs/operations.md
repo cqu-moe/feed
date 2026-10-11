@@ -14,7 +14,7 @@
 | R2 | binding `ARCHIVE`，bucket `cqu-feed-archive` |
 | Workers AI | binding `AI` |
 | Auth | service binding `AUTH`，服务 `cqu-moe-auth` |
-| Workflow | binding `INGEST`，class `FeedIngest` |
+| Workflow | binding `INGEST`，class `FeedIngest`；binding `PDF_OCR`，class `PdfOcrWorkflow` |
 | Cron | `0 0 * * *`，UTC 00:00 / 北京时间 08:00 |
 
 非敏感变量：
@@ -27,6 +27,10 @@
 | `MAX_OCR_PER_DAY` | `100` | D1 全局硬额度，按自然日计数 |
 | `MAX_ARTICLES_PER_RUN` | `40` | 每个来源 Workflow 每次运行最多处理的通知数 |
 | `CRAWL_ENABLED` | `true` | 设为非 `true` 禁止每日和手动启动采集 |
+| `PDF_OCR_ENABLED` | `true` | 自动入队与每日补偿；不禁止显式 admin 对比任务 |
+| `PDF_OCR_MODEL` | `mistral-ocr-4-1` | 固定文档 OCR 模型 |
+| `MAX_PDF_OCR_PAGES_PER_DAY` | `50` | UTC 每日预留源 PDF 页数 |
+| `MAX_PDF_OCR_PAGES_PER_MONTH` | `1000` | UTC 每月预留源 PDF 页数 |
 
 `MAX_UPLOAD_BYTES_PER_DAY` 未写入 `wrangler.jsonc` 时使用代码默认值 268,435,456 字节，即 256 MiB。它只限制 Firecrawl 页面通过 `/internal/upload` 桥接上传的附件字节，不限制 Worker 直接 `put` 的正文、快照、截图、manifest 等对象。
 
@@ -36,6 +40,7 @@ Workers secrets：
 | --- | --- |
 | `FIRECRAWL_API_KEY` | 可选；当前未配置，使用 Firecrawl keyless 入口，可能受 IP 限流 |
 | `BRIDGE_SECRET` | 给 Firecrawl 页面签发 5 分钟源站 origin 绑定 HMAC capability |
+| `MISTRAL_API_KEY` | 私有 R2 正文 PDF 的 Mistral OCR；与验证码 Workers AI 分开计费 |
 | `ADMIN_TOKEN` | `/internal/*` 管理 Bearer token |
 | `FEED_AUTH_CLIENT_ID` | auth.cqu.moe 机密 OAuth client ID |
 | `FEED_AUTH_CLIENT_SECRET` | auth.cqu.moe 机密 OAuth client secret |
@@ -44,6 +49,7 @@ Workers secrets：
 配置命令：
 
 ```sh
+pnpm exec wrangler secret put MISTRAL_API_KEY --name cqu-feed
 pnpm exec wrangler secret put FIRECRAWL_API_KEY --name cqu-feed
 pnpm exec wrangler secret put BRIDGE_SECRET --name cqu-feed
 pnpm exec wrangler secret put ADMIN_TOKEN --name cqu-feed
@@ -87,6 +93,7 @@ https://<feed-origin>/auth/callback
 - `0001_feed.sql`：来源、通知、附件、运行记录、额度、OCR slot，以及 FTS5 表和同步触发器。
 - `0002_auth.sql`：删除未使用原型表，创建 OAuth login transaction 和 BFF session 表。
 - `0003_collection_lease.sql`：给通知增加采集 lease，避免手动和每日任务重复扣外部额度。
+- `0004_pdf_ocr.sql`：文档 OCR jobs、calls、原子预算、usage 和阅读派生字段。
 
 远程迁移：
 
@@ -208,7 +215,7 @@ CREATE VIRTUAL TABLE article_search USING fts5(
 - 通知标题；
 - 页面正文文本；
 - Firecrawl Markdown 正文；
-- 被识别为正文 PDF、且 unpdf 成功提取的 PDF 文本。
+- 正文 PDF 的 unpdf 文字层及成功发布的 Mistral 扫描件 OCR 文本。
 
 不索引：
 
@@ -294,6 +301,22 @@ node scripts/clean-reading.mjs --remote --apply
 
 第一条只预览。第二条先把原始派生文本备份到忽略的 `.private/`，再用 content hash 条件更新 D1；FTS 触发器自动同步索引。R2 原始产物和 manifest 保持不变。后续新采集会直接保存清理后的 `body.txt`。
 
-正文 PDF 使用 unpdf 的 serverless PDF.js 在 Worker 内提取文字层，最大 12 MiB / 100 页，无额外转换服务调用。有文字层但被第三方转换器遗漏的历史文件，可执行 `node scripts/manage.mjs repair-text <article-id>`：在云端读取 R2，写入独立 `reading-v2.txt` 和派生 manifest，再更新 D1/FTS。没有文字层的扫描件仍需 OCR，阅读器可直接显示原文件。
+正文 PDF 使用 unpdf 的 serverless PDF.js 在 Worker 内提取文字层，最大 12 MiB / 100 页，无额外转换服务调用。有文字层但被第三方转换器遗漏的历史文件，可执行 `node scripts/manage.mjs repair-text <article-id>`：在云端读取 R2，写入独立 `reading-v2.txt` 和派生 manifest，再更新 D1/FTS。没有文字层的正文扫描件自动进入独立 PdfOcrWorkflow；失败、超限、预算不足时保留原件和原正文。详见 [OCR 实现](pdf-ocr-design.md)。
 
 PDF.js 阅读页为 `/reader/{articleId}/{filename}`，仍先验证 Feed 会话，再从受保护文件路由读取 R2。React-PDF/PDF.js 版本严格配对；构建脚本 `copy-pdf-assets.mjs` 复制 CMaps、字体、WASM 和许可证到静态资源，不依赖 CDN。阅读器单独懒加载；只有该页面的 CSP 允许同源 frame-ancestors 和 wasm-unsafe-eval，脚本字符串 eval 仍禁用。
+
+## 11. 文档 OCR 运维
+
+对已归档样片执行：
+
+```sh
+node scripts/compare-ocr.mjs status
+node scripts/compare-ocr.mjs results mistral-ocr-4-1
+node scripts/compare-ocr.mjs publish mistral-ocr-4-1
+```
+
+已完成结果 publish 只更新阅读与索引，不再收费识别。start 可能发起付费调用，仍受文件缓存和全局页数预算约束。任意其他 article 通过带 ADMIN_TOKEN 的 `/internal/pdf-ocr/<id>` 管理。
+
+查看 D1 `pdf_ocr_jobs` 了解失败和延期；`pdf_ocr_usage` 是按日/月的预留/成功处理页数与估算费用，`pdf_ocr_budget` 是原子配额状态。超时可能已经收费，因此失败不释放预算，不要为恢复任务随意清除 calls/attempts。`PDF_OCR_ENABLED=false` 只停止新自动入队，已启动 Workflow 仍可完成；不清空 key、数据或已发布文字。
+
+当前只对 body-pdf 自动 OCR。最大 12 MiB/100 个源页/20 个 OCR 页，按每次请求完整源页数保守预留预算。每月 1000 页对应默认模型约 $4 基础 OCR 用量，Cloudflare 和整个供应商账号的总账单不受这个应用额度封顶。

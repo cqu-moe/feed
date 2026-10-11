@@ -49,12 +49,29 @@ export type Attachment = {
   downloadUrl: string | null;
 };
 
+export type OcrPage = {
+  page: number;
+  filename: string;
+  source: 'ocr' | 'native';
+  markdown: string;
+  text: string;
+};
+
+export type ArticleOcr = {
+  status: 'complete' | 'partial' | 'pending' | 'failed';
+  model: string;
+  htmlText: string;
+  pages: OcrPage[];
+  updatedAt: string | null;
+};
+
 export type ArticleDetail = ArticleListItem & {
   bodyText: string;
   bodyHtml: string | null;
   snapshotUrl: string | null;
   screenshotUrl: string | null;
   attachments: Attachment[];
+  ocr?: ArticleOcr;
 };
 
 export type ArticleDetailResponse = {
@@ -235,6 +252,51 @@ function parseAttachment(value: unknown): Attachment {
   };
 }
 
+function parseOcrPage(value: unknown): OcrPage {
+  if (
+    !isRecord(value) ||
+    typeof value.page !== 'number' ||
+    !Number.isSafeInteger(value.page) ||
+    value.page < 1 ||
+    typeof value.filename !== 'string' ||
+    !/^attachment-[1-9]\d*\.pdf$/.test(value.filename) ||
+    (value.source !== 'ocr' && value.source !== 'native') ||
+    typeof value.markdown !== 'string' ||
+    typeof value.text !== 'string'
+  ) {
+    throw new Error('扫描件识别结果接口结构不匹配。');
+  }
+  return {
+    page: value.page,
+    filename: value.filename,
+    source: value.source,
+    markdown: value.markdown,
+    text: value.text,
+  };
+}
+
+function parseOcr(value: unknown): ArticleOcr {
+  if (
+    !isRecord(value) ||
+    (value.status !== 'complete' &&
+      value.status !== 'partial' &&
+      value.status !== 'pending' &&
+      value.status !== 'failed') ||
+    typeof value.model !== 'string' ||
+    !Array.isArray(value.pages) ||
+    (typeof value.updatedAt !== 'string' && value.updatedAt !== null)
+  ) {
+    throw new Error('扫描件识别结果接口结构不匹配。');
+  }
+  return {
+    status: value.status,
+    model: value.model,
+    htmlText: typeof value.htmlText === 'string' ? value.htmlText : '',
+    pages: value.pages.map(parseOcrPage),
+    updatedAt: stringOrNull(value.updatedAt),
+  };
+}
+
 export function parseArticleDetail(value: unknown): ArticleDetailResponse {
   if (!isRecord(value) || !isRecord(value.article) || !Array.isArray(value.attachments)) {
     throw new Error('通知详情接口结构不匹配。');
@@ -251,6 +313,7 @@ export function parseArticleDetail(value: unknown): ArticleDetailResponse {
     snapshotUrl: stringOrNull(value.article.snapshotUrl),
     screenshotUrl: stringOrNull(value.article.screenshotUrl),
     attachments: parsedAttachments,
+    ...(value.article.ocr === undefined ? {} : { ocr: parseOcr(value.article.ocr) }),
   };
 
   return { article, attachments: parsedAttachments };

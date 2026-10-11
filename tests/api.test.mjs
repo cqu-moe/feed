@@ -12,6 +12,8 @@ before(async()=>{
   db=await mf.getD1Database('DB');bucket=await mf.getR2Bucket('ARCHIVE');
   const sql=await readFile('migrations/0001_feed.sql','utf8');
   for(const statement of sql.split(/;\s*\n(?=CREATE|PRAGMA|$)/).filter(x=>x.trim()))await db.prepare(statement).run();
+  const ocrSql=await readFile('migrations/0004_pdf_ocr.sql','utf8');
+  for(const statement of ocrSql.split(';').filter(x=>x.trim()))await db.prepare(statement).run();
   await db.prepare("INSERT INTO sources(id,name,url) VALUES ('jwc','教务处','https://jwc.cqu.edu.cn/'),('civil','土木学院','https://civil.cqu.edu.cn/')").run();
   await db.prepare("INSERT INTO articles(id,source_id,url,title,published_at,discovered_at,body_text,snapshot_key) VALUES (?,'jwc','https://jwc.cqu.edu.cn/info/1/1.htm','关于优异生申请通知','2026-10-01','2026-10-11','请提交奖学金材料，比例100%。','snapshot')").bind(id).run();
   await db.prepare("INSERT INTO articles(id,source_id,url,title,published_at,discovered_at,body_text) VALUES (?,'civil','https://civil.cqu.edu.cn/info/1/2.htm','研究生奖学金','2026-10-02','2026-10-11','报名材料')").bind(second).run();

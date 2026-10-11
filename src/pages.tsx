@@ -47,6 +47,7 @@ import {
   isPdf,
   safeNext,
 } from './components';
+import { OcrReading } from './ocr-reading';
 
 type RequestState<T> =
   | { kind: 'loading' }
@@ -473,14 +474,14 @@ export function ArticleDetailPage() {
         )}
       </div>
 
-      <section className="feed-detail-section" aria-labelledby="feed-body-title">
+      {article.ocr?.pages.length ? <OcrReading articleId={article.id} ocr={article.ocr} /> : <section className="feed-detail-section" aria-labelledby="feed-body-title">
         <h2 id="feed-body-title">统一阅读</h2>
         <div className="feed-article-body">
           {paragraphs.map((paragraph, index) => (
             <p key={index}>{paragraph}</p>
           ))}
         </div>
-      </section>
+      </section>}
 
       <section className="feed-detail-section" aria-labelledby="feed-attachments-title">
         <h2 id="feed-attachments-title">附件与 PDF</h2>

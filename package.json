@@ -18,8 +18,10 @@
     "pdfjs-dist": "6.3.289",
     "react": "19.3.0",
     "react-dom": "19.3.0",
+    "react-markdown": "^10.1.0",
     "react-pdf": "11.0.0",
     "react-router": "7.18.4",
+    "remark-gfm": "^4.0.1",
     "single-file-cli": "2.18.0",
     "unpdf": "1.8.1"
   },

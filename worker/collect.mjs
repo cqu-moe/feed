@@ -1,6 +1,7 @@
 import {Buffer} from 'node:buffer';
 import {readingText,readingExcerpt} from './reading.mjs';
 import {pdfText,PDF_TEXT_UNAVAILABLE} from './pdf-text.mjs';
+import {enqueuePdfOcr} from './pdf-ocr.mjs';
 import {script as bundle} from 'single-file-cli/lib/single-file-bundle.js';
 import options from './singlefile-options.json';
 import {captchaPage} from './page-action.mjs';
@@ -78,8 +79,12 @@ export async function collectArticle(env,source,article){
   report.status=status;report.attachmentCount=candidates.length;report.downloadedCount=completeFiles;
   report.downloads=(page.downloads??[]).map(({attempts,...row})=>({...row,attemptCount:attempts?.length??0}));
   report.artifacts.push(await put(env,prefix,'manifest.json',JSON.stringify(report,null,2),'application/json'));
-  statements.push(env.DB.prepare(`UPDATE articles SET captured_at=?,status=?,error=?,body_text=?,excerpt=?,prefix=?,content_hash=?,attachment_count=?,snapshot_key=?,screenshot_key=? WHERE id=?`)
+  statements.push(env.DB.prepare(`UPDATE articles SET captured_at=?,status=?,error=?,body_text=?,excerpt=?,prefix=?,content_hash=?,attachment_count=?,snapshot_key=?,screenshot_key=?,ocr_result_key=NULL,ocr_model=NULL,ocr_updated_at=NULL WHERE id=?`)
     .bind(report.capturedAt,status,report.errors.length?report.errors.join('; '):null,body,readingExcerpt(body),prefix,hash,candidates.length,snapshot?.key??null,screenshotKey,article.id));
   await env.DB.batch(statements);
+  if(env.PDF_OCR_ENABLED==='true'){
+    try{await enqueuePdfOcr(env,article.id,{publish:true});}
+    catch(error){console.error(JSON.stringify({event:'pdf_ocr_enqueue_failed',articleId:article.id,error:cleanError(error)}));}
+  }
   return {id:article.id,status,attachments:candidates.length,downloaded:completeFiles,creditsUsed:report.provider.creditsUsed};
 }
