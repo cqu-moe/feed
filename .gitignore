@@ -1,3 +1,8 @@
 node_modules/
 dist/
 .DS_Store
+.private/
+.wrangler/
+.dev.vars
+worker-configuration.d.ts
+artifacts/

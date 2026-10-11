@@ -1,28 +1,16 @@
-# 子系统开发入口
+# CQU Feed 开发入口
 
-本项目使用 CQU Moe Design。你负责业务实现，不负责重新设计基础控件。
+全云端通知采集、私有存档与统一阅读。用户业务需求以当前会话为准。
 
-1. 依赖未安装先读 README.md 完成安装。
-2. 从 node_modules/@cqu-moe/ui/dist/START-HERE.md 开始；再读 node_modules/@cqu-moe/ui/dist/DESIGN.md、dist/docs/agent-start.md。
-3. 按页面读取 dist/docs/ 下的布局、组件、图标、状态、通知、动效说明。参考页在 dist/examples/pages/，类型以 dist/index.d.ts 及其导出为准。
+- `README.md`：功能、来源范围、运行方式及已知边界。
+- `docs/operations.md`：Cloudflare、Auth、迁移、额度与运维。
+- `docs/acceptance.md`：实际验收证据与未验证事项。
+- `worker/workflow.mjs`、`discovery.mjs`、`collect.mjs`：云任务与存档。
+- `worker/page-action.mjs`、`bridge*.mjs`：Firecrawl 源站浏览器与临时 OCR/上传桥接。保留 origin、HMAC、有效期、文件签名和额度校验。
+- `worker/auth.mjs`：独立 BFF 会话。所有业务 API、R2 文件、截图、快照均实时检查 `feed.access`。
+- `worker/storage.mjs`：受保护文件流、Range 和静态快照。只给已保存的 PDF 嵌入自托管 PDF.js 阅读框；源站脚本与表单提交保持禁用。
+- `src/`：CQU Moe Design 1.1.0 阅读界面。先读 `node_modules/@cqu-moe/ui/dist/START-HERE.md`；基础组件来自 `@cqu-moe/ui`，样式使用语义变量，不覆盖 `.ds-*` 内部实现。
 
-- 基础组件仅从 @cqu-moe/ui 导入，图表从 @cqu-moe/ui/charts，图标从 lucide-react。
-- 复用 AppShell、ContentContainer、PageHeader、PageState；不复制基础组件、不覆盖 .ds-* 内部样式、不从源码路径导入。
-- 主题、单一 Toaster、首帧主题脚本和响应式规则已接入，不再另建。
-- 业务请求、认证、权限由本项目负责；演示数据/定时器须替换。真实成功依赖服务端确认。
-- 保持双主题、桌面/手机完整操作、键盘和减少动态效果。样式使用语义变量。
-- 具体设计用 emil-ask-emil 路由技能，动效用 animate；技能缺失时按包内具体规则执行并报告。
-- 交付前执行 pnpm build、pnpm check:design 和本项目交互测试，按 dist/docs/acceptance.md 报告结果、版本、例外及人工待验项。
-- 发现设计系统缺陷/缺口按 dist/docs/feedback-contract.md 提醒用户。只有明确授权和指定 issue 仓库才创建 issue；默认交付反馈记录，不自行分叉组件。
+采集不能依赖本机浏览器。不得提交 `.private/`、`.dev.vars`、OAuth 凭据或会话数据。R2 原始产物保留，派生文本可重建；不要把验证码 HTML 当成功附件。
 
-需要修改共享设计系统时回到它的源码仓库，遵守该仓库维护入口；不要把维护步骤混入本项目的业务工作。
-
-## 视觉与动效交付
-
-参考 https://vercel.com/design.md 的排版与分组原则：先明确本页主要任务，再安排主次、基线与间距，最后决定哪些内容需要边界。每条说明保留一个主要位置，不靠新增图标或色块填空。
-
-- 层次靠浅灰画布、白色内容卡片、细边界、轻投影、标题和间距。深色沿用石墨灰级差，不给整页或卡片染品牌色。
-- 并列区块优先标题在卡片外，内容用分隔行组织。高对比用于紧凑主按钮，次要动作描边或文字；普通卡片不能做成深灰反色大框。
-- 不添加装饰性彩色标题竖条、卡片顶边、绿色光晕和渐变；颜色仅表达链接与真实状态。
-- 复用共享按压、开关和浮层动效；键盘即时，减少动态效果取消位移与缩放，不对列表或整页做装饰入场。
-- 实际查看双主题与 390/768/1440 截图并检查 320 内容重排，报告视觉调整及未验证设备；编译通过不代表视觉验收。
+修改后执行 `pnpm test`、`pnpm build`、`pnpm check:design`、`git diff --check`。UI 修改另外验证真实登录、中文搜索、PDF/下载、双主题与响应式；编译通过不等于业务验收。部署前先应用 D1 迁移；部署与真实账号验证分开记录。

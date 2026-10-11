@@ -5,3 +5,4 @@ overrides:
 allowBuilds:
   esbuild: true
   '@parcel/watcher': true
+  workerd: true

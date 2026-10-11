@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cqu-feed",
+  "account_id": "a666c560407022706a52a703923548d5",
+  "main": "worker/index.mjs",
+  "compatibility_date": "2026-10-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "assets": {"directory":"./dist", "binding":"ASSETS", "not_found_handling":"single-page-application", "run_worker_first":true},
+  "vars": {
+    "BASE_URL":"https://cqu-feed.user-unauthorized.workers.dev",
+    "AUTH_BASE_URL":"https://auth.cqu.moe",
+    "MAX_FIRECRAWL_PER_DAY":"120",
+    "MAX_OCR_PER_DAY":"100",
+    "MAX_ARTICLES_PER_RUN":"40",
+    "CRAWL_ENABLED":"true"
+  },
+  "triggers":{"crons":["0 0 * * *"]},
+  "workflows":[{"name":"cqu-feed-ingest","binding":"INGEST","class_name":"FeedIngest"}],
+  "d1_databases":[{"binding":"DB","database_name":"cqu-feed-mvp","database_id":"ba632f5c-c3b4-4f3c-ad57-1ac89895b02a","migrations_dir":"migrations"}],
+  "r2_buckets":[{"binding":"ARCHIVE","bucket_name":"cqu-feed-archive"}],
+  "ai":{"binding":"AI"},
+  "services":[{"binding":"AUTH","service":"cqu-moe-auth"}],
+  "limits":{"cpu_ms":30000},
+  "observability":{"enabled":true,"head_sampling_rate":0.1,"logs":{"enabled":true,"invocation_logs":false},"traces":{"enabled":true,"head_sampling_rate":0.1}}
+}

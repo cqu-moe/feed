@@ -1,0 +1,48 @@
+[
+  {
+    "id": "jwc",
+    "name": "教务处",
+    "url": "https://jwc.cqu.edu.cn/",
+    "listUrls": [
+      "https://jwc.cqu.edu.cn/index/tzgg.htm",
+      "https://jwc.cqu.edu.cn/index/tzgg/xjgl.htm"
+    ],
+    "articlePattern": "^/info/\\d+/\\d+\\.htm$"
+  },
+  {
+    "id": "intex",
+    "name": "国际处",
+    "url": "https://intex.cqu.edu.cn/",
+    "listUrls": [
+      "https://intex.cqu.edu.cn/index/tzgg.htm"
+    ],
+    "articlePattern": "^/info/\\d+/\\d+\\.htm$"
+  },
+  {
+    "id": "civil",
+    "name": "土木学院",
+    "url": "https://civil.cqu.edu.cn/",
+    "listUrls": [
+      "https://civil.cqu.edu.cn/xzwb/tzgg.htm"
+    ],
+    "articlePattern": "^/info/\\d+/\\d+\\.htm$"
+  },
+  {
+    "id": "xgb",
+    "name": "学工部",
+    "url": "https://xgb.cqu.edu.cn/",
+    "listUrls": [
+      "https://xgb.cqu.edu.cn/list.jsp?urltype=tree.TreeTempUrl&wbtreeid=1024"
+    ],
+    "articlePattern": "^/info/\\d+/\\d+\\.htm$"
+  },
+  {
+    "id": "news",
+    "name": "新闻网",
+    "url": "https://news.cqu.edu.cn/",
+    "listUrls": [
+      "https://news.cqu.edu.cn/tzggjb.htm"
+    ],
+    "articlePattern": "^/info/1008/\\d+\\.htm$"
+  }
+]
