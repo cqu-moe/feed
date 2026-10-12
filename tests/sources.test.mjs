@@ -875,11 +875,16 @@ test('a later column association fans out an already ready shared event',async()
       assert.equal((await request(mf,`/internal/sources/${second}/discoveries`)).data.discoveries.length,1);
     });
 
-    const before=(await request(mf,`/internal/notification-events/${eventId}`)).data;
-    assert.deepEqual(before.sources.map(source=>source.sourceId).sort(),[first,second].sort());
-    assert.equal(before.matchTasks.length,2);
-    const verificationNow=Math.floor(Date.now()/60_000)*60_000+30_000;
+    let before;
+    await waitFor(async()=>{
+      before=(await request(mf,`/internal/notification-events/${eventId}`)).data;
+      assert.deepEqual(before.sources.map(source=>source.sourceId).sort(),[first,second].sort());
+      assert.equal(before.matchTasks.length,2);
+      assert.ok(before.matchTasks.every(task=>task.state==='succeeded'));
+    });
+    const verificationNow=Math.floor(Date.now()/60_000)*60_000+90_000;
     await control(mf,'clock',{now:verificationNow});
+    commitGate('match',{arm:true});
     const verified=await request(mf,`/internal/notification-events/${eventId}/date-verification`,{
       method:'POST',
       body:{requestId:'late-column-date-verification',sourceId:second,verifiedBy:'feed-admin',
@@ -888,9 +893,8 @@ test('a later column association fans out an already ready shared event',async()
     assert.equal(verified.status,202,JSON.stringify(verified));
     const pending=(await request(mf,`/internal/notification-events/${eventId}`)).data;
     assert.equal(pending.matchTasks.length,3,JSON.stringify(pending.matchTasks));
-    commitGate('match',{arm:true});
-    const dispatched=await control(mf,'dispatch',{});
-    assert.ok(dispatched.length>0,`date verification match outbox was not dispatched: ${JSON.stringify(pending.matchTasks)}`);
+    // A discovery Workflow can dispatch this outbox before this explicit drain.
+    await control(mf,'dispatch',{});
     await waitFor(async()=>assert.equal(commitGate('match').held,true));
 
     const inFlight=await userRequest(mf,cookie,`/api/subscriptions/${created.data.subscription.id}`);
