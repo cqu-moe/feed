@@ -159,12 +159,15 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
       if(!task)return null;
       if(!['discover','capture','ocr'].includes(task.kind))
         throw new ValidationError('Task recovery uses its business queue message');
+      requireCrawlRuntime(env);
       let workflowStatus=null;
-      if(['queued','starting','running'].includes(task.state)){
-        if(!task.workflow_instance_id){
-          const replayed=await runtime.requeueLaunch(task.id,task.attempt_no,now());
-          return {id:task.id,state:task.state,recovered:recovered(replayed),workflowStatus:null};
-        }
+      if(activeStates.includes(task.state)&&!task.workflow_instance_id){
+        const replayed=await runtime.requeueLaunch(task.id,task.attempt_no,now());
+        return {id:task.id,state:task.state,recovered:recovered(replayed),workflowStatus:null};
+      }
+      if(task.workflow_instance_id&&(activeStates.includes(task.state)||task.state==='failed'
+        ||task.state==='deferred'&&task.due_at<=now())){
+        const observedAttempt=task.attempt_no,observedInstance=task.workflow_instance_id;
         const instance=await selectWorkflow(env,{workflow,workflows},task.kind).get(task.workflow_instance_id);
         const status=await instance.status();
         workflowStatus=status.status;
@@ -172,13 +175,15 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
         task=await env.DB.prepare(`SELECT t.*,a.workflow_instance_id,a.handed_off_at
           FROM tasks t LEFT JOIN task_attempts a ON a.task_id=t.id AND a.attempt_no=t.attempt_no
           WHERE t.id=?`).bind(taskId).first();
-        if(['queued','starting','running'].includes(task.state))
+        // A status observation authorizes only the attempt that was actually queried.
+        if(task.attempt_no!==observedAttempt||task.workflow_instance_id!==observedInstance
+          ||!terminalPlatformStates.has(workflowStatus)||activeStates.includes(task.state))
           return {id:task.id,state:task.state,recovered:0,workflowStatus};
       }
       const due=task.state==='deferred'&&task.due_at<=now();
       if(!['failed','deferred'].includes(task.state)||!due&&task.state==='deferred')
         return {id:task.id,state:task.state,recovered:0,workflowStatus};
-      if(task.handed_off_at===null)
+      if(task.handed_off_at===null||!terminalPlatformStates.has(workflowStatus))
         return {id:task.id,state:task.state,recovered:0,workflowStatus};
       if(task.attempt_no>=maxAttempts){
         await env.DB.prepare(`UPDATE tasks SET state='blocked',last_error='retry_limit_reached',updated_at=?
@@ -188,8 +193,8 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
       const next=task.attempt_no+1,id=await launchOutboxId(task.id,next),timestamp=now();
       const result=await env.DB.batch([
         env.DB.prepare(`UPDATE tasks SET state='queued',attempt_no=?,due_at=?,checkpoint_json=NULL,last_error=NULL,updated_at=?
-          WHERE id=? AND attempt_no=? AND state IN ('failed','deferred')`)
-          .bind(next,timestamp,timestamp,task.id,task.attempt_no),
+          WHERE id=? AND attempt_no=? AND (state='failed' OR (state='deferred' AND due_at<=?))`)
+          .bind(next,timestamp,timestamp,task.id,task.attempt_no,timestamp),
         launchOutboxStatement(env,{id,taskId:task.id,attempt:next,timestamp}),
       ]);
       const changed=result[0].meta.changes>0;
@@ -291,10 +296,10 @@ async function recordOutboxReceipt(env,payload,state,timestamp,error=null){
   await env.DB.prepare(`INSERT INTO outbox_receipts(outbox_id,topic,state,attempts,last_error,processed_at,created_at,updated_at)
     VALUES (?,?,?,?,?,?,?,?)
     ON CONFLICT(outbox_id) DO UPDATE SET
-      state=CASE WHEN excluded.state='processed' THEN 'processed' ELSE outbox_receipts.state END,
+      state=CASE WHEN outbox_receipts.state='processed' OR excluded.state='processed' THEN 'processed' ELSE excluded.state END,
       attempts=attempts+1,
-      last_error=CASE WHEN excluded.state='processed' THEN NULL ELSE excluded.last_error END,
-      processed_at=CASE WHEN excluded.state='processed' THEN excluded.processed_at ELSE processed_at END,
+      last_error=CASE WHEN outbox_receipts.state='processed' OR excluded.state='processed' THEN NULL ELSE excluded.last_error END,
+      processed_at=COALESCE(processed_at,excluded.processed_at),
       updated_at=excluded.updated_at`)
     .bind(outboxId,topic,state,1,error?cleanError(error):null,state==='processed'?timestamp:null,timestamp,timestamp).run();
 }
@@ -389,7 +394,7 @@ async function finishTask(env,kind,taskId,attemptNo,result,now=()=>Date.now()){
     const retryAfter=Number.isFinite(result.retryAfterMs)?Math.max(0,result.retryAfterMs):0;
     if(retryAfter>24*60*60*1000)state='blocked';
     const jitter=(parseInt(taskId.slice(0,6),16)%60)*1000;
-    dueAt=timestamp+Math.max(Math.min(retryAfter,maxDelayMs),errorCode==='capture_busy'?60_000:Math.min(maxDelayMs,baseDelayMs*2**(attemptNo-1)+jitter));
+    dueAt=timestamp+Math.max(retryAfter,errorCode==='capture_busy'?60_000:Math.min(maxDelayMs,baseDelayMs*2**(attemptNo-1)+jitter));
   }else if(result.error){state='failed';errorCode=`${kind}_failed`;}
   await env.DB.batch([
     env.DB.prepare(`UPDATE tasks SET state=?,due_at=?,last_error=?,checkpoint_json=?,updated_at=?
@@ -475,4 +480,10 @@ function boundedInteger(value,fallback,min,max){const n=Number(value);return Num
 function boundedDuration(value,fallback,min,max){const n=Number(value);return Number.isSafeInteger(n)?Math.min(max,Math.max(min,n)):fallback;}
 function recovered(value){return Number(value);}
 export class ValidationError extends Error{}
+export function requireCrawlRuntime(env){
+  if(env.TASK_RUNTIME_ENABLED==='true'&&env.CRAWL_ENABLED==='true')return;
+  const error=new ValidationError('Crawl task runtime is disabled');
+  error.status=503;
+  throw error;
+}
 class SchemaError extends Error{}

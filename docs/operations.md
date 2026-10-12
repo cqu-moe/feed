@@ -35,7 +35,7 @@
 | `TASK_MAX_LAUNCH_ATTEMPTS` | `5` | start-job 出站投递恢复预算；超过后任务标记 `launch_delivery_exhausted` |
 | `TASK_LAUNCH_REPLAY_AFTER_MS` | `900000` | 已发送但未确认交接的 start-job 重放等待窗口 |
 | `TASK_RETRY_BASE_DELAY_MS` | `900000` | 429 等暂态任务失败的基础退避 |
-| `TASK_RETRY_MAX_DELAY_MS` | `21600000` | 单次任务重试与供应商 Retry-After 的上限 |
+| `TASK_RETRY_MAX_DELAY_MS` | `21600000` | 本地指数退避上限；不缩短供应商 Retry-After，超过 24 小时的供应商等待要求保持 blocked |
 | `QUEUE_DEAD_LETTER_AFTER_MS` | `900000` | 业务 outbox 被运营诊断列为可人工重放的最小等待窗口 |
 | `OPERATIONS_DIAGNOSTIC_LIMIT` | `20` | 每类诊断与管理界面单次展示上限，实际会限制在 1–100 |
 | `PDF_OCR_ENABLED` | `true` | 自动入队与每日补偿；不禁止显式 admin 对比任务 |
@@ -196,9 +196,13 @@ Firecrawl 429 保存为 `rate_limited` deferred，默认最多 3 次 attempt；4
 
 Worker 内没有列出 Cloudflare DLQ 原消息的 API。运营诊断以持久 outbox 与 `outbox_receipts` 为审查来源：超过 `QUEUE_DEAD_LETTER_AFTER_MS` 仍未 processed 的 sent 消息、或有失败回执的消息，按对应业务队列展示为候选；人工重放会把同一 JSON payload 发回原业务 Queue，消费者继续用 outbox/task/message 幂等身份去重。Cloudflare DLQ 中的原消息仍按平台保留策略存在，云端 DLQ 存量与告警属于 T17 隔离验收。
 
+人工重放先在 D1 原子占用新的等待窗口；并发或窗口内再次点击返回 409。诊断暂时隐藏窗口内候选。Queue 响应丢失或发送前进程退出也保留该窗口，到期后才可再次按原身份重放。消费者写入的 processed 回执和首次 processed 时间不会被迟到的 replay 或失败回执覆盖。
+
 指标包含最老 queued outbox/active task/immediate delivery、live 发现到 ready 的最小/最大延迟、必要缺项、Firecrawl/OCR 用量与页数、Auth unavailable、邮件 unknown，以及仍被版本或派生结果引用的不可变原件数量。诊断只覆盖 T03–T11 的 live 采集、版本、匹配和及时邮件链路；每日摘要、复查、补抓和迁移由各自任务接入恢复行为。
 
-指定任务恢复只从任务账本推进。`queued/starting/running` 先查同一 `task-<taskId>-a<attempt>` 实例；平台仍 active/waiting 时返回未恢复。只有确认 terminal 后，failed 或到期 deferred 才原子递增 attempt 并写入新 start-job outbox。402/预算耗尽保持 blocked，不自动进入付费重试。邮件 `submission_unknown` 只显示人工处理状态；未确认受理前不提供重发按钮，避免同一邮件重复投递。
+指定任务恢复只从任务账本推进。对已有实例的 active、failed 和到期 deferred 均查询同一 `task-<taskId>-a<attempt>` 的真实平台状态；平台仍 active/waiting 时返回未恢复，未知状态或查询失败不启动下一次尝试。只有确认该 attempt 的平台实例 terminal 后，failed 或到期 deferred 才原子递增 attempt 并写入新 start-job outbox。恢复及 start-job 人工重放要求 `TASK_RUNTIME_ENABLED`、`CRAWL_ENABLED` 同时开启；诊断读取、事件和邮件操作不受采集开关影响。402/预算耗尽保持 blocked，不自动进入付费重试。邮件 `submission_unknown` 只显示人工处理状态；未确认受理前不提供重发按钮，避免同一邮件重复投递。
+
+任务、attempt、requirement 和 Queue 回执的诊断错误统一脱敏，包含 JSON 凭据、Basic/Bearer、邮箱和 URL，原始 R2 证据保持原样。OCR 通过 input hash、processor、processor version、options hash 四元组追溯引用它的 requirements、通知版本和来源；任务及队列诊断返回有界 `references` 与截断标志，缺项诊断分别保留 OCR `taskId` 和 `captureTaskId`。管理面板可展开关联版本；每个 OCR trace 使用本次诊断 limit，最多 100 条。
 
 ## 4B. T05 不可变版本读写开关
 

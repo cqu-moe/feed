@@ -1,4 +1,5 @@
 import {cleanError} from './utils.mjs';
+import {requireCrawlRuntime} from './task-runtime.mjs';
 
 const idPattern=/^[a-f0-9]{24}$/;
 const topics=['feed-jobs','feed-events','feed-mail'];
@@ -33,14 +34,14 @@ export function createOperations(env,{now=()=>Date.now()}={}){
     async replay(input){
       validateReplay(input);
       const at=timestamp(),row=await env.DB.prepare(`SELECT o.id,o.topic,o.payload_json,o.state,o.updated_at,
-          r.state AS receipt_state
+          r.state AS receipt_state,r.last_replayed_at
         FROM outbox o LEFT JOIN outbox_receipts r ON r.outbox_id=o.id WHERE o.id=?`)
         .bind(input.outboxId).first();
       if(!row)throw operationsError('Outbox message not found',404);
       if(row.topic!==input.topic)throw operationsError('Outbox topic does not match the selected queue',409);
       if(row.state!=='sent')throw operationsError('Outbox message is not in its sent state',409);
       if(row.receipt_state==='processed')throw operationsError('Outbox message was already processed',409);
-      if(at-row.updated_at<queueDeadLetterAfterMs)
+      if(at-Math.max(row.updated_at,row.last_replayed_at??0)<queueDeadLetterAfterMs)
         throw operationsError('Outbox message has not exceeded the Queue retry window',409);
       const target=row.topic==='feed-jobs'?env.FEED_JOBS:row.topic==='feed-events'?env.FEED_EVENTS:env.FEED_MAIL;
       if(!target)throw operationsError(`Queue binding unavailable for ${row.topic}`,503);
@@ -48,12 +49,24 @@ export function createOperations(env,{now=()=>Date.now()}={}){
       try{payload=JSON.parse(row.payload_json);}catch{throw operationsError('Outbox payload is invalid',500);}
       const links=await linksFor(payload);
       if(!inScope(payload,links))throw operationsError('Outbox message belongs to a separately owned business flow',409);
-      await target.send(payload,{contentType:'json'});
-      await env.DB.prepare(`INSERT INTO outbox_receipts(outbox_id,topic,state,attempts,replay_count,last_error,last_replayed_at,created_at,updated_at)
-        VALUES (?,?, 'queued',0,1,NULL,?,?,?)
+      if(payload.type==='start-job')requireCrawlRuntime(env);
+      // Claim before sending: a fast consumer may already have processed this message when send resolves.
+      const claimed=await env.DB.prepare(`INSERT INTO outbox_receipts(outbox_id,topic,state,attempts,replay_count,last_error,last_replayed_at,created_at,updated_at)
+        SELECT id,topic,'queued',0,1,NULL,?,?,? FROM outbox WHERE id=? AND state='sent' AND updated_at<=?
         ON CONFLICT(outbox_id) DO UPDATE SET state='queued',replay_count=replay_count+1,last_error=NULL,
-          last_replayed_at=excluded.last_replayed_at,updated_at=excluded.updated_at`)
-        .bind(row.id,row.topic,at,at,at).run();
+          last_replayed_at=excluded.last_replayed_at,updated_at=excluded.updated_at
+        WHERE outbox_receipts.state<>'processed'
+          AND (outbox_receipts.last_replayed_at IS NULL OR outbox_receipts.last_replayed_at<=?)`)
+        .bind(at,at,at,row.id,at-queueDeadLetterAfterMs,at-queueDeadLetterAfterMs).run();
+      if(!claimed.meta.changes)throw operationsError('Outbox replay is already claimed or processed',409);
+      try{await target.send(payload,{contentType:'json'});}
+      catch(error){
+        // An ambiguous Queue response retains its wait window and cannot overwrite a processed receipt.
+        await env.DB.prepare(`UPDATE outbox_receipts SET state='failed',last_error=?,updated_at=?
+          WHERE outbox_id=? AND state<>'processed' AND last_replayed_at=?`)
+          .bind(cleanError(error),timestamp(),row.id,at).run();
+        throw error;
+      }
       return {outboxId:row.id,topic:row.topic,replayed:true,replayCount:await receiptReplayCount(row.id)};
     },
   };
@@ -66,11 +79,12 @@ export function createOperations(env,{now=()=>Date.now()}={}){
         FROM outbox o LEFT JOIN outbox_receipts r ON r.outbox_id=o.id
         WHERE o.topic=? AND o.state='sent' AND o.updated_at<=?
           AND (r.outbox_id IS NULL OR r.state<>'processed')
-        ORDER BY o.updated_at,o.id LIMIT ?`).bind(topic,at-queueDeadLetterAfterMs,pageSize).all();
+          AND (r.last_replayed_at IS NULL OR r.last_replayed_at<=?)
+        ORDER BY o.updated_at,o.id LIMIT ?`).bind(topic,at-queueDeadLetterAfterMs,at-queueDeadLetterAfterMs,pageSize).all();
       const items=[];
       for(const row of rows.results){
         const payload=parseIdentity(row.payloadJson??row.payload_json);
-        const links=await linksFor(payload);
+        const links=await linksFor(payload,pageSize);
         if(!inScope(payload,links))continue;
         items.push({
           outboxId:row.outboxId,topic,messageType:payload?.type??'unknown',kind:'queue_handoff',
@@ -97,31 +111,36 @@ export function createOperations(env,{now=()=>Date.now()}={}){
           OR (t.state IN ('queued','starting','running') AND t.updated_at<=?))
       ORDER BY CASE t.state WHEN 'failed' THEN 0 WHEN 'blocked' THEN 1 WHEN 'deferred' THEN 2 ELSE 3 END,
         t.updated_at,t.id LIMIT ?`).bind(at-queueDeadLetterAfterMs,pageSize).all();
-    return rows.results.map(row=>({
+    return Promise.all(rows.results.map(async row=>({
       id:row.id,kind:taskKind(row),taskKind:row.taskKind??row.kind,state:row.state,
+      taskId:row.id,
       sourceId:row.sourceId,articleId:row.articleId,revisionId:row.revisionId,eventId:row.eventId,
+      ...(row.kind==='ocr'?await ocrLinks(row.id,pageSize):{}),
       attemptNo:row.attemptNo,dueAt:isoOrNull(row.dueAt),createdAt:isoOrNull(row.createdAt),
       updatedAt:isoOrNull(row.updatedAt),workflowInstanceId:row.workflowInstanceId,
-      handedOffAt:isoOrNull(row.handedOffAt),errorCode:row.errorCode,lastError:redact(row.lastError),
-    }));
+      handedOffAt:isoOrNull(row.handedOffAt),errorCode:redact(row.errorCode),lastError:redact(row.lastError),
+    })));
   }
 
   async function requirementDiagnostics(pageSize){
     const rows=await env.DB.prepare(`SELECT q.revision_id AS revisionId,q.slot_key AS slotKey,q.kind AS requirementKind,
-        q.state,q.error_code AS errorCode,r.article_id AS articleId,r.capture_task_id AS taskId,
+        q.state,q.error_code AS errorCode,r.article_id AS articleId,r.capture_task_id AS captureTaskId,
+        CASE WHEN q.kind='body_ocr' THEN ocr.id ELSE r.capture_task_id END AS taskId,
         a.source_id AS sourceId,e.id AS eventId
       FROM revision_requirements q
       JOIN article_revisions r ON r.id=q.revision_id
       JOIN articles a ON a.id=r.article_id
       JOIN tasks owner ON owner.id=r.capture_task_id AND owner.kind IN ('discover','capture','ocr')
+      LEFT JOIN tasks ocr ON ocr.kind='ocr'
+        AND ocr.business_key=json_array('ocr',q.input_hash,q.processor,q.processor_version,q.options_hash)
       LEFT JOIN content_events e ON e.revision_id=r.id
       WHERE q.required=1 AND q.state<>'fulfilled'
       ORDER BY CASE q.state WHEN 'failed' THEN 0 ELSE 1 END,r.observed_at,q.revision_id,q.slot_key LIMIT ?`)
       .bind(pageSize).all();
     return rows.results.map(row=>({
       kind:'missing_requirement',revisionId:row.revisionId,slotKey:row.slotKey,requirementKind:row.requirementKind,
-      state:row.state,errorCode:row.errorCode,articleId:row.articleId,
-      sourceId:row.sourceId,taskId:row.taskId,eventId:row.eventId,
+      state:row.state,errorCode:redact(row.errorCode),articleId:row.articleId,
+      sourceId:row.sourceId,taskId:row.taskId,captureTaskId:row.captureTaskId,eventId:row.eventId,
     }));
   }
 
@@ -193,10 +212,10 @@ export function createOperations(env,{now=()=>Date.now()}={}){
     };
   }
 
-  async function linksFor(payload){
+  async function linksFor(payload,referenceLimit=limit){
     const links={};
-    if(idPattern.test(payload?.taskId??''))Object.assign(links,await cached('task',payload.taskId,taskLink));
-    if(idPattern.test(payload?.discoveryTaskId??''))Object.assign(links,await cached('task',payload.discoveryTaskId,taskLink));
+    if(idPattern.test(payload?.taskId??''))Object.assign(links,await cached('task',payload.taskId,id=>taskLink(id,referenceLimit)));
+    if(idPattern.test(payload?.discoveryTaskId??''))Object.assign(links,await cached('task',payload.discoveryTaskId,id=>taskLink(id,referenceLimit)));
     if(idPattern.test(payload?.eventId??''))Object.assign(links,await cached('event',payload.eventId,eventLink));
     if(idPattern.test(payload?.revisionId??''))Object.assign(links,await cached('revision',payload.revisionId,revisionLink));
     if(idPattern.test(payload?.articleId??''))Object.assign(links,await cached('article',payload.articleId,articleLink));
@@ -213,12 +232,32 @@ export function createOperations(env,{now=()=>Date.now()}={}){
     return cache.get(key);
   }
 
-  async function taskLink(id){
-    return env.DB.prepare(`SELECT t.id AS taskId,t.kind AS taskKind,t.source_id AS sourceId,t.article_id AS articleId,
+  async function taskLink(id,referenceLimit){
+    const row=await env.DB.prepare(`SELECT t.id AS taskId,t.kind AS taskKind,COALESCE(t.source_id,a.source_id) AS sourceId,t.article_id AS articleId,
         r.id AS revisionId,e.id AS eventId
       FROM tasks t LEFT JOIN articles a ON a.id=t.article_id
       LEFT JOIN article_revisions r ON r.capture_task_id=t.id
       LEFT JOIN content_events e ON e.revision_id=r.id WHERE t.id=?`).bind(id).first();
+    return row?.taskKind==='ocr'?{...row,...await ocrLinks(id,referenceLimit)}:row;
+  }
+
+  async function ocrLinks(id,referenceLimit){
+    const rows=await env.DB.prepare(`SELECT q.revision_id AS revisionId,q.slot_key AS slotKey,
+        q.state,r.article_id AS articleId,r.capture_task_id AS captureTaskId,a.source_id AS sourceId,e.id AS eventId
+      FROM tasks t JOIN revision_requirements q ON q.kind='body_ocr'
+        AND q.input_hash=json_extract(t.payload_json,'$.inputHash')
+        AND q.processor=json_extract(t.payload_json,'$.processor')
+        AND q.processor_version=json_extract(t.payload_json,'$.processorVersion')
+        AND q.options_hash=json_extract(t.payload_json,'$.optionsHash')
+      JOIN article_revisions r ON r.id=q.revision_id JOIN articles a ON a.id=r.article_id
+      LEFT JOIN content_events e ON e.revision_id=r.id
+      WHERE t.id=? AND t.kind='ocr' ORDER BY q.revision_id,q.slot_key LIMIT ?`)
+      .bind(id,referenceLimit+1).all();
+    const references=rows.results.slice(0,referenceLimit),first=references[0];
+    return {
+      ...(first?{sourceId:first.sourceId,articleId:first.articleId,revisionId:first.revisionId,eventId:first.eventId}:{}),
+      references,referencesTruncated:rows.results.length>referenceLimit,
+    };
   }
 
   async function eventLink(id){
@@ -309,9 +348,7 @@ function parseIdentity(value){
 
 function redact(value){
   if(value===null||value===undefined)return null;
-  return cleanError(value)
-    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi,'[email]')
-    .replace(/\b(api[_-]?key|token|secret|password)\b\s*[:=]\s*\S+/gi,'$1=[redacted]');
+  return cleanError(value);
 }
 
 function isoOrNull(value){

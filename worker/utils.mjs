@@ -4,9 +4,9 @@ export const json = (value, status = 200) => Response.json(value, { status, head
 export const sha = async value => Buffer.from(await crypto.subtle.digest('SHA-256', typeof value === 'string' ? encoder.encode(value) : value)).toString('hex');
 export const cleanError = error => String(error?.message ?? error)
   .replace(/https?:\/\/\S+/g, '[URL]')
-  .replace(/Bearer\s+\S+/gi,'[token]')
+  .replace(/\b(?:Bearer|Basic)\s+[^\s,;"'}]+/gi,'[token]')
   .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi,'[email]')
-  .replace(/\b(api[_-]?key|token|secret|password)\b\s*[:=]\s*\S+/gi,'$1=[redacted]')
+  .replace(/\b((?:api[_-]?key|(?:access[_-]?|refresh[_-]?|auth[_-]?)?token|(?:client[_-]?)?secret|password|authorization))\b["']?\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}]+)/gi,'$1=[redacted]')
   .slice(0, 400);
 export async function equal(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;

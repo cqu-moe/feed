@@ -8,6 +8,7 @@ type BusinessId = string | null;
 type Identity = {
   sourceId: BusinessId;
   taskId: BusinessId;
+  captureTaskId: BusinessId;
   revisionId: BusinessId;
   eventId: BusinessId;
   articleId: BusinessId;
@@ -15,7 +16,12 @@ type Identity = {
   deliveryId: BusinessId;
 };
 
-type QueueDeadLetter = Identity & {
+type ReferenceTrace = {
+  references: Array<Identity & { slotKey: string }>;
+  referencesTruncated: boolean;
+};
+
+type QueueDeadLetter = Identity & ReferenceTrace & {
   outboxId: string;
   topic: 'feed-jobs' | 'feed-events' | 'feed-mail';
   messageType: string;
@@ -26,7 +32,7 @@ type QueueDeadLetter = Identity & {
   lastError: string | null;
 };
 
-type TaskDiagnostic = Identity & {
+type TaskDiagnostic = Identity & ReferenceTrace & {
   id: string;
   kind: string;
   state: string;
@@ -98,6 +104,7 @@ const kindLabels: Record<string, string> = {
 const idLabels: Array<[keyof Identity, string]> = [
   ['sourceId', '来源'],
   ['taskId', '任务'],
+  ['captureTaskId', '采集任务'],
   ['revisionId', '版本'],
   ['eventId', '事件'],
   ['articleId', '通知'],
@@ -126,11 +133,25 @@ function parseIdentity(value: unknown): Identity {
   return {
     sourceId: optionalId(value.sourceId),
     taskId: optionalId(value.taskId),
+    captureTaskId: optionalId(value.captureTaskId),
     revisionId: optionalId(value.revisionId),
     eventId: optionalId(value.eventId),
     articleId: optionalId(value.articleId),
     messageId: optionalId(value.messageId),
     deliveryId: optionalId(value.deliveryId),
+  };
+}
+
+function parseReferences(value: Record<string, unknown>): ReferenceTrace {
+  if (value.references === undefined) return { references: [], referencesTruncated: false };
+  if (!Array.isArray(value.references) || value.references.length > 100 || typeof value.referencesTruncated !== 'boolean')
+    throw new Error('OCR 关联版本数据不完整。');
+  return {
+    references: value.references.map(reference => {
+      if (!isRecord(reference) || typeof reference.slotKey !== 'string') throw new Error('OCR 关联版本数据不完整。');
+      return { ...parseIdentity(reference), slotKey: reference.slotKey };
+    }),
+    referencesTruncated: value.referencesTruncated,
   };
 }
 
@@ -141,7 +162,7 @@ function parseQueueItem(value: unknown): QueueDeadLetter {
     || !nonNegativeInteger(value.attempts) || !nonNegativeInteger(value.replayCount)
     || !nonNegativeInteger(value.ageMs) || (value.lastError !== null && typeof value.lastError !== 'string'))
     throw new Error('队列诊断数据不完整。');
-  return { ...parseIdentity(value), ...(value as QueueDeadLetter) };
+  return { ...(value as QueueDeadLetter), ...parseIdentity(value), ...parseReferences(value) };
 }
 
 function parseTask(value: unknown): TaskDiagnostic {
@@ -153,7 +174,7 @@ function parseTask(value: unknown): TaskDiagnostic {
     || (value.errorCode !== null && typeof value.errorCode !== 'string')
     || (value.lastError !== null && typeof value.lastError !== 'string'))
     throw new Error('任务诊断数据不完整。');
-  return { ...parseIdentity(value), ...(value as TaskDiagnostic) };
+  return { ...(value as TaskDiagnostic), ...parseIdentity(value), ...parseReferences(value) };
 }
 
 function parseRequirement(value: unknown): RequirementDiagnostic {
@@ -318,6 +339,7 @@ export function AdminOperationsPanel({ token }: { token: string }) {
               <span className="feed-status">{kindLabels[item.kind] ?? item.kind}</span>
             </div>
             <IdentityLinks identity={item} />
+            <ReferenceLinks trace={item} />
             <p>等待 {formatDuration(item.ageMs)} · 出站 {item.attempts} 次 · 人工重放 {item.replayCount} 次</p>
             {item.lastError && <p className="feed-mail-reason">{item.lastError}</p>}
             <Button type="button" variant="outline" disabled={Boolean(busyAction)}
@@ -339,6 +361,7 @@ export function AdminOperationsPanel({ token }: { token: string }) {
                   <span className="feed-status">{task.state}</span>
                 </div>
                 <IdentityLinks identity={task} />
+                <ReferenceLinks trace={task} />
                 {task.workflowInstanceId && <p className="feed-admin-id">实例：{task.workflowInstanceId}</p>}
                 {task.errorCode && <p className="feed-mail-reason">{task.errorCode}</p>}
                 {task.lastError && <p className="feed-mail-reason">{task.lastError}</p>}
@@ -394,6 +417,23 @@ function IdentityLinks({ identity }: { identity: Identity }) {
   return <p className="feed-operations-links">
     {links.map(([key, label]) => <span key={key}>{label} <code>{identity[key]}</code></span>)}
   </p>;
+}
+
+function ReferenceLinks({ trace }: { trace: ReferenceTrace }) {
+  const [expanded, setExpanded] = useState(false);
+  if (!trace.references.length) return null;
+  return <div>
+    <Button type="button" variant="ghost" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
+      {expanded ? '收起' : '查看'} OCR 关联版本（{trace.references.length}{trace.referencesTruncated ? '+' : ''}）
+    </Button>
+    {expanded && <>
+      {trace.references.map(reference => <div key={`${reference.revisionId}:${reference.slotKey}`}>
+        <p>{reference.slotKey}</p>
+        <IdentityLinks identity={reference} />
+      </div>)}
+      {trace.referencesTruncated && <p className="feed-admin-note">关联版本已达到本次展示上限，还有版本未展示。</p>}
+    </>}
+  </div>;
 }
 
 function formatDuration(value: number): string {
