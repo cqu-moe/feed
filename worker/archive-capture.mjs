@@ -1,10 +1,9 @@
 import {adoptObject,storeTextObject,verifyObject} from './archive-objects.mjs';
 import {sha} from './utils.mjs';
-import {readingText} from './reading.mjs';
+import {fingerprintContent} from './archive-fingerprint.mjs';
 import {commitCaptureRevision} from './archive-versions.mjs';
 
 const journalKey=taskId=>`captures/${taskId}/result.json`;
-const semanticText=value=>String(value).normalize('NFKC').replace(/\s+/g,' ').trim();
 
 export async function resumeSavedCapture(env,source,article,context){
   const object=await env.ARCHIVE.get(journalKey(context.taskId));
@@ -17,7 +16,7 @@ export async function resumeSavedCapture(env,source,article,context){
   return commitCaptureRevision(env,capture,context);
 }
 
-export async function saveCaptureRevision(env,source,article,context,{report,stored,candidates,downloaded,body,rawBody,sourceMarkup,nativePdfs,sourceTitle}){
+export async function saveCaptureRevision(env,source,article,context,{report,stored,candidates,downloaded,body,rawBody,migrationBody=body,sourceMarkup,nativePdfs,sourceTitle}){
   const prefix=`articles/${article.id}/${report.runId}`,objects=new Map(),byName=new Map();
   for(const saved of report.artifacts){
     const object=await adoptObject(env,saved,prefix);
@@ -50,11 +49,12 @@ export async function saveCaptureRevision(env,source,article,context,{report,sto
   const markupObject=sourceMarkup===null?null:await storeTextObject(env,sourceMarkup,'text/html; charset=utf-8');
   if(markupObject)objects.set(markupObject.sha256,markupObject);
   const rawFingerprint=await sha(JSON.stringify({v:1,title,body:rawBodyObject.sha256,markup:markupObject?.sha256??null,files:fileIdentity.map(row=>[row.originalUrl,row.name,row.kind,row.objectHash])}));
-  const semanticFingerprint=await sha(JSON.stringify({v:1,title:semanticText(title),body:semanticText(readingText(rawBody)),files:fileIdentity.map(row=>[semanticText(row.name),row.kind,row.objectHash])}));
+  const semanticFingerprint=await fingerprintContent({title,body:rawBody,files:fileIdentity});
+  const migrationSemanticFingerprint=await fingerprintContent({title,body:migrationBody,files:fileIdentity});
   const capture={v:1,taskId:context.taskId,articleId:article.id,sourceId:source.id,url:article.url,
     revisionNo:context.observationNo,observedAt,title,publishedAt:article.published_at==='unknown'?null:article.published_at??null,body,
     sourceMetadata:{sourceId:source.id,sourceUrl:source.url,configVersion:source.configVersion??1,captureIntent:context.captureIntent??'live'},
-    rawFingerprint,semanticFingerprint,sourceBodyHash:rawBodyObject.sha256,sourceMarkupHash:markupObject?.sha256??null,requirements,diagnostics:report.errors,objects:[...objects.values()],
+    rawFingerprint,semanticFingerprint,migrationSemanticFingerprint,sourceBodyHash:rawBodyObject.sha256,sourceMarkupHash:markupObject?.sha256??null,requirements,diagnostics:report.errors,objects:[...objects.values()],
     creditsUsed:report.provider.creditsUsed??null};
   const manifest=await storeTextObject(env,JSON.stringify(capture),'application/json');
   capture.manifestHash=manifest.sha256;capture.objects.push(manifest);

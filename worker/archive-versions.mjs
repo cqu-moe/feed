@@ -1,5 +1,6 @@
 import {sha} from './utils.mjs';
 import {readingExcerpt} from './reading.mjs';
+import {fingerprintContent} from './archive-fingerprint.mjs';
 import {adoptExistingOcrStatements,ocrTaskStatements,withOcrIdentity} from './archive-ocr.mjs';
 import {applyOcrEntries,flattenOcrEntries,validateOcrProjection} from './archive-ocr-view.mjs';
 
@@ -26,13 +27,19 @@ export async function commitCaptureRevision(env,capture,context){
   }
   const previous=await env.DB.prepare(`SELECT id,state,raw_fingerprint,semantic_fingerprint FROM article_revisions
     WHERE article_id=? AND revision_no<? ORDER BY revision_no DESC LIMIT 1`).bind(capture.articleId,capture.revisionNo).first();
-  const previousReady=await env.DB.prepare(`SELECT semantic_fingerprint FROM article_revisions
+  const previousReady=await env.DB.prepare(`SELECT semantic_fingerprint,fingerprint_version FROM article_revisions
     WHERE article_id=? AND revision_no<? AND state='ready' ORDER BY revision_no DESC LIMIT 1`).bind(capture.articleId,capture.revisionNo).first();
   // An incomplete observation keeps its original inventory. A fresh capture may
   // form a complete candidate, but may not fill unknown old bytes with new files.
   const unchanged=previous?.state==='ready'&&previous.raw_fingerprint===capture.rawFingerprint;
   const revisionId=unchanged?previous.id:(await sha(`revision:${taskId}`)).slice(0,24);
-  const changeKind=!previousReady?'baseline':previousReady.semantic_fingerprint===capture.semanticFingerprint?'presentation_only':'substantive';
+  // MVP body.txt includes native PDF text or its unavailable marker. Compare
+  // against that same representation without rewriting the immutable baseline.
+  const comparableFingerprint=previousReady?.fingerprint_version==='migration-body-files-v1'
+    ?capture.migrationSemanticFingerprint??await fingerprintContent({title:capture.title,body:capture.body,
+      files:requirements.filter(row=>row.kind==='attachment'||row.kind==='body_pdf')})
+    :capture.semanticFingerprint;
+  const changeKind=!previousReady?'baseline':previousReady.semantic_fingerprint===comparableFingerprint?'presentation_only':'substantive';
   const blocked=requirements.some(row=>row.required&&row.state==='failed');
   const statements=capture.objects.map(object=>env.DB.prepare(`INSERT INTO artifact_objects(sha256,r2_key,byte_size,media_type,verified_at)
     SELECT ?,?,?,?,? WHERE ${guard} ON CONFLICT(sha256) DO NOTHING`)

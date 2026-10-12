@@ -1,7 +1,7 @@
 import {Buffer} from 'node:buffer';
 import {cleanError,sha,fileKind} from './utils.mjs';
 import {reconcileRevision} from './archive-reconcile.mjs';
-import {readingText} from './reading.mjs';
+import {fingerprintContent} from './archive-fingerprint.mjs';
 import {pdfPages} from './pdf-text.mjs';
 
 const RUN_ID='mvp-v1';
@@ -288,10 +288,8 @@ export function createArchiveMigration(env,{now=()=>Date.now()}={}){
     const originalObjects=[...objects.values()].filter(object=>!object.derived);
     const rawFingerprint=await sha(JSON.stringify({v:1,title:article.title,
       files:inventory.map(row=>[row.slotKey,row.kind,row.objectHash,row.inputHash])}));
-    const semanticFingerprint=await sha(JSON.stringify({v:1,title:normalizeText(article.title),
-      body:normalizeText(readingText(body?.text??'')),
-      files:inventory.filter(row=>row.kind==='attachment'||row.kind==='body_pdf')
-        .map(row=>[normalizeText(row.name??''),row.kind,row.objectHash])}));
+    const semanticFingerprint=await fingerprintContent({title:article.title,body:body?.text??'',
+      files:inventory.filter(row=>row.kind==='attachment'||row.kind==='body_pdf')});
     const result={v:1,articleId,revisionId,state:missingRequired?'blocked':'assembling'};
     const sourceStatements=await sourceStatementsFor({article,sourceRows,timestamp:now()});
     const statements=[...objectStatements(env,objects),
@@ -698,8 +696,8 @@ export function createArchiveMigration(env,{now=()=>Date.now()}={}){
       const bodyText=await(await env.ARCHIVE.get(immutableKey(body.object_hash))).text();
       const files=complete.results.filter(row=>['attachment','body_pdf'].includes(row.kind))
         .sort((a,b)=>Number(a.slot_key.split(':')[1])-Number(b.slot_key.split(':')[1]));
-      const semanticFingerprint=await sha(JSON.stringify({v:1,title:normalizeText(context.revision_title),
-        body:normalizeText(readingText(bodyText)),files:files.map(row=>[normalizeText(row.name??''),row.kind,row.object_hash])}));
+      const semanticFingerprint=await fingerprintContent({title:context.revision_title,body:bodyText,
+        files:files.map(row=>({...row,objectHash:row.object_hash}))});
       await env.DB.prepare(`UPDATE article_revisions SET state='assembling',semantic_fingerprint=? WHERE id=? AND state='blocked'
         AND NOT EXISTS(SELECT 1 FROM revision_requirements q WHERE q.revision_id=article_revisions.id AND q.required=1 AND q.state<>'fulfilled')`)
         .bind(semanticFingerprint,context.revision_id).run();
@@ -954,7 +952,6 @@ function validatedSize(value){
 }
 const size=(value,fallbionValue=20)=>Number.isSafeInteger(value)?Math.min(100,Math.max(1,value)):fallbionValue;
 const itemFrom=({code,message})=>({code,message});
-const normalizeText=value=>String(value??'').normalize('NFKC').replace(/\s+/g,' ').trim();
 function normalizedDay(value){
   const day=String(value??'').match(/^(20\d{2})-(\d{2})-(\d{2})$/)?.[0];
   return day&&Number.isFinite(Date.parse(day))&&new Date(day).toISOString().startsWith(day)?day:null;

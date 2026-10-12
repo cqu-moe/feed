@@ -59,6 +59,7 @@ async function collectArticle(env,source,article,dependencies,captureContext){
   }
   let body=page.bodyText?.trim()||((page.downloads??[]).some(row=>row.role==='body-pdf')?'':data.markdown||'');
   const rawBody=body,nativePdfs=new Set();
+  let migrationBody=body;
   // PDF-only notices still have searchable, unified text; original PDF remains authoritative.
   for(const row of page.downloads??[]){
     const saved=stored.get(row.saved?.name);
@@ -68,6 +69,8 @@ async function collectArticle(env,source,article,dependencies,captureContext){
         const analysis=await pdfPages(await object.arrayBuffer());
         const nativeText=analysis.pages.filter(page=>!page.needsOcr).map(page=>page.text.trim()).filter(Boolean).join('\n\n');
         const fullyNative=analysis.pages.length&&!analysis.pages.some(page=>page.needsOcr);
+        // MVP appended every available native page, including mixed PDFs.
+        migrationBody+='\n\n'+(nativeText||PDF_TEXT_UNAVAILABLE);
         if(fullyNative)nativePdfs.add(saved.name);
         // While OCR is required, keep the captured HTML body and marker only. The
         // adopted per-page result later replaces that marker without duplicating native text.
@@ -112,7 +115,7 @@ async function collectArticle(env,source,article,dependencies,captureContext){
   report.status=status;report.attachmentCount=candidates.length;report.downloadedCount=completeFiles;
   report.downloads=(page.downloads??[]).map(({attempts,...row})=>({...row,attemptCount:attempts?.length??0}));
   report.artifacts.push(await put(env,prefix,'manifest.json',JSON.stringify(report,null,2),'application/json'));
-  if(versioned)return saveCaptureRevision(env,source,article,captureContext,{report,stored,candidates,downloaded,body,rawBody,sourceMarkup:page.bodyHtml??null,nativePdfs,sourceTitle:page.heading||page.page.title});
+  if(versioned)return saveCaptureRevision(env,source,article,captureContext,{report,stored,candidates,downloaded,body,rawBody,migrationBody,sourceMarkup:page.bodyHtml??null,nativePdfs,sourceTitle:page.heading||page.page.title});
   const result={id:article.id,status,attachments:candidates.length,downloaded:completeFiles,creditsUsed:report.provider.creditsUsed};
   // One eligibility cutoff for the entire atomic batch, after all R2 writes. A later
   // claimant changes the fence; the clock cannot expire between individual writes.

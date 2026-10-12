@@ -181,28 +181,33 @@ test('migration repair uses the frozen original hash even if legacy metadata lat
     assert.deepEqual(new Uint8Array(await saved.arrayBuffer()),new Uint8Array(original));
     assert.equal((await(await read(`/api/articles/${articleId}/revisions`)).json()).revisions.length,1);
 
-    const taskId='abcdefabcdefabcdef123456',clock=Date.now();
-    await db.prepare(`INSERT INTO tasks(id,kind,business_key,source_id,article_id,payload_json,state,due_at,attempt_no,created_at,updated_at)
-      VALUES (?,'capture','migration-identical-recheck','jwc',?,'{}','running',?,1,?,?)`)
-      .bind(taskId,articleId,clock,clock,clock).run();
-    await db.prepare(`INSERT INTO task_attempts(task_id,attempt_no,workflow_instance_id,state,started_at)
-      VALUES (?,1,'migration-recheck','running',?)`).bind(taskId,clock).run();
-    const body=await(await bucket.get(legacy.keys.body)).text();
-    const snapshot=await(await bucket.get(legacy.keys.snapshot)).text();
-    const files=[{filename:'attachment-1.pdf',key:legacy.keys.pdf,url:'https://jwc.cqu.edu.cn/body.pdf',name:'正文.pdf',role:'body-pdf'},
-      {filename:'attachment-2.pdf',key:legacy.keys.normal,url:'https://jwc.cqu.edu.cn/normal.pdf',name:'普通附件.pdf',role:'attachment'}];
-    const artifacts=await Promise.all(files.map(async file=>({name:file.filename,contentType:'application/pdf',
-      base64:Buffer.from(await(await bucket.get(file.key)).arrayBuffer()).toString('base64')})));
-    artifacts.push({name:'offline.html',contentType:'text/html',base64:Buffer.from(snapshot).toString('base64')});
-    const recaptured=await mf.dispatchFetch('https://feed.test/fixture/capture',{method:'POST',body:JSON.stringify({taskId,
-      page:{bodyRecognized:true,page:{url:articleUrl,title:'迁移通知'},bodyText:body,errors:[],artifacts,
-        attachmentCandidates:files.map(file=>({url:file.url,name:file.name,role:file.role})),
-        downloads:files.map(file=>({url:file.url,role:file.role,originalFile:true,saved:{name:file.filename},fetchedAt:new Date(clock).toISOString()}))}})});
-    assert.equal(recaptured.status,200,await recaptured.clone().text());
-    const captured=await recaptured.json();
-    assert.ok(captured.revisionId,JSON.stringify(captured));
-    const sameSource=await(await read(`/api/articles/${articleId}/revisions`)).json();
-    assert.equal(sameSource.revisions[0].changeKind,'presentation_only');
+    // Firecrawl returns HTML text before collect appends PDF reader text.
+    for(const [taskId,body,changeKind] of [
+      ['abcdefabcdefabcdef123456','通知说明','presentation_only'],
+      ['abcdefabcdefabcdef123457','通知说明：申请截止日期已延期','substantive'],
+    ]){
+      const clock=Date.now();
+      await db.prepare(`INSERT INTO tasks(id,kind,business_key,source_id,article_id,payload_json,state,due_at,attempt_no,created_at,updated_at)
+        VALUES (?,'capture',?,'jwc',?,'{}','running',?,1,?,?)`)
+        .bind(taskId,taskId,articleId,clock,clock,clock).run();
+      await db.prepare(`INSERT INTO task_attempts(task_id,attempt_no,workflow_instance_id,state,started_at)
+        VALUES (?,1,?,'running',?)`).bind(taskId,taskId,clock).run();
+      const snapshot=await(await bucket.get(legacy.keys.snapshot)).text();
+      const files=[{filename:'attachment-1.pdf',key:legacy.keys.pdf,url:'https://jwc.cqu.edu.cn/body.pdf',name:'正文.pdf',role:'body-pdf'},
+        {filename:'attachment-2.pdf',key:legacy.keys.normal,url:'https://jwc.cqu.edu.cn/normal.pdf',name:'普通附件.pdf',role:'attachment'}];
+      const artifacts=await Promise.all(files.map(async file=>({name:file.filename,contentType:'application/pdf',
+        base64:Buffer.from(await(await bucket.get(file.key)).arrayBuffer()).toString('base64')})));
+      artifacts.push({name:'offline.html',contentType:'text/html',base64:Buffer.from(snapshot).toString('base64')});
+      const recaptured=await mf.dispatchFetch('https://feed.test/fixture/capture',{method:'POST',body:JSON.stringify({taskId,
+        page:{bodyRecognized:true,page:{url:articleUrl,title:'迁移通知'},bodyText:body,errors:[],artifacts,
+          attachmentCandidates:files.map(file=>({url:file.url,name:file.name,role:file.role})),
+          downloads:files.map(file=>({url:file.url,role:file.role,kind:'pdf',originalFile:true,saved:{name:file.filename},fetchedAt:new Date(clock).toISOString()}))}})});
+      assert.equal(recaptured.status,200,await recaptured.clone().text());
+      const captured=await recaptured.json();
+      assert.ok(captured.revisionId,JSON.stringify(captured));
+      const sameSource=await(await read(`/api/articles/${articleId}/revisions`)).json();
+      assert.equal(sameSource.revisions[0].changeKind,changeKind);
+    }
   }finally{await mf.dispose();}
 });
 
