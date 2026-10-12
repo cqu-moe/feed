@@ -1,6 +1,6 @@
 # 正式版实现与验收记录
 
-更新：2026-10-12（北京时间）。总规格 [#1](https://github.com/cqu-moe/feed/issues/1)，完整任务图见[实现计划](specs/feed-production-plan.md)。
+更新：2026-10-13（北京时间）。总规格 [#1](https://github.com/cqu-moe/feed/issues/1)，完整任务图见[实现计划](specs/feed-production-plan.md)。
 
 ## 集成基线
 
@@ -27,13 +27,23 @@
 | T11 / #12 | 本地验收完成 | 签名实现 `0e16f70`，签名集成 `e0e1a06`；119 项测试/build/design/Worker dry-run 通过，独立聚焦22/22、竞态回归2/2通过。不可变邮件、Resend Adapter、签名回执、结果不明对账、退信提交屏障及有界恢复已验收；用户/管理页面双主题响应式已验收 |
 | T12 / #13 | 本地验收完成 | `06e1594`，独立复审 PASS 后签名合并 `35abb3f`；127 tests/build/design/dry-run 通过，实际 Worker 摘要及双主题移动端 UI 验收通过 |
 | T13 / #14 | 本地验收完成 | 签名候选 `82e0cdc`，独立复审 PASS 后签名合并 `c34a600`；134 tests/build/design/dry-run 通过，独立 6 项回归及 7 项游标、并发与控制探针通过。全部存档分级复查、暂停与配置屏障、共享栏目及有界扫描公平性已验收 |
-| T14–T15、T17–T18 | 实现或等待依赖 | T14–T15 已实现，正在独立审查与修复；未声称云端或生产验收完成 |
+| T14 / #15 | 本地验收完成 | 签名候选 `af78e9e`，独立审查后签名合并 `fa580df`；158 tests/build/design/dry-run 通过。历史补抓窗口、分页上限、持久准入、公平恢复及配置屏障已验收；真实 Worker 界面验证参数重置、配置变更清除旧结果及终态刷新 |
+| T15、T17–T18 | 实现或等待依赖 | T15 候选完成独立审查，继续验证 T14 集成；T17 已部署隔离 Auth 并完成真实邮箱验证、强认证及客户端配置，Feed 云端完整旅程尚未完成；T18 尚未切换生产 |
 
 ## 会话中的规格调整
 
 已确认的远端检查：[Feed CI](https://github.com/cqu-moe/feed/actions/runs/38246894256) 对应 T09/T16 记录提交 `fb2d1f5`；[Auth CI](https://github.com/cqu-moe/auth/actions/runs/38204211719) 对应 `f66e2dd`。T10 [Feed CI](https://github.com/cqu-moe/feed/actions/runs/38256233596) 对应 `90b0002`、T11 [Feed CI](https://github.com/cqu-moe/feed/actions/runs/38264557197) 对应 `f72773f`、T12 [Feed CI](https://github.com/cqu-moe/feed/actions/runs/38270907608) 对应 `260f803` 均已成功；T13 的远端检查须按新提交单独确认。以上均不代表生产部署。
 
 - 2026-10-12：用户确认私有 RSS 链接可以持续展示。订阅所有者登录后可随时查看和复制；以加密保存凭证支持取回，保留 hash 校验及独立轮换/撤销。此决定替换旧的一次性展示约定，已同步 T07/T08 规格。
+- 2026-10-13：用户确认正文 OCR 继续使用 TextIn。正式版基线遗漏了独立 MVP 分支的 `7fb8e2a`；修正候选在独立分支适配 TextIn、原始回执与付费缓存，尚待独立审查及集成验收。当前不需要配置 Mistral 正文 OCR 密钥。
+- T13 记录提交 `90052b1` 的远端 CI 暴露来源关联测试的异步交接时序问题；T14 已用受控 Queue 提交点复现并修复等待条件，保留最终邮件候选断言。修正后的远端 CI 仍按实际提交单独确认。
+
+## 隔离验收进展（T17）
+
+- 资源统一使用 `t17-20261013` 后缀；Auth 的独立 D1 已迁移，Feed D1/R2、三条业务 Queue 与配套 DLQ 已创建。Feed 仍未部署最终候选；付费开关关闭、定时任务为空。
+- Auth 配套发件人提交 `bd40fdf` 已部署至隔离 Worker，部署版本 `053cf08d-d8d1-48a6-b9df-3e89ed61d984`；[对应远端 CI](https://github.com/cqu-moe/auth/actions/runs/38276294687) 已通过。
+- 唯一隔离账号经正常浏览器注册、实际邮箱 OTP 验证及密码加 TOTP 强认证，已配置 `feed.access=1`、`feed.sub_limit=3`，BFF 与后台 RPC 客户端彼此独立。临时开放注册后已恢复邀请制；未复制生产会话或修改生产用户。
+- Auth 验证邮件已由 Resend 和实际收件箱两端确认送达；此项不是 Feed Queue 邮件验收。用户提供的 Firecrawl、TextIn 和 Resend 临时隔离密钥已配置，使用结束需提醒撤销。隔离演练费用上限人民币 50 元；尚未进行本轮真实抓取和 OCR。
 
 ## 云端前置配置与核对
 

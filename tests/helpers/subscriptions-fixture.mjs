@@ -253,9 +253,10 @@ export async function subscriptionsFixture({ editingMigration = true, clock, not
   const db = await mf.getD1Database('DB', 'feed');
   const migrationNames = ['0001_feed.sql', '0002_auth.sql', '0003_collection_lease.sql', '0004_pdf_ocr.sql', '0005_task_runtime.sql', '0006_sources.sql', '0007_archive_versions.sql', '0008_content_events.sql', '0009_subscriptions.sql'];
   if (editingMigration) migrationNames.push('0010_subscription_editing.sql');
+  migrationNames.push('0018_outbox_receipts.sql');
   migrationNames.push('0013_notification_matching.sql');
   if(mailHarness)migrationNames.push('0014_mail_delivery.sql','0016_mail_digests.sql');
-  if(recheckMigration)migrationNames.push('0017_archive_recheck.sql');
+  if(recheckMigration)migrationNames.push('0015_history_backfill.sql','0017_archive_recheck.sql');
   for (const name of migrationNames) {
     await applyMigration(db, await readFile(`migrations/${name}`, 'utf8'));
   }
