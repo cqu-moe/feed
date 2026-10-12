@@ -198,6 +198,18 @@ T05 使用两个默认关闭的独立开关，便于采集写入与阅读切换�
 
 PDF-only 缺失原件时保留 blocked 观察，列表明确显示缺项，待确认完整后才开放阅读。文件抓取时间按实际下载记录保存；未记录的时间保持未知，不用其他文件的时间冒充。历史、缺项、过期采集和 R2/D1 恢复用例已通过本地验收。T06 仍负责正文 OCR、最终完整判定和统一内容事件，不能把 T05 的 `assembling`/`blocked` 过渡语义当成最终发布链路。
 
+## 4B. T07 个人订阅配置
+
+应用 `0009_subscriptions.sql` 后，登录用户可在 `/subscriptions` 命名并创建多个订阅，选择栏目或创建时展开的站点范围，默认每日摘要。当前切片只保存配置，RSS 内容与邮件由后续 T09/T11 开放，界面明确显示这一状态。
+
+`GET /api/subscriptions` 返回当前会话所有者的配置、当前 Auth 配额、计算出的运行状态和可选栏目。`POST /api/subscriptions` 接受 `{requestId,name,siteIds,sourceIds,emailMode}`，校验同源 Origin；不接受客户端指定 owner。所有未删除配置计创建额度，包括暂停、邮件关闭和 RSS 撤销项；条件 INSERT 与目标、请求回执同批提交，防止并发超额。同 requestId 重试返回原订阅和原栏目范围，不因站点新增栏目而扩大。
+
+每个订阅生成 256 bit 随机 RSS token。D1 保存 hash 及 AES-GCM 密文，密文绑定所有者、订阅 ID 和凭证代次，使用区别于 BFF 会话的用途派生密钥。当前密钥材料使用既有 `FEED_SESSION_ENCRYPTION_KEY`（兼容别名 `SESSION_ENCRYPTION_KEY`）；不新增必须配置的 secret。登录后的所有者可持续查看和复制当前链接，刷新或重试不会生成新链接。响应不缓存，token 不写入日志。重置/撤销功能由 T08 接入。
+
+更换上述密钥材料前，应使用旧密钥解密并迁移 RSS 密文，再切换运行时 secret；只更换 secret 会使旧 RSS 链接无法在设置中取回。RSS hash 校验与密文展示分别保留，后续轮换可重建凭证；不能通过静默重置链接掩盖密钥丢失。
+
+界面区分零/缺失额度、权限撤回、超额和 Auth 暂不可用；已保存配置保留。创建后发生降额或 Auth 查询故障，返回 `created` 与当前暂停原因；响应丢失时按同 requestId 重试，不断言保存失败。保存期间锁定表单，避免旧响应覆盖新草稿。
+
 ## 5. 构建与部署
 
 日常部署通过 push 到 main 触发 Cloudflare Git Connector；GitHub Actions 只运行检查。构建命令、部署命令和环境配置见 [ci-cd.md](ci-cd.md)。Cloudflare 执行 `pnpm run ci` 后，再执行 `pnpm deploy:ci`。
