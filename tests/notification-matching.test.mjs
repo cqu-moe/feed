@@ -51,7 +51,7 @@ test('one event matches multiple subscriptions but creates one immediate user de
     const replayFirst = await notificationInvoke(mf, 'processMatchTask', enqueued.body.messages[0]);
     assert.equal(replayFirst.status, 200, JSON.stringify(replayFirst));
     assert.equal(replayFirst.body.state, 'superseded');
-    const finalPage = await notificationInvoke(mf, 'drainDue', 10);
+    const finalPage = await notificationInvoke(mf, 'replayMatchOutbox', 10);
     assert.equal(finalPage.body.processed, 2, JSON.stringify(finalPage));
     assert.equal(finalPage.body.pendingPages, 0);
     const ownerView = await subscriptionCall(mf, `/api/subscriptions/${subscriptions[0].id}`, { cookie });
@@ -113,25 +113,33 @@ test('date verification records auditable evidence and rematches the same event'
       title: '未知日期通知',
     });
     const enqueued = await notificationInvoke(mf, 'enqueueEvent', eventId);
-    await notificationInvoke(mf, 'drainDue', 10);
+    await notificationInvoke(mf, 'replayMatchOutbox', 10);
     let ownerView = await subscriptionCall(mf, `/api/subscriptions/${created.body.subscription.id}`, { cookie });
     assert.equal(ownerView.body.subscription.notificationMatches[0].status, 'waiting_date_verification');
     assert.equal(ownerView.body.subscription.notificationMatches[0].datePrecision, 'unknown');
 
-    const verified = await notificationInvoke(mf, 'verifyDate', eventId, {
+    const verification = {
       requestId: 'verify-unknown-date-first',
       sourceId: 'jwc',
       verifiedBy: 'feed-admin',
       datePrecision: 'minute',
       publishedAt: new Date(now + 60_000).toISOString(),
       evidence: { sourceUrl: 'https://jwc.cqu.edu.cn/info/2026/date.htm', method: 'source-page' },
-    });
+    };
+    const verified = await notificationInvoke(mf, 'verifyDate', eventId, verification);
     assert.equal(verified.status, 200, JSON.stringify(verified));
     assert.equal(verified.body.correction.generation, 1);
     assert.equal(verified.body.correction.eventId, eventId);
     assert.match(verified.body.correction.evidenceObjectHash, /^[a-f0-9]{64}$/);
+    const replay=await adminRequest(mf,`/internal/notification-events/${eventId}/date-verification`,verification);
+    assert.equal(replay.status,202);
+    assert.deepEqual(replay.body,verified.body);
+    const conflict=await adminRequest(mf,`/internal/notification-events/${eventId}/date-verification`,{
+      ...verification,publishedAt:new Date(now-60_000).toISOString(),
+    });
+    assert.equal(conflict.status,409,JSON.stringify(conflict));
 
-    const drained = await notificationInvoke(mf, 'drainDue', 10);
+    const drained = await notificationInvoke(mf, 'replayMatchOutbox', 10);
     assert.equal(drained.body.pendingPages, 0, JSON.stringify(drained));
     ownerView = await subscriptionCall(mf, `/api/subscriptions/${created.body.subscription.id}`, { cookie });
     assert.equal(ownerView.body.subscription.notificationMatches[0].status, 'pending_immediate');
@@ -155,6 +163,30 @@ test('date verification records auditable evidence and rematches the same event'
   } finally {
     await mf.dispose();
   }
+});
+
+test('a queued date generation superseded by verification becomes terminal on replay', async () => {
+  const {mf}=await subscriptionsFixture({clock:now});
+  try{
+    const eventId=await seedReadyEvent(mf,{
+      id:'bbbbbbbbbbbbbbbbbbbb0020',sourceId:'jwc',firstSeenAt:now+30_000,
+      observedAt:now+30_000,readyAt:now+120_000,datePrecision:'unknown',
+    });
+    const old=await notificationInvoke(mf,'enqueueEvent',eventId);
+    const verified=await notificationInvoke(mf,'verifyDate',eventId,{
+      requestId:'supersede-old-matching',sourceId:'jwc',verifiedBy:'feed-admin',
+      datePrecision:'day',publishedDay:'2026-10-12',evidence:{method:'source-page'},
+    });
+    assert.equal(verified.status,200,JSON.stringify(verified));
+    const replay=await feedJobsInvoke(mf,old.body.messages[0]);
+    assert.deepEqual(replay.body.messages,[{acked:true,retried:false}]);
+    const details=await adminRequest(mf,`/internal/notification-events/${eventId}`,undefined,{method:'GET'});
+    assert.equal(details.body.matchTasks.find(task=>task.id===old.body.messages[0].taskId).state,'cancelled');
+    const drained=await notificationInvoke(mf,'replayMatchOutbox',100);
+    assert.equal(drained.body.pendingPages,0);
+    const completed=await adminRequest(mf,`/internal/notification-events/${eventId}`,undefined,{method:'GET'});
+    assert.deepEqual(completed.body.matchTasks.map(task=>task.state).sort(),['cancelled','succeeded']);
+  }finally{await mf.dispose();}
 });
 
 test('date precision and history rules explain eligible and suppressed candidates', async () => {
@@ -183,14 +215,20 @@ test('date precision and history rules explain eligible and suppressed candidate
         expected:['waiting_date_verification','日期待核实']},
       {id:'aaaaaaaaaaaaaaaaaaaa0006',title:'历史基线',publishedDay:'2026-10-12',datePrecision:'day',
         discoveryClass:'backfill',historyOnly:1,expected:['suppressed','历史导入或迁移基线不补发邮件']},
-      {id:'aaaaaaaaaaaaaaaaaaaa0007',title:'旧文更新',datePrecision:'unknown',kind:'update',
+      {id:'aaaaaaaaaaaaaaaaaaaa0007',title:'旧文更新',datePrecision:'day',publishedDay:'2026-09-12',kind:'update',
         firstSeenAt:now+10_000,observedAt:now+30_000,expected:['pending_immediate','修改在栏目生效后发生']},
-      {id:'aaaaaaaaaaaaaaaaaaaa0008',title:'生效前更新',datePrecision:'unknown',kind:'update',
+      {id:'aaaaaaaaaaaaaaaaaaaa0008',title:'生效前更新',datePrecision:'day',publishedDay:'2026-09-12',kind:'update',
         firstSeenAt:now+10_000,observedAt:now-30_000,expected:['suppressed','修改发生在栏目生效前']},
-      {id:'aaaaaaaaaaaaaaaaaaaa0009',title:'晚到关联更新',datePrecision:'unknown',kind:'update',
+      {id:'aaaaaaaaaaaaaaaaaaaa0009',title:'晚到关联更新',datePrecision:'day',publishedDay:'2026-09-12',kind:'update',
         firstSeenAt:now+60_000,observedAt:now+30_000,expected:['suppressed','栏目在修改观察后才出现']},
       {id:'aaaaaaaaaaaaaaaaaaaa0010',title:'订阅前观察',publishedAt:new Date(now+60_000).toISOString(),datePrecision:'minute',
         firstSeenAt:now-60_000,expected:['suppressed','订阅前已观察到的内容不补发']},
+      {id:'aaaaaaaaaaaaaaaaaaaa0011',title:'未知日期更新',datePrecision:'unknown',kind:'update',
+        expected:['waiting_date_verification','日期待核实']},
+      {id:'aaaaaaaaaaaaaaaaaaaa0012',title:'补抓旧文的新修改',datePrecision:'day',publishedDay:'2026-09-12',kind:'update',
+        discoveryClass:'backfill',firstSeenAt:now-60_000,expected:['pending_immediate','修改在栏目生效后发生']},
+      {id:'aaaaaaaaaaaaaaaaaaaa0013',title:'迁移旧文的新修改',datePrecision:'day',publishedDay:'2026-09-12',kind:'update',
+        discoveryClass:'migrated',firstSeenAt:now-60_000,expected:['pending_immediate','修改在栏目生效后发生']},
     ];
     for(const item of cases){
       await seedReadyEvent(mf,{
@@ -202,7 +240,7 @@ test('date precision and history rules explain eligible and suppressed candidate
       const enqueued=await notificationInvoke(mf,'enqueueEvent',item.id);
       assert.equal(enqueued.status,200,JSON.stringify(enqueued));
     }
-    const drained=await notificationInvoke(mf,'drainDue',100);
+    const drained=await notificationInvoke(mf,'replayMatchOutbox',100);
     assert.equal(drained.body.pendingPages,0,JSON.stringify(drained));
 
     const ownerView=await subscriptionCall(mf,`/api/subscriptions/${created.body.subscription.id}`,{cookie});
@@ -218,62 +256,49 @@ test('date precision and history rules explain eligible and suppressed candidate
   }
 });
 
-test('late source associations rematch ready events without changing event identity', async () => {
-  const { mf, db, login, setPolicy } = await subscriptionsFixture({ clock: now });
-  try {
-    await setPolicy('matching-owner', { access: true, limit: { kind: 'limited', value: 10 } });
-    const cookie = await login('matching-owner');
-    const created = await subscriptionsInvoke(mf, 'change', { id: 'matching-owner' }, {
-      requestId: 'late-source-subscription',
-      name: '晚到栏目订阅',
-      sourceIds: ['news'],
-      emailMode: 'immediate',
-    });
-    assert.equal(created.status, 200, JSON.stringify(created));
-
-    const eventBeforeSource='dddddddddddddddddddddddd';
-    await seedReadyEvent(mf,{
-      id:eventBeforeSource,sourceId:'jwc',title:'先就绪后关联',
-      firstSeenAt:now+30_000,observedAt:now+30_000,readyAt:now+120_000,
-      publishedAt:new Date(now+60_000).toISOString(),datePrecision:'minute',
-    });
-    await db.prepare(`INSERT INTO article_sources(article_id,source_id,first_seen_at,last_seen_at,discovery_class,
-        published_at,published_day,date_precision,source_timezone)
-      VALUES (?,'news',?,?,'live',?,NULL,'minute','Asia/Shanghai')`)
-      .bind(eventBeforeSource,now+30_000,now+30_000,new Date(now+60_000).toISOString()).run();
-    const associated=await notificationInvoke(mf,'associateArticleSource',eventBeforeSource,'news');
-    assert.equal(associated.status,200,JSON.stringify(associated));
-    assert.deepEqual(associated.body,{events:1,tasks:1});
-
-    const sourceBeforeEvent='eeeeeeeeeeeeeeeeeeeeeeee';
-    await seedReadyEvent(mf,{
-      id:sourceBeforeEvent,sourceId:'jwc',title:'先关联后就绪',additionalSourceIds:['news'],
-      firstSeenAt:now+30_000,observedAt:now+30_000,readyAt:now+120_000,
-      publishedAt:new Date(now+60_000).toISOString(),datePrecision:'minute',
-    });
-    const enqueued=await notificationInvoke(mf,'enqueueEvent',sourceBeforeEvent);
-    assert.equal(enqueued.body.tasks,2,JSON.stringify(enqueued));
-
-    const drained=await notificationInvoke(mf,'drainDue',100);
-    assert.equal(drained.body.pendingPages,0,JSON.stringify(drained));
-    const ownerView=await subscriptionCall(mf,`/api/subscriptions/${created.body.subscription.id}`,{cookie});
-    assert.equal(ownerView.status,200,JSON.stringify(ownerView));
-    assert.deepEqual(ownerView.body.subscription.notificationMatches.map(match=>[match.eventId,match.status]).sort(),[
-      [eventBeforeSource,'pending_immediate'],[sourceBeforeEvent,'pending_immediate'],
-    ]);
-    for(const eventId of [eventBeforeSource,sourceBeforeEvent]){
-      const adminView=await adminRequest(mf,`/internal/notification-events/${eventId}`,undefined,{method:'GET'});
-      assert.deepEqual(adminView.body.sources.map(source=>source.sourceId).sort(),['jwc','news']);
-      assert.equal(adminView.body.sources.find(source=>source.sourceId==='news').firstSeenAt,new Date(now+30_000).toISOString());
-      assert.equal(adminView.body.delivery.kind,'immediate');
-    }
-  } finally{
-    await mf.dispose();
+test('eligible notifications survive Auth failures, quota pauses and unverified mail as digest backlog', async () => {
+  for(const blockedBy of ['auth_unavailable','quota_exceeded','email_unverified','paused']){
+    const {mf,login,setPolicy,setRecipient,setPolicyService}=await subscriptionsFixture({clock:now});
+    try{
+      const cookie=await login('backlog-owner');
+      const created=await subscriptionsInvoke(mf,'change',{id:'backlog-owner'}, {
+        requestId:'backlog-subscription',name:'积压订阅',sourceIds:['jwc'],emailMode:'immediate',
+      });
+      assert.equal(created.status,200,JSON.stringify(created));
+      const subscription=created.body.subscription;
+      const editEnabled=enabled=>subscriptionsInvoke(mf,'update',{id:'backlog-owner'},subscription.id,{
+        requestId:`backlog-enabled-${enabled}`,expectedVersion:enabled?2:1,name:'积压订阅',
+        sourceIds:['jwc'],emailMode:'immediate',requestedEnabled:enabled,priority:0,
+      });
+      if(blockedBy==='auth_unavailable')await setPolicyService({outage:true});
+      if(blockedBy==='quota_exceeded')await setPolicy('backlog-owner',{access:true,limit:{kind:'limited',value:0}});
+      if(blockedBy==='email_unverified')await setRecipient('backlog-owner',{status:'unverified'});
+      if(blockedBy==='paused')assert.equal((await editEnabled(false)).status,200);
+      const eventId=await seedReadyEvent(mf,{
+        id:'bbbbbbbbbbbbbbbbbbbb0010',sourceId:'jwc',firstSeenAt:now+30_000,observedAt:now+30_000,
+        readyAt:now+120_000,publishedDay:'2026-10-12',datePrecision:'day',
+      });
+      await notificationInvoke(mf,'enqueueEvent',eventId);
+      const drained=await notificationInvoke(mf,'replayMatchOutbox',100);
+      assert.equal(drained.status,200,JSON.stringify(drained));
+      const details=await adminRequest(mf,`/internal/notification-events/${eventId}`,undefined,{method:'GET'});
+      assert.equal(details.body.delivery?.state,'pending',`${blockedBy}: ${JSON.stringify(details.body)}`);
+      assert.equal(details.body.delivery.kind,'daily_digest');
+      assert.equal(details.body.delivery.suppressionReason,blockedBy);
+      const blocked=await subscriptionCall(mf,`/api/subscriptions/${subscription.id}`,{cookie});
+      assert.equal(blocked.body.subscription.notificationMatches[0].status,blockedBy,JSON.stringify(blocked));
+      await setPolicyService({outage:false});
+      await setPolicy('backlog-owner',{access:true,limit:{kind:'limited',value:10}});
+      await setRecipient('backlog-owner',{status:'verified',email:'reader@example.test'});
+      if(blockedBy==='paused')assert.equal((await editEnabled(true)).status,200);
+      const restored=await subscriptionCall(mf,`/api/subscriptions/${subscription.id}`,{cookie});
+      assert.equal(restored.body.subscription.notificationMatches[0].status,'pending_daily_digest',JSON.stringify(restored));
+    }finally{await mf.dispose();}
   }
 });
 
 test('the Worker queue consumes match-source messages through the public task runtime', async () => {
-  const { mf, login, setPolicy } = await subscriptionsFixture({ clock: now });
+  const { mf, db, login, setPolicy } = await subscriptionsFixture({ clock: now });
   try {
     await setPolicy('queue-owner', { access: true, limit: { kind: 'limited', value: 10 } });
     const cookie = await login('queue-owner');
@@ -297,13 +322,26 @@ test('the Worker queue consumes match-source messages through the public task ru
     const enqueued = await notificationInvoke(mf, 'enqueueEvent', eventId);
     assert.equal(enqueued.status, 200, JSON.stringify(enqueued));
 
+    await db.prepare(`CREATE TRIGGER fail_candidate BEFORE INSERT ON user_deliveries
+      BEGIN SELECT RAISE(ABORT,'injected candidate commit failure'); END`).run();
+    const failed=await feedJobsInvoke(mf,enqueued.body.messages[0]);
+    assert.deepEqual(failed.body.messages,[{acked:false,retried:true}]);
+    const rolledBack=await adminRequest(mf,`/internal/notification-events/${eventId}`,undefined,{method:'GET'});
+    assert.equal(rolledBack.body.matches.length,0);
+    assert.equal(rolledBack.body.delivery,null);
+    assert.equal(rolledBack.body.matchTasks[0].pages,0);
+    await db.exec('DROP TRIGGER fail_candidate');
     const consumed = await feedJobsInvoke(mf, enqueued.body.messages[0]);
     assert.equal(consumed.status, 200, JSON.stringify(consumed));
     assert.deepEqual(consumed.body.messages, [{ acked: true, retried: false }]);
+    const replayed=await feedJobsInvoke(mf,enqueued.body.messages[0]);
+    assert.deepEqual(replayed.body.messages,[{acked:true,retried:false}]);
 
     const adminView = await adminRequest(mf, `/internal/notification-events/${eventId}`, undefined, { method: 'GET' });
     assert.equal(adminView.status, 200, JSON.stringify(adminView));
     assert.equal(adminView.body.matchTasks[0].state, 'succeeded', JSON.stringify(adminView.body));
+    assert.equal(adminView.body.deliveries.length,1);
+    assert.equal(adminView.body.matches.length,1);
     const ownerView = await subscriptionCall(mf, `/api/subscriptions/${created.body.subscription.id}`, { cookie });
     assert.equal(ownerView.body.subscription.notificationMatches[0].status, 'pending_immediate');
   } finally {

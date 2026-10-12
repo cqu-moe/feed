@@ -95,29 +95,6 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
     return {tasks:committed.filter((_,index)=>index%2===0).reduce((total,result)=>total+(result.meta?.changes??0),0),messages};
   }
 
-  async function enqueueEventSource(eventId,sourceId){
-    if(!idPattern.test(eventId??''))throw validationError('Invalid content event id',400);
-    const source=await env.DB.prepare('SELECT source_id FROM event_sources WHERE event_id=? AND source_id=?')
-      .bind(eventId,sourceId).first();
-    if(!source)throw validationError('Event source is missing',404);
-    const correction=await env.DB.prepare(`SELECT generation FROM event_source_corrections
-      WHERE event_id=? AND source_id=? ORDER BY generation DESC LIMIT 1`).bind(eventId,sourceId).first();
-    const built=await matchTaskStatements({eventId,sourceId,generation:correction?.generation??0});
-    const committed=await env.DB.batch(built.statements);
-    return {tasks:committed[0].meta?.changes??0,taskId:built.taskId};
-  }
-
-  async function associateArticleSource(articleId,sourceId){
-    const source=await env.DB.prepare(`SELECT first_seen_at,last_seen_at,discovery_class,
-        published_at,published_day,date_precision,source_timezone
-      FROM article_sources WHERE article_id=? AND source_id=?`).bind(articleId,sourceId).first();
-    const built=await articleSourceAssociationStatements(env,{articleId,sourceId,timestamp:timestamp(),source});
-    if(!built.statements.length)return {events:0,tasks:0};
-    const committed=await env.DB.batch(built.statements);
-    const tasks=committed.reduce((total,result,index)=>index%3===1?total+(result.meta?.changes??0):total,0);
-    return {events:built.events,tasks};
-  }
-
   async function verifyDate(eventId,command){
     if(!idPattern.test(eventId??''))throw validationError('Invalid content event id',400);
     if(!command||typeof command!=='object'||Array.isArray(command))throw validationError('Invalid date verification command',400);
@@ -134,6 +111,14 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
     const source=current.sources.find(item=>item.source_id===sourceId);
     if(!source)throw validationError('Event source is missing',404);
     const dates=correctedDates(command,source.source_timezone);
+    const commandHash=await sha(JSON.stringify({requestId:command.requestId,eventId,sourceId,
+      verifiedBy:command.verifiedBy,dates,evidence:command.evidence}));
+    const replay=await env.DB.prepare(`SELECT * FROM event_source_corrections
+      WHERE event_id=? AND source_id=? AND request_id=?`).bind(eventId,sourceId,command.requestId).first();
+    if(replay){
+      if(replay.command_hash!==commandHash)throw validationError('Date verification request conflicts with its original content',409);
+      return correctionResult(replay);
+    }
     const at=timestamp();
     const record={v:1,eventId,sourceId,verifiedBy:command.verifiedBy,verifiedAt:at,
       datePrecision:dates.datePrecision,publishedAt:dates.publishedAt,publishedDay:dates.publishedDay,
@@ -141,12 +126,6 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
     const evidenceText=JSON.stringify(record);
     if(evidenceText.length>65536)throw validationError('Date verification evidence is too large',400);
     const object=await storeTextObject(env,evidenceText,'application/json');
-    const commandHash=await sha(JSON.stringify({requestId:command.requestId,eventId,sourceId,
-      verifiedBy:command.verifiedBy,dates,evidence:command.evidence}));
-    const replay=await env.DB.prepare('SELECT * FROM event_source_corrections WHERE command_hash=?')
-      .bind(commandHash).first();
-    if(replay)return correctionResult(replay);
-
     const generation=(source.evidence.correctionGeneration??0)+1;
     const correctionId=(await sha(`date-correction:${eventId}:${sourceId}:g${generation}`)).slice(0,24);
     const built=await matchTaskStatements({eventId,sourceId,generation});
@@ -155,13 +134,13 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
         VALUES (?,?,?,?,?) ON CONFLICT(sha256) DO NOTHING`)
         .bind(object.sha256,object.r2Key,object.byteSize,object.mediaType,object.verifiedAt),
       env.DB.prepare(`INSERT INTO event_source_corrections(id,event_id,source_id,generation,evidence_object_hash,
-          corrected_dates_json,command_hash,verified_by,verified_at,created_at)
-        SELECT ?,?,?,?,?,?,?,?,?,?
+          corrected_dates_json,request_id,command_hash,verified_by,verified_at,created_at)
+        SELECT ?,?,?,?,?,?,?,?,?,?,?
         WHERE EXISTS(SELECT 1 FROM artifact_objects WHERE sha256=?)
           AND EXISTS(SELECT 1 FROM event_sources WHERE event_id=? AND source_id=?)
-        ON CONFLICT(event_id,source_id,generation) DO NOTHING`)
+        ON CONFLICT DO NOTHING`)
         .bind(correctionId,eventId,sourceId,generation,object.sha256,JSON.stringify(dates),
-          commandHash,command.verifiedBy,at,at,object.sha256,eventId,sourceId),
+          command.requestId,commandHash,command.verifiedBy,at,at,object.sha256,eventId,sourceId),
       ...built.statements,
     ]);
     const committed=await env.DB.prepare('SELECT * FROM event_source_corrections WHERE command_hash=?')
@@ -230,8 +209,14 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
     if(!current)throw validationError('Content event not found',404);
     const source=current.sources.find(item=>item.source_id===input.sourceId);
     if(!source)throw validationError('Event source is missing',404);
-    if((source.evidence.correctionGeneration??0)>input.generation)
+    if((source.evidence.correctionGeneration??0)>input.generation){
+      await cancelSupersededMatch(task.id,input);
       return {state:'superseded',page:before.page,hasNext:false};
+    }
+    const taskGate=`EXISTS(SELECT 1 FROM tasks current WHERE current.id=? AND current.kind='match-event'
+      AND current.state='queued' AND current.checkpoint_json IS ?)
+      AND COALESCE((SELECT MAX(generation) FROM event_source_corrections WHERE event_id=? AND source_id=?),0)=?`;
+    const taskArgs=[task.id,task.checkpoint_json,input.eventId,input.sourceId,input.generation];
 
     const targets=await env.DB.prepare(`SELECT t.id AS target_id,t.effective_from,s.id AS subscription_id,
         s.owner_sub,s.name,s.requested_enabled,s.priority,s.email_mode,s.created_at,s.deleted_at
@@ -245,21 +230,24 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
       const at=timestamp(),checkpointJson=JSON.stringify({...before,page:before.page,hasNext:false});
       await env.DB.batch([
         env.DB.prepare(`UPDATE tasks SET state='succeeded',checkpoint_json=?,updated_at=?
-          WHERE id=? AND state='queued' AND checkpoint_json IS ?`)
-          .bind(checkpointJson,at,task.id,task.checkpoint_json),
+          WHERE id=? AND ${taskGate}`)
+          .bind(checkpointJson,at,task.id,...taskArgs),
       ]);
+      await cancelSupersededMatch(task.id,input);
       return {state:'succeeded',page:before.page,hasNext:false};
     }
 
     const runtimes=await subscriptionRuntimes(page.map(row=>row.owner_sub));
-    const decisions=page.map(row=>decide(current.event,source.evidence,row,runtimes.get(row.subscription_id)));
+    const decisions=page.map(row=>{
+      const result=decide(current.event,source.evidence,row);
+      const runtime=runtimes.get(row.subscription_id);
+      const suppressionReason=runtime?.emailStatus==='active'?null:runtime?.emailStatus??'auth_unavailable';
+      return {...result,suppressionReason,mode:result.eligible&&suppressionReason?'daily_digest':result.mode};
+    });
     const hasNext=targets.results.length>pageSize;
     const page_number=before.page+1;
     const next={lastTargetId:page.at(-1).target_id,page:page_number,hasNext};
     const nextCheckpoint=JSON.stringify(next);
-    const taskGate=`EXISTS(SELECT 1 FROM tasks current WHERE current.id=? AND current.kind='match-event'
-      AND current.state='queued' AND current.checkpoint_json IS ?)`;
-    const taskArgs=[task.id,task.checkpoint_json];
     const at=timestamp();
     const statements=[];
     for(const [index,row] of page.entries()){
@@ -274,31 +262,50 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
     for(const [index,row] of page.entries()){
       const decision=decisions[index];
       if(!decision.eligible)continue;
-      const currentKind=owners.get(row.owner_sub);
-      owners.set(row.owner_sub,currentKind==='immediate'||decision.mode==='immediate'?'immediate':'daily_digest');
+      const previous=owners.get(row.owner_sub);
+      if(!previous||(previous.suppressionReason&&!decision.suppressionReason)
+        ||(!decision.suppressionReason&&decision.mode==='immediate'))owners.set(row.owner_sub,decision);
     }
-    for(const [ownerSub,deliveryKind] of owners){
+    for(const [ownerSub,candidate] of owners){
       const deliveryId=(await sha(`delivery:${ownerSub}:${input.eventId}`)).slice(0,24);
-      statements.push(env.DB.prepare(`INSERT INTO user_deliveries(id,owner_sub,event_id,state,delivery_kind,available_at,created_at,updated_at)
-        SELECT ?,?,?,'pending',?,?,?,? WHERE ${taskGate}
+      statements.push(env.DB.prepare(`INSERT INTO user_deliveries(id,owner_sub,event_id,state,delivery_kind,available_at,suppression_reason,created_at,updated_at)
+        SELECT ?,?,?,'pending',?,?,?,?,? WHERE ${taskGate}
         ON CONFLICT(owner_sub,event_id) DO UPDATE SET
-          delivery_kind=CASE WHEN user_deliveries.state='pending' AND excluded.delivery_kind='immediate'
-            THEN 'immediate' ELSE user_deliveries.delivery_kind END,
+          delivery_kind=CASE WHEN user_deliveries.state='pending' AND excluded.suppression_reason IS NULL
+            THEN CASE WHEN user_deliveries.suppression_reason IS NULL AND user_deliveries.delivery_kind='immediate'
+              THEN 'immediate' ELSE excluded.delivery_kind END
+            ELSE user_deliveries.delivery_kind END,
+          suppression_reason=CASE WHEN user_deliveries.state='pending' AND excluded.suppression_reason IS NULL
+            THEN NULL ELSE user_deliveries.suppression_reason END,
           updated_at=excluded.updated_at`)
-        .bind(deliveryId,ownerSub,input.eventId,deliveryKind,current.event.readyAt,at,at,...taskArgs));
+        .bind(deliveryId,ownerSub,input.eventId,candidate.mode,current.event.readyAt,candidate.suppressionReason,at,at,...taskArgs));
     }
     if(hasNext){
       const continuation=await matchTaskStatements({eventId:input.eventId,sourceId:input.sourceId,
         generation:input.generation,page:page_number});
       if(continuation.taskId!==task.id)throw validationError('Continuation changed match task identity',409);
-      statements.push(continuation.statements[1]);
+      statements.push(env.DB.prepare(`INSERT INTO outbox(id,topic,dedupe_key,payload_json,available_at,created_at,updated_at)
+        SELECT ?,'feed-events',?,?,?,?,? WHERE ${taskGate}
+        ON CONFLICT(topic,dedupe_key) DO NOTHING`)
+        .bind(continuation.message.outboxId,`match-source:${task.id}:p${page_number}`,
+          JSON.stringify(continuation.message),at,at,at,...taskArgs));
     }
     statements.push(env.DB.prepare(`UPDATE tasks SET state=?,checkpoint_json=?,updated_at=?
-      WHERE id=? AND state='queued' AND checkpoint_json IS ?`)
-      .bind(hasNext?'queued':'succeeded',nextCheckpoint,at,task.id,task.checkpoint_json));
+      WHERE id=? AND ${taskGate}`)
+      .bind(hasNext?'queued':'succeeded',nextCheckpoint,at,task.id,...taskArgs));
     const committed=await env.DB.batch(statements);
-    if(!committed.at(-1).meta?.changes)return {state:'superseded',page:before.page,hasNext:before.hasNext};
+    if(!committed.at(-1).meta?.changes){
+      await cancelSupersededMatch(task.id,input);
+      return {state:'superseded',page:before.page,hasNext:before.hasNext};
+    }
     return {state:hasNext?'queued':'succeeded',page:page_number,hasNext};
+  }
+
+  async function cancelSupersededMatch(taskId,input){
+    await env.DB.prepare(`UPDATE tasks SET state='cancelled',last_error='date_generation_superseded',updated_at=?
+      WHERE id=? AND state='queued' AND EXISTS(SELECT 1 FROM event_source_corrections
+        WHERE event_id=? AND source_id=? AND generation>?)`)
+      .bind(timestamp(),taskId,input.eventId,input.sourceId,input.generation).run();
   }
 
   async function subscriptionRuntimes(ownerSubs){
@@ -323,11 +330,12 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
     return result;
   }
 
-  function decide(event,source,row,runtime){
+  function decide(event,source,row){
     const evidence=source;
-    if(runtime && !runtime.selected)return decision(false,'pending','订阅当前未运行');
-    if(event.historyOnly===1||evidence.discoveryClass!=='live')
+    if(event.historyOnly===1||(event.kind==='initial'&&evidence.discoveryClass!=='live'))
       return decision(false,'suppressed','历史导入或迁移基线不补发邮件');
+    if(evidence.datePrecision==='unknown')
+      return decision(false,'pending','日期待核实');
     if(event.kind==='update'){
       if(event.observedAt<row.effective_from)
         return decision(false,'suppressed','修改发生在栏目生效前');
@@ -335,8 +343,6 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
         return decision(false,'suppressed','栏目在修改观察后才出现');
       return decision(true,'update','修改在栏目生效后发生',row.email_mode);
     }
-    if(evidence.datePrecision==='unknown')
-      return decision(false,'pending','日期待核实');
     if(evidence.firstSeenAt<row.effective_from)
       return decision(false,'suppressed','订阅前已观察到的内容不补发');
     if(evidence.datePrecision==='minute'){
@@ -356,27 +362,7 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
     return {eligible:true,kind,reason,mode:emailMode};
   }
 
-  async function drainDue(limit=20){
-    const size=boundedInteger(limit,20,1,100),at=timestamp();
-    const rows=await env.DB.prepare(`SELECT * FROM outbox
-      WHERE topic='feed-events' AND state='queued' AND available_at<=? ORDER BY available_at,id LIMIT ?`)
-      .bind(at,size).all();
-    let processed=0;
-    for(const row of rows.results){
-      let payload;
-      try{payload=JSON.parse(row.payload_json);}catch{continue;}
-      if(payload.type!=='match-source')continue;
-      await processMatchTask(payload);
-      await env.DB.prepare(`UPDATE outbox SET state='sent',attempts=attempts+1,last_error=NULL,updated_at=?
-        WHERE id=? AND state='queued'`).bind(at,row.id).run();
-      processed++;
-    }
-    const pending=await env.DB.prepare(`SELECT COUNT(*) AS n FROM outbox
-      WHERE topic='feed-events' AND state='queued' AND json_extract(payload_json,'$.type')='match-source'`).first();
-    return {processed,pendingPages:pending.n};
-  }
-
-  async function subscriptionMatches(subscriptionId){
+  async function subscriptionMatches(subscriptionId,runtime){
     if(!idPattern.test(subscriptionId??''))return [];
     const rows=await env.DB.prepare(`SELECT m.event_id AS eventId,e.kind AS eventKind,r.title,m.eligibility_kind AS eligibilityKind,
         m.reason,e.ready_at AS readyAt,m.matched_at AS matchedAt,s.email_mode AS emailMode,
@@ -395,7 +381,18 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
       .bind(subscriptionId).all();
     return rows.results.map(row=>{
       let status,reason=row.reason;
-      if(row.deliveryId&&row.deliveryKind==='immediate'){
+      if(row.eligibilityKind==='pending'){
+        status='waiting_date_verification';reason='日期待核实';
+      }else if(row.reason==='邮件已关闭'||row.emailMode==='off'){
+        status='mail_off';reason='邮件已关闭';
+      }else if(row.eligibilityKind==='suppressed'){
+        status='suppressed';
+      }else if(row.deliveryState==='pending'&&runtime&&runtime.emailStatus!=='active'){
+        status=runtime.emailStatus;
+        reason={auth_unavailable:'Auth 暂不可用，候选已保留',quota_exceeded:'超出当前额度，候选已保留',
+          email_unverified:'邮箱未验证，候选已保留',paused:'订阅已暂停，候选已保留',
+          access_revoked:'访问权益已停用，候选已保留',deleted:'订阅已删除，候选已保留'}[status]??'候选已保留，等待恢复';
+      }else if(row.deliveryId&&row.deliveryKind==='immediate'){
         status=row.deliveryState==='pending'
           ?(row.emailMode==='immediate'?'pending_immediate':'merged_immediate')
           :row.deliveryState;
@@ -403,10 +400,6 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
           reason='同一事件已被及时提醒占用';
       }else if(row.deliveryId){
         status=row.deliveryState==='pending'?'pending_daily_digest':row.deliveryState;
-      }else if(row.eligibilityKind==='pending'){
-        status='waiting_date_verification';reason='日期待核实';
-      }else if(row.reason==='邮件已关闭'){
-        status='mail_off';
       }else{
         status='suppressed';reason=row.reason||'按历史规则抑制';
       }
@@ -418,13 +411,13 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
     });
   }
 
-  async function readSubscription(subscriptionId){
+  async function readSubscription(subscriptionId,ownerSub){
     if(!idPattern.test(subscriptionId??''))return null;
     const row=await env.DB.prepare(`SELECT id,owner_sub AS ownerSub,name,requested_enabled AS requestedEnabled,priority,
         email_mode AS emailMode,activated_at AS activatedAt,created_at AS createdAt,deleted_at AS deletedAt,
         rss_token_generation AS rssTokenGeneration,rss_token_ciphertext AS rssTokenCiphertext,
         rss_revoked_at IS NOT NULL AS rssRevoked,deleted_at IS NOT NULL AS deleted,config_version AS configVersion
-      FROM subscriptions WHERE id=?`).bind(subscriptionId).first();
+      FROM subscriptions WHERE id=? AND owner_sub=?`).bind(subscriptionId,ownerSub).first();
     if(!row)return null;
     const {runtimes}=await (async()=>{
       const account=await auth.getRecipient(row.ownerSub);
@@ -454,7 +447,7 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
         effectiveFrom:new Date(target.effectiveFrom).toISOString()})),
       effectiveStatus:runtime.effectiveStatus,selected:runtime.selected,
       rssStatus:runtime.rssStatus,emailStatus:runtime.emailStatus,
-      notificationMatches:await subscriptionMatches(subscriptionId),
+      notificationMatches:await subscriptionMatches(subscriptionId,runtime),
       rssUrl:row.rssRevoked===1?null:await rssUrlForOwner(env,row),
     };
   }
@@ -507,9 +500,7 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
   }
 
   return {
-    enqueueEvent,enqueueEventSource,processMatchTask,drainDue,
-    associateArticleSource,verifyDate,readDateEvidence,
-    subscriptionMatches,eventStatus,readSubscription,
+    enqueueEvent,processMatchTask,verifyDate,readDateEvidence,eventStatus,readSubscription,
   };
 }
 

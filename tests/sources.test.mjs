@@ -89,7 +89,7 @@ async function fixture({versioned=false,notifications=false}={}){
         import worker from './worker/index.mjs';
         import {createSources} from './worker/sources.mjs';
         import {createTaskRuntime,handleFeedJobs} from './worker/task-runtime.mjs';
-        import {createNotifications} from './worker/notifications.mjs';
+        import {replayMatchOutbox} from './tests/helpers/notification-replay.mjs';
         import {CaptureWorkflow} from './worker/capture-workflow.mjs';
         import {DiscoveryWorkflow} from './worker/discovery-workflow.mjs';
         import {issueGrant} from './worker/bridge.mjs';
@@ -176,22 +176,13 @@ async function fixture({versioned=false,notifications=false}={}){
               return Response.json(result);
             }
             if(notificationsEnabled&&url.pathname==='/fixture/drain-matches'){
-              return Response.json(await createNotifications(env,{now:runtimeNow}).drainDue(100));
+              return Response.json(await replayMatchOutbox(env,runtimeNow,100));
             }
             return worker.fetch(request,env);
           },
           async queue(batch,rawEnv){
             const env=prepareEnv(rawEnv);
-            const messages=batch.messages.map(message=>message.body);
-            if(messages.some(payload=>payload?.type==='match-source'||payload?.type==='event-ready')){
-              const notifications=createNotifications(env,{now:runtimeNow});
-              for(const payload of messages){
-                if(payload.type==='match-source')await notifications.processMatchTask(payload);
-                else if(payload.type==='event-ready')await notifications.enqueueEvent(payload.eventId);
-              }
-            }else{
-              await handleFeedJobs(batch,env,{workflow,now:runtimeNow});
-            }
+            await handleFeedJobs(batch,env,{workflow,now:runtimeNow});
             await Promise.allSettled(globalThis.SOURCES_ACTIVE_WORKFLOWS.splice(0));
           },
         }

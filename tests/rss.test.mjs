@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 
 import {
   feedOrigin,
+  adminRequest,
   subscriptionCall,
   subscriptionsFixture,
 } from './helpers/subscriptions-fixture.mjs';
@@ -245,6 +246,115 @@ test('RSS eligibility follows the subscription target source date association', 
   }
 });
 
+test('latest source date corrections govern RSS eligibility and invalidate prior ETags', async () => {
+  const { mf, login } = await subscriptionsFixture();
+  try {
+    const cookie = await login('rss-correction-reader');
+    const subscriptions = new Map();
+    for (const sourceId of ['jwc', 'intex', 'news']) {
+      const created = await subscriptionCall(mf, '/api/subscriptions', {
+        cookie,
+        method: 'POST',
+        origin: feedOrigin,
+        body: {
+          requestId: `create-${sourceId}-correction-rss`,
+          name: `${sourceId} 日期修正订阅`,
+          siteIds: [],
+          sourceIds: [sourceId],
+          emailMode: 'off',
+        },
+      });
+      assert.equal(created.status, 201, JSON.stringify(created.body));
+      subscriptions.set(sourceId, new URL(created.body.subscription.rssUrl, feedOrigin));
+    }
+
+    const unknownForJwc = await seedReadyEvent(mf, {
+      articleId: 'aaa000000000000000000201',
+      taskId: 'bbb000000000000000000201',
+      revisionId: 'ccc000000000000000000201',
+      revisionNo: 1,
+      title: '来源各自修正的日期',
+      body: 'RSS 按订阅栏目自己的最新核实结果判断',
+      intent: 'live',
+      changeKind: 'baseline',
+      precision: 'unknown',
+    });
+    await associateEventSource(mf, {
+      articleId: unknownForJwc.articleId,
+      revisionId: unknownForJwc.revisionId,
+      sourceId: 'intex',
+      precision: 'minute',
+    });
+    await associateEventSource(mf, {
+      articleId: unknownForJwc.articleId,
+      revisionId: unknownForJwc.revisionId,
+      sourceId: 'news',
+      precision: 'unknown',
+    });
+    const eventId = await eventIdFor(mf, unknownForJwc.revisionId);
+
+    const initial = await rssTitlesBySource(mf, subscriptions);
+    assert.deepEqual(initial, new Map([
+      ['jwc', []],
+      ['intex', ['来源各自修正的日期']],
+      ['news', []],
+    ]));
+    const emptyEtag = await rssEtag(mf, subscriptions.get('jwc'));
+
+    const verified = await adminRequest(mf, `/internal/notification-events/${eventId}/date-verification`, {
+      requestId: 'verify-jwc-rss-minute',
+      sourceId: 'jwc',
+      verifiedBy: 'rss-admin',
+      datePrecision: 'minute',
+      publishedAt: '2026-10-12T09:01:00.000Z',
+      evidence: { sourceUrl: 'https://jwc.cqu.edu.cn/info/2026/corrected.htm', method: 'source-page' },
+    });
+    assert.equal(verified.status, 202, JSON.stringify(verified.body));
+    assert.equal(verified.body.correction.generation, 1);
+
+    const afterVerify = await mf.dispatchFetch(subscriptions.get('jwc'), {
+      headers: { 'If-None-Match': emptyEtag },
+    });
+    const verifiedXml = await afterVerify.text();
+    assert.equal(afterVerify.status, 200, verifiedXml);
+    assert.deepEqual(itemTitles(verifiedXml), ['来源各自修正的日期']);
+    const verifiedEtag = afterVerify.headers.get('ETag');
+    assert.notEqual(verifiedEtag, emptyEtag);
+    assert.deepEqual(await rssTitlesBySource(mf, subscriptions), new Map([
+      ['jwc', ['来源各自修正的日期']],
+      ['intex', ['来源各自修正的日期']],
+      ['news', []],
+    ]));
+
+    const hidden = await adminRequest(mf, `/internal/notification-events/${eventId}/date-verification`, {
+      requestId: 'verify-jwc-rss-unknown',
+      sourceId: 'jwc',
+      verifiedBy: 'rss-admin',
+      datePrecision: 'unknown',
+      evidence: { sourceUrl: 'https://jwc.cqu.edu.cn/info/2026/withdrawn-date.htm', method: 'source-page' },
+    });
+    assert.equal(hidden.status, 202, JSON.stringify(hidden.body));
+    assert.equal(hidden.body.correction.generation, 2);
+
+    const afterHide = await mf.dispatchFetch(subscriptions.get('jwc'), {
+      headers: { 'If-None-Match': verifiedEtag },
+    });
+    const hiddenXml = await afterHide.text();
+    assert.equal(afterHide.status, 200, hiddenXml);
+    assert.deepEqual(itemTitles(hiddenXml), []);
+    assert.notEqual(afterHide.headers.get('ETag'), verifiedEtag);
+    assert.deepEqual(await rssTitlesBySource(mf, subscriptions), new Map([
+      ['jwc', []],
+      ['intex', ['来源各自修正的日期']],
+      ['news', []],
+    ]));
+    assert.equal(await eventDateState(mf, unknownForJwc.revisionId), 'date_unknown');
+    assert.equal(await sourceDatePrecision(mf, eventId, 'jwc'), 'unknown');
+  } finally {
+    await mf.dispose();
+  }
+});
+
 async function seedReadyEvent(mf, options) {
   const db = await mf.getD1Database('DB', 'feed');
   const bucket = await mf.getR2Bucket('ARCHIVE', 'feed');
@@ -315,6 +425,30 @@ async function eventDateState(mf, revisionId) {
   const event = await db.prepare('SELECT date_state AS dateState FROM content_events WHERE revision_id=?').bind(revisionId).first();
   assert.ok(event, 'Expected a content event');
   return event.dateState;
+}
+
+async function rssTitlesBySource(mf, subscriptions) {
+  const titles = await Promise.all([...subscriptions].map(async ([sourceId, url]) => {
+    const response = await mf.dispatchFetch(url);
+    const xml = await response.text();
+    assert.equal(response.status, 200, xml);
+    return [sourceId, itemTitles(xml)];
+  }));
+  return new Map(titles);
+}
+
+async function rssEtag(mf, url) {
+  const response = await mf.dispatchFetch(url);
+  assert.equal(response.status, 200, await response.text());
+  return response.headers.get('ETag');
+}
+
+async function sourceDatePrecision(mf, eventId, sourceId) {
+  const db = await mf.getD1Database('DB', 'feed');
+  const source = await db.prepare('SELECT date_precision AS datePrecision FROM event_sources WHERE event_id=? AND source_id=?')
+    .bind(eventId, sourceId).first();
+  assert.ok(source, 'Expected the frozen event source');
+  return source.datePrecision;
 }
 
 function extract(xml, tag) {

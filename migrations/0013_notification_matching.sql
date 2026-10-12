@@ -7,11 +7,13 @@ CREATE TABLE event_source_corrections(
   generation INTEGER NOT NULL CHECK(generation>=1),
   evidence_object_hash TEXT NOT NULL REFERENCES artifact_objects(sha256) CHECK(length(evidence_object_hash)=64),
   corrected_dates_json TEXT NOT NULL CHECK(json_valid(corrected_dates_json)),
+  request_id TEXT NOT NULL,
   command_hash TEXT NOT NULL UNIQUE CHECK(length(command_hash)=64),
   verified_by TEXT NOT NULL,
   verified_at INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
-  UNIQUE(event_id,source_id,generation)
+  UNIQUE(event_id,source_id,generation),
+  UNIQUE(event_id,source_id,request_id)
 );
 
 CREATE INDEX event_source_corrections_current

@@ -650,7 +650,16 @@ export function createSubscriptions(env,{now=()=>Date.now()}={}){
             SELECT 1 FROM event_sources es
             JOIN subscription_sources st ON st.source_id=es.source_id
               AND st.subscription_id=? AND st.removed_at IS NULL
-            WHERE es.event_id=e.id AND es.date_precision IN ('day','minute')
+            LEFT JOIN event_source_corrections c ON c.event_id=es.event_id
+              AND c.source_id=es.source_id
+              AND NOT EXISTS(
+                SELECT 1 FROM event_source_corrections newer
+                WHERE newer.event_id=es.event_id AND newer.source_id=es.source_id
+                  AND newer.generation>c.generation
+              )
+            WHERE es.event_id=e.id
+              AND COALESCE(json_extract(c.corrected_dates_json,'$.datePrecision'),es.date_precision)
+                IN ('day','minute')
           )
         ORDER BY e.ready_at DESC,e.id DESC LIMIT ${maxFeedItems}`)
         .bind(subscription.id).all();
@@ -705,7 +714,7 @@ export async function subscriptionsRoute(request,env,state){
     return json(result);
   }
   if(request.method==='GET'&&detail){
-    const subscription=await createNotifications(env).readSubscription(detail[1]);
+    const subscription=await createNotifications(env).readSubscription(detail[1],state.user.id);
     if(!subscription||subscription.ownerSub!==state.user.id)return json({error:'订阅不存在'},404);
     return json({subscription});
   }

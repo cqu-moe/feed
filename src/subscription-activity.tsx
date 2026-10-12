@@ -10,6 +10,9 @@ const statusLabels: Record<string, string> = {
   mail_off: '邮件已关闭', suppressed: '不发送邮件', claimed: '已排入邮件',
   sent: '已提交', accepted: '服务商已受理', delivered: '收件服务器已接收',
   submission_unknown: '发送结果待确认', cancelled: '已取消',
+  auth_unavailable: '等待权益服务恢复', quota_exceeded: '等待额度恢复',
+  email_unverified: '等待验证邮箱', paused: '订阅已暂停',
+  access_revoked: '访问权益已停用', deleted: '订阅已删除',
 };
 
 type ActivityState = { kind: 'loading' } | { kind: 'ready'; matches: NotificationMatch[] }

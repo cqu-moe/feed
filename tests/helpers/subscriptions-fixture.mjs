@@ -16,6 +16,7 @@ export async function subscriptionsFixture({ editingMigration = true, clock, not
       import {createSubscriptions} from './worker/subscriptions.mjs';
       import {createNotifications} from './worker/notifications.mjs';
       import {handleFeedJobs} from './worker/task-runtime.mjs';
+      import {replayMatchOutbox} from './tests/helpers/notification-replay.mjs';
       import {reconcileRevision} from './worker/archive-reconcile.mjs';
       const workerErrors=[];
       console.error=(...args)=>{workerErrors.push(args.map(String));};
@@ -27,6 +28,7 @@ export async function subscriptionsFixture({ editingMigration = true, clock, not
         }
         if(new URL(request.url).pathname==='/__test/notifications'){
           const {method,args}=await request.json();
+          if(method==='replayMatchOutbox')return Response.json(await replayMatchOutbox(env,()=>${clock ?? 'Date.now()'},...args));
           try{return Response.json(await createNotifications(env,{now:()=>${clock ?? 'Date.now()'}})[method](...args));}
           catch(error){return Response.json({error:error.message},{status:error.status??503});}
         }
