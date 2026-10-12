@@ -36,6 +36,7 @@ CREATE TABLE discovery_admissions(
   PRIMARY KEY(task_id,attempt_no)
 );
 CREATE INDEX discovery_admissions_budget ON discovery_admissions(lane,slot);
+CREATE INDEX discovery_admissions_retention ON discovery_admissions(admitted_at);
 
 ALTER TABLE tasks ADD COLUMN backfill_retry_from INTEGER NOT NULL DEFAULT 1
   CHECK(backfill_retry_from BETWEEN 1 AND 1000);

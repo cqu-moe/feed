@@ -283,7 +283,7 @@ async function fixture({versioned=false,notifications=false,discoveryPages=2,env
     bindings:{...provider.bindings,ADMIN_TOKEN:'test-admin-token',BASE_URL:'https://feed.test',BRIDGE_SECRET:'test-bridge-secret',
       FEED_AUTH_RPC_CLIENT_ID:'feed-rpc-client',FEED_AUTH_RPC_CLIENT_SECRET:'feed-rpc-secret',
       ARCHIVE_VERSIONS_ENABLED:String(versioned),ARCHIVE_READS_ENABLED:String(versioned),SOURCE_MANAGEMENT_ENABLED:'true',CRAWL_ENABLED:'true',TASK_RUNTIME_ENABLED:'true',PDF_OCR_ENABLED:'false',MAX_DISCOVERY_PAGES_PER_RUN:String(discoveryPages),
-      MAX_LIVE_DISCOVERY_TASKS_PER_RUN:String(env.liveBudget??20),MAX_BACKFILL_TASKS_PER_RUN:String(env.backfillBudget??5),MAX_TASK_ATTEMPTS:String(env.maxAttempts??3),MAX_BACKFILL_PAGES_PER_RUN:String(env.backfillPages??100),DEFAULT_BACKFILL_WINDOW_DAYS:String(env.backfillWindowDays??365)},
+      MAX_LIVE_DISCOVERY_TASKS_PER_RUN:String(env.liveBudget??20),MAX_BACKFILL_TASKS_PER_RUN:String(env.backfillBudget??5),MAX_TASK_ATTEMPTS:String(env.maxAttempts??3),MAX_BACKFILL_PAGES_PER_RUN:String(env.backfillPages??100),DEFAULT_BACKFILL_WINDOW_DAYS:String(env.backfillWindowDays??365),DISCOVERY_ADMISSION_RETENTION_MS:String(env.admissionRetentionMs??7*24*60*60*1000)},
     d1Databases:['DB'],r2Buckets:['ARCHIVE'],
     queueProducers:{FEED_JOBS:{queueName:'feed-jobs'},FEED_EVENTS:{queueName:'feed-events'}},
     queueConsumers:{'feed-jobs':{maxBatchSize:1,maxConcurrency:10,maxRetries:3,deadLetterQueue:'feed-jobs-dlq'},'feed-events':{maxBatchSize:1,maxConcurrency:10,maxRetries:3,deadLetterQueue:'feed-events-dlq'}},
@@ -428,6 +428,43 @@ test('backfill stops at its finite page cap with a resumable cursor instead of c
     assert.equal(resumed.status,202,JSON.stringify(resumed));
     await waitFor(async()=>assert.equal((await request(mf,`/internal/sources/${sourceId}`)).data.source.backfill.state,'completed'));
     assert.equal((await request(mf,`/internal/sources/${sourceId}`)).data.source.backfill.processedArticles,1);
+  }finally{await mf.dispose();}
+});
+
+test('the hard thousand-page ceiling retains evidence without queueing an unreachable continuation',async()=>{
+  const {mf,db}=await fixture({versioned:true,env:{backfillPages:1000}});
+  const bucket=await mf.getR2Bucket('ARCHIVE');
+  try{
+    const site=await request(mf,'/internal/sites',{method:'POST',body:{name:'硬上限站点',origin:'https://a.test'}});
+    const sourceId=await createHistorySource(mf,site.data.site.id,'https://a.test/list.htm');
+    await control(mf,'list-options',{chainPages:1002});
+    const submitted=await control(mf,'submit-backfill',{sourceId,requestId:'hard-thousand-page-ceiling'});
+    const hardPageUrl='https://a.test/list.htm?page=1000';
+    const checkpoint={nextUrls:[hardPageUrl],visited:[]};
+    const task=await db.prepare('SELECT payload_json FROM tasks WHERE id=?').bind(submitted.task.id).first();
+    const payload=JSON.parse(task.payload_json);
+    payload.page=1000;
+    payload.checkpoint=checkpoint;
+    await db.batch([
+      db.prepare('UPDATE tasks SET payload_json=? WHERE id=?').bind(JSON.stringify(payload),submitted.task.id),
+      db.prepare(`UPDATE sources SET backfill_seen_pages=999,backfill_max_pages=1000,backfill_cursor=? WHERE id=?`)
+        .bind(JSON.stringify(checkpoint),sourceId),
+    ]);
+
+    await control(mf,'dispatch',{});
+    await waitFor(async()=>{
+      const source=(await request(mf,`/internal/sources/${sourceId}`)).data.source;
+      assert.equal(source.backfill.state,'paused',JSON.stringify(source.backfill));
+      assert.equal(source.backfill.seenPages,1000);
+      assert.deepEqual(source.backfillCursor.nextUrls,['https://a.test/list.htm?page=1001']);
+      assert.match(source.backfill.lastError,/manual inspection/i);
+    });
+    assert.ok(await bucket.head(`discovery/${submitted.task.id}/list.json`));
+    assert.equal((await db.prepare(`SELECT COUNT(*) AS n FROM tasks
+      WHERE kind='backfill' AND json_extract(payload_json,'$.page')=1001`).first()).n,0);
+    assert.equal((await db.prepare(`SELECT COUNT(*) AS n FROM outbox o JOIN tasks t ON t.id=json_extract(o.payload_json,'$.taskId')
+      WHERE t.kind='backfill' AND json_extract(t.payload_json,'$.page')=1001`).first()).n,0);
+    assert.equal((await control(mf,'scrapes',{})).calls.filter(url=>url===hardPageUrl).length,1);
   }finally{await mf.dispose();}
 });
 
@@ -774,6 +811,44 @@ test('exhausted live admission does not starve history with its own available bu
   }finally{await mf.dispose();}
 });
 
+test('discovery admission retention removes only old terminal or superseded permits in bounded batches',async()=>{
+  const {mf,db}=await fixture({versioned:true,env:{admissionRetentionMs:60*60*1000}});
+  try{
+    const now=Date.now(),old=now-2*60*60*1000,recent=now+30*60*1000;
+    const cases=[
+      {id:'a0000000000000000000001',state:'succeeded',taskAttempt:1,permitAttempt:1,admittedAt:old,retained:false},
+      {id:'a0000000000000000000002',state:'cancelled',taskAttempt:1,permitAttempt:1,admittedAt:old,retained:false},
+      {id:'a0000000000000000000003',state:'queued',taskAttempt:2,permitAttempt:1,admittedAt:old,retained:false},
+      {id:'a0000000000000000000004',state:'queued',taskAttempt:1,permitAttempt:1,admittedAt:old,retained:true},
+      {id:'a0000000000000000000005',state:'failed',taskAttempt:1,permitAttempt:1,admittedAt:old,retained:true},
+      {id:'a0000000000000000000006',state:'blocked',taskAttempt:1,permitAttempt:1,admittedAt:old,retained:true},
+      {id:'a0000000000000000000007',state:'deferred',taskAttempt:1,permitAttempt:1,admittedAt:old,retained:true},
+      {id:'a0000000000000000000008',state:'succeeded',taskAttempt:1,permitAttempt:1,admittedAt:recent,retained:true},
+    ];
+    for(const permit of cases)await seedDiscoveryPermit(db,permit);
+    await db.batch([
+      db.prepare(`WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<101)
+        INSERT INTO tasks(id,kind,business_key,payload_json,state,due_at,attempt_no,created_at,updated_at)
+        SELECT 'b'||printf('%023d',n),'discover','bulk-admission-'||n,'{}','succeeded',?,1,?,? FROM seq`).bind(old,old,old),
+      db.prepare(`WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<101)
+        INSERT INTO discovery_admissions(task_id,attempt_no,lane,slot,admitted_at)
+        SELECT 'b'||printf('%023d',n),1,'discover',0,? FROM seq`).bind(old),
+    ]);
+
+    await control(mf,'recover',{});
+    const afterFirst=await db.prepare(`SELECT a.task_id AS taskId FROM discovery_admissions a
+      WHERE a.task_id LIKE 'a%' ORDER BY a.task_id`).all();
+    assert.deepEqual(afterFirst.results.map(row=>row.taskId),cases.filter(case_=>case_.retained).map(case_=>case_.id));
+    const eligibleRemaining=await db.prepare(`SELECT a.task_id AS taskId FROM discovery_admissions a JOIN tasks t ON t.id=a.task_id
+      WHERE a.admitted_at<=? AND (t.state IN ('succeeded','cancelled') OR t.attempt_no>a.attempt_no) ORDER BY a.task_id`).bind(now).all();
+    assert.deepEqual(eligibleRemaining.results.map(row=>row.taskId),[
+      'b00000000000000000000098','b00000000000000000000099','b00000000000000000000100','b00000000000000000000101',
+    ],'retention cleanup must be bounded to 100 permits per recovery invocation');
+
+    assert.equal((await db.prepare(`SELECT COUNT(*) AS n FROM discovery_admissions`).first()).n,9);
+  }finally{await mf.dispose();}
+});
+
 test('a later column association fans out an already ready shared event',async()=>{
   const {mf,provider}=await fixture({versioned:true,notifications:true});
   try{
@@ -1045,6 +1120,16 @@ async function applyMigration(db,sql){
 
 async function control(mf,path,body){
   return (await mf.dispatchFetch('https://feed.test/fixture/'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+}
+
+async function seedDiscoveryPermit(db,{id,state,taskAttempt,permitAttempt,admittedAt}){
+  await db.batch([
+    db.prepare(`INSERT INTO tasks(id,kind,business_key,payload_json,state,due_at,attempt_no,created_at,updated_at)
+      VALUES (?,'discover',?,?,?,?,?,?,?)`)
+      .bind(id,`admission-${id}`,'{}',state,admittedAt+26*60*60*1000,taskAttempt,admittedAt,admittedAt),
+    db.prepare(`INSERT INTO discovery_admissions(task_id,attempt_no,lane,slot,admitted_at)
+      VALUES (?,?,'discover',0,?)`).bind(id,permitAttempt,admittedAt),
+  ]);
 }
 
 async function createHistorySource(mf,siteId,listUrl){

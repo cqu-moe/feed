@@ -41,6 +41,18 @@ export async function admitDiscovery(env,taskId,attempt,at){
   return Boolean(admitted);
 }
 
+// Retention keeps every permit that can still identify the active task attempt.
+// Terminal permits and attempts already replaced by a newer attempt are safe to
+// delete only after the configured age; each recovery clears a bounded batch.
+export async function retainDiscoveryAdmissions(env,at){
+  const retentionMs=bounded(env.DISCOVERY_ADMISSION_RETENTION_MS,7*24*60*60*1000,60*60*1000,30*24*60*60*1000);
+  const result=await env.DB.prepare(`DELETE FROM discovery_admissions WHERE rowid IN (
+      SELECT a.rowid FROM discovery_admissions a JOIN tasks t ON t.id=a.task_id
+      WHERE a.admitted_at<=? AND (t.state IN ('succeeded','cancelled') OR t.attempt_no>a.attempt_no)
+      ORDER BY a.admitted_at,a.task_id,a.attempt_no LIMIT 100)`).bind(at-retentionMs).run();
+  return result.meta?.changes??0;
+}
+
 // Compose with the task terminal transition so the source cannot remain running
 // after its current page becomes terminal. Old runs/configurations never win.
 export function backfillFailureStatement(env,taskId,attempt,at){

@@ -1,4 +1,4 @@
-import {admitDiscovery,backfillTaskSql,backfillFailureStatement} from './backfill-control.mjs';
+import {admitDiscovery,backfillTaskSql,backfillFailureStatement,retainDiscoveryAdmissions} from './backfill-control.mjs';
 import {createMail,handleMailMessage} from './notification-mail.mjs';
 import {cleanError,sha} from './utils.mjs';
 import {createSources} from './sources.mjs';
@@ -113,6 +113,7 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
 
     async recover({limit=20}={}){
       const timestamp=now(),pageSize=boundedInteger(limit,20,1,100);
+      if(env.SOURCE_MANAGEMENT_ENABLED==='true')await retainDiscoveryAdmissions(env,timestamp);
       // A sent message may expire or enter its launch DLQ. Re-send the same identity, with a finite launch budget.
       const stranded=await env.DB.prepare(`SELECT t.id,t.kind,t.attempt_no,o.id AS outbox_id,o.attempts,a.workflow_instance_id FROM tasks t
         LEFT JOIN task_attempts a ON a.task_id=t.id AND a.attempt_no=t.attempt_no

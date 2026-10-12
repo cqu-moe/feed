@@ -65,6 +65,7 @@ type BackfillProgress = {
   windowEnd: string | null;
   windowDays: number | null;
   windowStart: string | null;
+  runId: string | null;
   nextAt: number;
   startedAt: number | null;
   completedAt: number | null;
@@ -183,6 +184,7 @@ function parseBackfillProgress(value: unknown): BackfillProgress {
     windowEnd: typeof value.windowEnd === 'string' ? value.windowEnd : null,
     windowDays: integerValue(value.windowDays),
     windowStart: typeof value.windowStart === 'string' ? value.windowStart : null,
+    runId: typeof value.runId === 'string' && value.runId ? value.runId : null,
     nextAt: integerValue(value.nextAt) ?? 0,
     startedAt: integerValue(value.startedAt),
     completedAt: integerValue(value.completedAt),
@@ -941,7 +943,13 @@ export function AdminSourcesPage() {
                       <div><dt>已关联通知</dt><dd>{source.articleCount}</dd></div>
                     </dl>
                     {source.error && <p role="status" className="feed-admin-server-error">{source.error}</p>}
-                    <BackfillControls source={source} token={token} onReplace={replaceSource} onError={reportError} />
+                    <BackfillControls
+                      key={`${source.id}:${source.configVersion}:${source.backfill.runId ?? 'idle'}`}
+                      source={source}
+                      token={token}
+                      onReplace={replaceSource}
+                      onError={reportError}
+                    />
                     <div className="feed-card-actions">
                       <Button
                         type="button"

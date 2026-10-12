@@ -417,6 +417,7 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
       }
       const continuation=!isBackfill&&nextPageUrls.length&&page<boundedInteger(env.MAX_DISCOVERY_PAGES_PER_RUN,2,1,10);
       const hasBackfillContinuation=isBackfill&&nextPageUrls.length>0;
+      const hardPageLimitReached=isBackfill&&page>=1000;
       const pageLimitReached=hasBackfillContinuation&&page>=backfillMaxPages;
       const checkpointJson=JSON.stringify({
         nextUrls:continuation||hasBackfillContinuation?nextPageUrls:[],visited:[...visited],verifiedUpTo:currentUrl,page,
@@ -430,7 +431,7 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
         statements.push(...continuationTask.statements);
         statements.push(env.DB.prepare(`UPDATE tasks SET checkpoint_json=? WHERE id=? AND ${activeTask.sql} RETURNING id`)
           .bind(JSON.stringify({continuationTaskId:continuationTask.taskId}),taskId,...activeTask.args));
-      }else if(isBackfill&&nextPageUrls.length){
+      }else if(isBackfill&&nextPageUrls.length&&!hardPageLimitReached){
         const continuationTask=await backfillTaskStatements(env,source,{
           page:page+1,checkpoint:{nextUrls:nextPageUrls,visited:[...visited]},
           runId:context.runId,windowStart:context.windowStart,windowEnd:context.windowEnd,
@@ -455,7 +456,9 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
             backfill_last_error=?,updated_at=? WHERE id=? AND config_version=? AND backfill_state='running' AND ${activeTask.sql}`)
           .bind(new Date(at).toISOString(),checkpointJson,source.id,context.runId,at,
             nextPageUrls.length?0:1,pageLimitReached?1:0,nextPageUrls.length?0:1,nextPageUrls.length?null:at,
-            pageLimitReached?'Backfill page limit reached; raise maxPages explicitly to continue':null,at,source.id,source.configVersion,...activeTask.args)
+            hardPageLimitReached?'Backfill hard page limit reached; source pagination requires manual inspection'
+              :pageLimitReached?'Backfill page limit reached; raise maxPages explicitly to continue':null,
+            at,source.id,source.configVersion,...activeTask.args)
         :env.DB.prepare(`UPDATE sources SET last_run_at=?,error=NULL,updated_at=? WHERE id=? AND config_version=? AND ${activeTask.sql}`)
           .bind(new Date(at).toISOString(),at,source.id,source.configVersion,...activeTask.args));
       let committed;
