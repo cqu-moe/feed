@@ -21,11 +21,13 @@
 | Build variable `NODE_VERSION` | `22.22.3`，与 `.nvmrc` 一致 |
 | Build variable `PNPM_VERSION` | `11.19.0`，与 `packageManager` 一致 |
 
-构建环境自动安装依赖；pnpm 使用提交的 lockfile 和 `.design/` 本地包。`pnpm deploy:ci` 先应用远程 D1 迁移，成功后再部署 Worker。构建 token 需要该账号的 Workers Scripts Edit 与 D1 Edit 权限；Worker 绑定的已有 R2、AI、Workflow 和 Auth 资源沿用 `wrangler.jsonc`。
+2026-10-12 已将上述设置保存到 Worker `cqu-feed`，使用 Cloudflare 自动创建的专用 `cqu-feed build token`。构建环境自动安装依赖；pnpm 使用提交的 lockfile 和 `.design/` 本地包。`pnpm deploy:ci` 先应用远程 D1 迁移，成功后再部署 Worker。构建 token 需要该账号的 Workers Scripts Edit 与 D1 Edit 权限；Worker 绑定的已有 R2、AI、Workflow 和 Auth 资源沿用 `wrangler.jsonc`。
 
 运行时 secrets 留在 Worker 的 Variables and secrets，不复制到 GitHub。Build variables 与 Worker 运行时变量分别管理；Node/pnpm 版本放在 Build variables。
 
 `wrangler.jsonc` 同步保留已有 `feed.cqu.moe` Custom Domain。`BASE_URL` 与 OAuth 回调使用 `https://feed.cqu.moe`；Auth client 必须允许 `https://feed.cqu.moe/auth/callback`。
+
+Auth 的 `cqu-feed` 客户端已同步主页与上述回调；保留原 workers.dev 回调用于旧登录流程完成。两个 origin 的浏览器会话 Cookie 分别保存，迁移域名后需要在新域名重新登录。
 
 日常部署通过提交并 push 到 main 触发 Git Connector。`pnpm deploy` 保留为需要手动部署时的命令，也会先迁移；常规发布使用 Git Connector。
 
