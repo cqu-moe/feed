@@ -157,7 +157,7 @@ test('subscription listing exposes policy, source options, and preserved configu
     assert.equal(list.body.subscriptions[0].id,created.body.subscription.id);
     assert.ok(list.body.sites.some(site=>site.id===staticSiteId));
     assert.ok(list.body.sources.some(source=>source.id==='jwc'&&source.siteId===staticSiteId));
-    assert.deepEqual(list.body.outputChannels,{rss:{enabled:false,reason:'pending_t09'},email:{enabled:false,reason:'pending_t11'}});
+    assert.deepEqual(list.body.outputChannels,{rss:{enabled:true},email:{enabled:false,reason:'pending_t11'}});
 
     const denied=await call(mf,'/api/subscriptions',{cookie,method:'POST',origin:feedOrigin,body:{
       requestId:'revoked-reader-new',name:'撤权后创建',siteIds:[],sourceIds:['jwc'],emailMode:'daily_digest',

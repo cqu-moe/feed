@@ -368,12 +368,16 @@ export function SubscriptionsPage() {
           </Button>
         }
       />
-      <Alert>
-        <AlertTitle>输出通道尚未开放</AlertTitle>
-        <AlertDescription>
-          订阅配置和私有 RSS 链接可以保存，RSS 内容和邮件投递将在开放后生效。
-        </AlertDescription>
-      </Alert>
+      {state.kind === 'success' && (
+        <Alert>
+          <AlertTitle>{state.data.outputChannels.rss.enabled ? 'RSS 已开放' : '输出通道尚未开放'}</AlertTitle>
+          <AlertDescription>
+            {state.data.outputChannels.rss.enabled
+              ? '私有 RSS 会输出标题、摘要和版本链接；正文与附件仍需登录。邮件投递尚未开放。'
+              : '订阅配置和私有 RSS 链接可以保存，RSS 内容和邮件投递将在开放后生效。'}
+          </AlertDescription>
+        </Alert>
+      )}
       {state.kind === 'loading' && (
         <PageState state="loading" title="正在读取订阅状态" description="正在获取当前额度、栏目选项和已保存配置。" />
       )}

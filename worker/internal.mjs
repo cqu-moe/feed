@@ -5,10 +5,57 @@ import {createSources} from './sources.mjs';
 import {createTaskRuntime,ValidationError} from './task-runtime.mjs';
 import {repairPdfText} from './pdf-text.mjs';
 import {createNotifications} from './notifications.mjs';
+import {createArchiveMigration,MigrationConflictError,MigrationNotFoundError,MigrationValidationError} from './archive-migration.mjs';
 
 export async function internalRoute(request,env){
   const url=new URL(request.url);
   if(!await requireAdmin(request,env))return json({error:'Unauthorized'},401);
+  if(url.pathname==='/internal/archive-migration/articles'){
+    if(request.method!=='GET')return json({error:'Method not allowed'},405);
+    try{return json(await createArchiveMigration(env).articles({after:url.searchParams.get('after'),
+      limit:url.searchParams.has('limit')?Number(url.searchParams.get('limit')):20}));}
+    catch(error){
+      if(error instanceof MigrationValidationError)return json({error:error.message},400);
+      throw error;
+    }
+  }
+  if(url.pathname==='/internal/archive-migration'){
+    const migration=createArchiveMigration(env);
+    if(request.method==='GET'){
+      const status=await migration.status();
+      return status?json(status):json({error:'Migration not submitted'},404);
+    }
+    if(request.method==='POST'){
+      try{return json(await migration.submit(await readJson(request)),202);}
+      catch(error){
+        if(error instanceof MigrationValidationError)return json({error:error.message},400);
+        if(error instanceof MigrationConflictError)return json({error:error.message},409);
+        if(error instanceof MigrationNotFoundError)return json({error:error.message},404);
+        throw error;
+      }
+    }
+    return json({error:'Method not allowed'},405);
+  }
+  if(url.pathname==='/internal/archive-migration/process'&&request.method==='POST'){
+    const migration=createArchiveMigration(env);
+    try{return json(await migration.process(await readJson(request)),202);}
+    catch(error){
+      if(error instanceof MigrationValidationError)return json({error:error.message},400);
+      if(error instanceof MigrationNotFoundError)return json({error:error.message},404);
+      throw error;
+    }
+  }
+  if(url.pathname==='/internal/archive-migration/repair'){
+    if(request.method!=='POST')return json({error:'Method not allowed'},405);
+    const migration=createArchiveMigration(env);
+    try{return json(await migration.repair(await readJson(request)),202);}
+    catch(error){
+      if(error instanceof MigrationValidationError)return json({error:error.message},400);
+      if(error instanceof MigrationNotFoundError)return json({error:error.message},404);
+      if(error instanceof MigrationConflictError)return json({error:error.message},409);
+      throw error;
+    }
+  }
   if((url.pathname.startsWith('/internal/sites')||url.pathname.startsWith('/internal/sources'))&&env.SOURCE_MANAGEMENT_ENABLED!=='true'){
     return json({error:'Source management is disabled'},503);
   }

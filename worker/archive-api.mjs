@@ -30,7 +30,7 @@ export async function archiveRoute(request,env){
     const article=await env.DB.prepare('SELECT latest_ready_revision_id,latest_observed_revision_id,prefix FROM articles WHERE id=?').bind(current[1]).first();
     if(!article)return json({error:'通知不存在'},404);
     if(article.latest_ready_revision_id)return json(await readRevision(env,current[1],article.latest_ready_revision_id,{current:true}));
-    if(article.latest_observed_revision_id&&!article.prefix)return json(await readRevision(env,current[1],article.latest_observed_revision_id));
+    if(article.latest_observed_revision_id)return json(await readRevision(env,current[1],article.latest_observed_revision_id));
     return null;
   }
   if(path==='/api/articles')return versionedList(env,url);
@@ -48,16 +48,19 @@ async function versionedList(env,url){
   if(query){
     if([...query].length>=3){
       clauses.push(`(EXISTS(SELECT 1 FROM article_read_search WHERE id=a.id AND article_read_search MATCH ?)
-        OR (m.article_id IS NULL AND EXISTS(SELECT 1 FROM article_search WHERE id=a.id AND article_search MATCH ?)))`);
+        OR (m.article_id IS NULL AND observed.id IS NULL
+          AND EXISTS(SELECT 1 FROM article_search WHERE id=a.id AND article_search MATCH ?)))`);
       const match='"'+query.replace(/"/g,'""')+'"';bindings.push(match,match);
     }else{
-      clauses.push("(COALESCE(m.title,a.title) LIKE ? ESCAPE '\\' OR COALESCE(m.readable_text,a.body_text) LIKE ? ESCAPE '\\')");
+      clauses.push(`(COALESCE(m.title,observed.title,a.title) LIKE ? ESCAPE '\\'
+        OR (CASE WHEN m.article_id IS NOT NULL THEN m.readable_text
+          WHEN observed.id IS NULL THEN a.body_text ELSE '' END LIKE ? ESCAPE '\\'))`);
       const match='%'+query.replace(/[\\%_]/g,'\\$&')+'%';bindings.push(match,match);
     }
   }
   const from=`FROM articles a JOIN sources s ON s.id=a.source_id LEFT JOIN article_read_models m ON m.article_id=a.id
     LEFT JOIN article_revisions r ON r.id=m.revision_id
-    LEFT JOIN article_revisions observed ON observed.id=a.latest_observed_revision_id AND a.prefix IS NULL`;
+    LEFT JOIN article_revisions observed ON observed.id=a.latest_observed_revision_id`;
   const where=clauses.length?' WHERE '+clauses.join(' AND '):'';
   const count=await env.DB.prepare(`SELECT COUNT(*) AS n ${from}${where}`).bind(...bindings).first();
   const rows=await env.DB.prepare(`SELECT a.id,COALESCE(m.title,observed.title,a.title) AS title,a.source_id AS sourceId,s.name AS sourceName,a.url,
