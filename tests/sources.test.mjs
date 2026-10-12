@@ -878,15 +878,19 @@ test('a later column association fans out an already ready shared event',async()
     const before=(await request(mf,`/internal/notification-events/${eventId}`)).data;
     assert.deepEqual(before.sources.map(source=>source.sourceId).sort(),[first,second].sort());
     assert.equal(before.matchTasks.length,2);
+    const verificationNow=Math.floor(Date.now()/60_000)*60_000+30_000;
+    await control(mf,'clock',{now:verificationNow});
     const verified=await request(mf,`/internal/notification-events/${eventId}/date-verification`,{
       method:'POST',
       body:{requestId:'late-column-date-verification',sourceId:second,verifiedBy:'feed-admin',
-        datePrecision:'minute',publishedAt:new Date(Date.now()+60_000).toISOString(),evidence:{method:'source-page'}},
+        datePrecision:'minute',publishedAt:new Date(verificationNow+60_000).toISOString(),evidence:{method:'source-page'}},
     });
     assert.equal(verified.status,202,JSON.stringify(verified));
+    const pending=(await request(mf,`/internal/notification-events/${eventId}`)).data;
+    assert.equal(pending.matchTasks.length,3,JSON.stringify(pending.matchTasks));
     commitGate('match',{arm:true});
     const dispatched=await control(mf,'dispatch',{});
-    assert.ok(dispatched.length>0);
+    assert.ok(dispatched.length>0,`date verification match outbox was not dispatched: ${JSON.stringify(pending.matchTasks)}`);
     await waitFor(async()=>assert.equal(commitGate('match').held,true));
 
     const inFlight=await userRequest(mf,cookie,`/api/subscriptions/${created.data.subscription.id}`);
