@@ -29,6 +29,7 @@
 | `MAX_OCR_PER_DAY` | `100` | D1 全局硬额度，按自然日计数 |
 | `MAX_ARTICLES_PER_RUN` | `40` | 每个来源 Workflow 每次运行最多处理的通知数 |
 | `CRAWL_ENABLED` | `true` | 设为非 `true` 禁止每日和手动启动采集 |
+| `SOURCE_MANAGEMENT_ENABLED` | `false` | T04 动态站点/栏目、样本验证与发现调度；需先应用 0006 迁移并绑定 DISCOVERY |
 | `TASK_RUNTIME_ENABLED` | `false` | T03 单篇任务入口默认关闭；POST 需它与 `CRAWL_ENABLED` 同时为 `true`，状态 GET 不受此开关影响 |
 | `MAX_TASK_ATTEMPTS` | `3` | 自动恢复的 429 等暂态失败最大尝试次数；配置会限制在 1–10 |
 | `PDF_OCR_ENABLED` | `true` | 自动入队与每日补偿；不禁止显式 admin 对比任务 |
@@ -384,3 +385,18 @@ node scripts/compare-ocr.mjs publish mistral-ocr-4-1
 查看 D1 `pdf_ocr_jobs` 了解失败和延期；`pdf_ocr_usage` 是按日/月的预留/成功处理页数与估算费用，`pdf_ocr_budget` 是原子配额状态。超时可能已经收费，因此失败不释放预算，不要为恢复任务随意清除 calls/attempts。`PDF_OCR_ENABLED=false` 只停止新自动入队，已启动 Workflow 仍可完成；不清空 key、数据或已发布文字。
 
 当前只对 body-pdf 自动 OCR。最大 12 MiB/100 个源页/20 个 OCR 页，按每次请求完整源页数保守预留预算。每月 1000 页对应默认模型约 $4 基础 OCR 用量，Cloudflare 和整个供应商账号的总账单不受这个应用额度封顶。
+
+
+## 正式版多来源接入（T04，默认关闭）
+
+先应用 `0006_sources.sql`，在独立环境绑定 `DISCOVERY` → `DiscoveryWorkflow`，并启用 `SOURCE_MANAGEMENT_ENABLED`、`TASK_RUNTIME_ENABLED` 与 `CRAWL_ENABLED`。不要在未完成隔离验收前修改生产开关。旧 MVP 的五个来源沿用原 ID；新站点和栏目保存在 D1，动态开关关闭时仍使用旧来源清单。
+
+管理入口 `/admin/sources` 使用既有管理员凭据；保存站点后创建栏目草稿。配置包含同站 HTTPS 列表 URL、文章路径正则、含附件的通知样本、刷新间隔（1800–604800 秒）与 IANA 时区。修改抓取配置须先暂停栏目；版本递增后要重新验证。暂停站点或栏目只停止新增调度，已有存档仍可阅读。
+
+样本验证通过 `POST /internal/sources/:id/verify` 提交 `{requestId}`，立即返回 HTTP 202 和持久任务 ID。相同配置版本与 requestId 的重试复用原任务；服务端检查列表、最多一页分页、正文、附件文件签名与原貌快照。无分页的列表明确记录 `paginationMode=absent`。旧配置的验证结果不能批准新配置；验证成功后仍须管理员单独启用。页面会轮询状态，离开页面不取消任务。
+
+每五分钟扫描到期栏目，将配置快照与启动 outbox 同批持久化。一个 DiscoveryWorkflow 处理一页，并在同一事务中记录来源关联、单篇采集任务、下一页任务与执行回执。每轮默认最多两页（`MAX_DISCOVERY_PAGES_PER_RUN` 可配置 1–10），完整历史补抓由 T14 独立负责。数据库响应丢失时从回执及 outbox 恢复，已提交页面不重新收费抓取。不同栏目遇到同 canonical URL 时共享通知身份及首次采集任务，但保留各自发现证据；不同 URL 不按标题合并。
+
+`GET /internal/sources/:id/discoveries` 返回该栏目最近 100 条发现证据：首次/最近发现、live/backfill/migrated 分类、日期精度、原站日历日期、准确时间与时区。日级日期不补成零点，未知日期不补成当前日期；明确分钟时间按来源时区转换，夏令时歧义降为日级证据。后续推送仍要经过日期资格与版本完整性检查。
+
+本地验收：真实 Worker 管理及 BFF 阅读入口、Miniflare D1/R2/Queue、外部 Auth 与 Firecrawl Adapter；覆盖异步验证、重复请求、旧配置结果、分页原子恢复、多栏目身份、限流隔离、暂停阅读和日期精度。真实站点样本、云 Queue/Workflow 交接与生产开关验收属于 T17/T18，不能用这些本地结果替代。

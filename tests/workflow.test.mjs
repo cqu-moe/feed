@@ -17,7 +17,7 @@ const workflowPlugin={
   name:'workflow-test',
   setup(buildApi){
     buildApi.onResolve({filter:/^cloudflare:workers$/},()=>({path:'cloudflare-workers',namespace:'workflow-test'}));
-    buildApi.onResolve({filter:/\.\/discovery\.mjs$/},()=>({path:'discovery',namespace:'workflow-test'}));
+    buildApi.onResolve({filter:/\.\/discovery\.mjs$/},args=>args.importer.endsWith('/workflow.mjs')?{path:'discovery',namespace:'workflow-test'}:undefined);
     buildApi.onResolve({filter:/\.\/collect\.mjs$/},()=>({path:'collect',namespace:'workflow-test'}));
     buildApi.onLoad({filter:/.*/,namespace:'workflow-test'},(args)=>{
       if(args.path==='cloudflare-workers')return {loader:'js',contents:'export class WorkflowEntrypoint{constructor(env={}){this.env=env;}}'};

@@ -17,6 +17,8 @@
     "MAX_ARTICLES_PER_RUN":"40",
     "CRAWL_ENABLED":"true",
     "TASK_RUNTIME_ENABLED":"false",
+    "SOURCE_MANAGEMENT_ENABLED":"false",
+    "MAX_DISCOVERY_PAGES_PER_RUN":"2",
     "MAX_TASK_ATTEMPTS":"3",
     "PDF_OCR_ENABLED":"true",
     "PDF_OCR_MODEL":"mistral-ocr-4-1",
@@ -24,7 +26,7 @@
     "MAX_PDF_OCR_PAGES_PER_MONTH":"1000"
   },
   "triggers":{"crons":["0 0 * * *","*/5 * * * *"]},
-  "workflows":[{"name":"cqu-feed-ingest","binding":"INGEST","class_name":"FeedIngest"},{"name":"cqu-feed-pdf-ocr","binding":"PDF_OCR","class_name":"PdfOcrWorkflow"},{"name":"cqu-feed-capture","binding":"CAPTURE","class_name":"CaptureWorkflow"}],
+  "workflows":[{"name":"cqu-feed-ingest","binding":"INGEST","class_name":"FeedIngest"},{"name":"cqu-feed-pdf-ocr","binding":"PDF_OCR","class_name":"PdfOcrWorkflow"},{"name":"cqu-feed-capture","binding":"CAPTURE","class_name":"CaptureWorkflow"},{"name":"cqu-feed-discovery","binding":"DISCOVERY","class_name":"DiscoveryWorkflow"}],
   "queues":{"producers":[{"binding":"FEED_JOBS","queue":"feed-jobs"}],"consumers":[{"queue":"feed-jobs","dead_letter_queue":"feed-jobs-dlq","max_batch_size":10,"max_batch_timeout":5,"max_retries":5,"retry_delay":30}]},
   "d1_databases":[{"binding":"DB","database_name":"cqu-feed-mvp","database_id":"ba632f5c-c3b4-4f3c-ad57-1ac89895b02a","migrations_dir":"migrations"}],
   "r2_buckets":[{"binding":"ARCHIVE","bucket_name":"cqu-feed-archive"}],

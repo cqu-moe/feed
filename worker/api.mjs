@@ -1,11 +1,12 @@
 import {json} from './utils.mjs';
 import {createSources} from './sources.mjs';
 import {serveObject,serveSnapshot} from './storage.mjs';
-const columns=`a.id,a.title,a.source_id AS sourceId,s.name AS sourceName,a.url,a.published_at AS publishedAt,a.captured_at AS capturedAt,a.status,a.attachment_count AS attachmentCount,a.excerpt`;
+const columns=`a.id,a.title,a.source_id AS sourceId,s.name AS sourceName,a.url,NULLIF(a.published_at,'unknown') AS publishedAt,a.captured_at AS capturedAt,a.status,a.attachment_count AS attachmentCount,a.excerpt`;
 export async function apiRoute(request,env){
-  const url=new URL(request.url),path=url.pathname,configuredSources=createSources(env).all();
+  const url=new URL(request.url),path=url.pathname,configuredSources=await createSources(env).all(),dynamic=env.SOURCE_MANAGEMENT_ENABLED==='true';
   if(!['GET','HEAD'].includes(request.method))return json({error:'Method not allowed'},405);
   if(path==='/api/sources'){
+    if(dynamic){const sources=await createSources(env).listSources();return json({sources:sources.map(source=>({id:source.id,siteId:source.siteId,name:source.name,url:source.url,articleCount:source.articleCount,lastRunAt:source.lastRunAt??null,error:source.error}))});}
     const rows=await env.DB.prepare('SELECT s.*, (SELECT COUNT(*) FROM articles a WHERE a.source_id=s.id) AS articleCount FROM sources s').all();
     return json({sources:configuredSources.map(s=>{const row=rows.results.find(r=>r.id===s.id);return {id:s.id,name:s.name,url:s.url,lastRunAt:row?.last_run_at??null,articleCount:row?.articleCount??0,error:row?.error??null};})});
   }
@@ -13,7 +14,7 @@ export async function apiRoute(request,env){
     const q=(url.searchParams.get('q')??'').trim().slice(0,100),source=url.searchParams.get('source')??'';
     const page=Math.min(500,Math.max(1,parseInt(url.searchParams.get('page')??'1')||1)),pageSize=20;
     const where=[],bind=[];
-    if(source){if(!configuredSources.some(s=>s.id===source))return json({error:'未知来源'},400);where.push('a.source_id=?');bind.push(source);}
+    if(source){if(!configuredSources.some(s=>s.id===source))return json({error:'未知来源'},400);where.push(dynamic?'EXISTS(SELECT 1 FROM article_sources src WHERE src.article_id=a.id AND src.source_id=?)':'a.source_id=?');bind.push(source);}
     let join='';
     if(q){
       if([...q].length>=3){join=' JOIN article_search f ON f.id=a.id';where.push('article_search MATCH ?');bind.push('"'+q.replace(/"/g,'""')+'"');}

@@ -7,7 +7,7 @@ import {cutoffDate,cleanError} from './utils.mjs';
 export class FeedIngest extends WorkflowEntrypoint {
   async run(event,step){
     const sources=createSources(this.env),archive=createArchive(this.env);
-    const source=sources.find(event.payload.sourceId);if(!source)throw new Error('Unknown source');
+    const source=await sources.find(event.payload.sourceId);if(!source)throw new Error('Unknown source');
     const runId=event.instanceId,cutoff=event.payload.cutoff||cutoffDate();
     await step.do('start',async()=>{
       await this.env.DB.batch([

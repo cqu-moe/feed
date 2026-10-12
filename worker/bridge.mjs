@@ -2,7 +2,7 @@ import {Buffer} from 'node:buffer';
 import {bridgeHTML} from './bridge-page.mjs';
 import {recognizeDigits} from './captcha-ai.mjs';
 import {bounded,encoder,equal,json,cleanError,reserveBudget,fileKind} from './utils.mjs';
-import sources from './sources.json';
+import staticSources from './sources.json';
 async function mac(env,payload) {
   const key = await crypto.subtle.importKey('raw',encoder.encode(env.BRIDGE_SECRET),{name:'HMAC',hash:'SHA-256'},false,['sign']);
   return Buffer.from(await crypto.subtle.sign('HMAC',key,encoder.encode(payload))).toString('hex');
@@ -20,10 +20,21 @@ async function readGrant(request,env) {
   const parts=token.split('.'); if(parts.length!==2||!await equal(parts[1],await mac(env,parts[0])))return null;
   try{
     const grant=JSON.parse(Buffer.from(parts[0],'base64url').toString());
-    if(!sources.some(s=>new URL(s.url).origin===grant.origin)||!Number.isFinite(grant.expires)||grant.expires<Date.now()||grant.expires>Date.now()+310000||!/^[-a-f0-9]{36}$/.test(grant.runId)||!/^[-a-f0-9]{36}$/.test(grant.channel))return null;
+    if(!await trustedOrigin(env,grant.origin)||!Number.isFinite(grant.expires)||grant.expires<Date.now()||grant.expires>Date.now()+310000||!/^[-a-f0-9]{36}$/.test(grant.runId)||!/^[-a-f0-9]{36}$/.test(grant.channel))return null;
     if(grant.articleId!==undefined&&!/^[a-f0-9]{24}$/.test(grant.articleId))return null;
     return {...grant,token};
   }catch{return null;}
+}
+
+async function trustedOrigin(env,origin){
+  if(staticSources.some(source=>new URL(source.url).origin===origin))return true;
+  if(env.SOURCE_MANAGEMENT_ENABLED!=='true')return false;
+  try{
+    const row=await env.DB.prepare(`SELECT 1 FROM sources s JOIN sites st ON st.id=s.site_id WHERE st.origin=? LIMIT 1`).bind(origin).first();
+    return Boolean(row);
+  }catch{
+    return staticSources.some(source=>new URL(source.url).origin===origin);
+  }
 }
 export async function bridgeRoute(request,env) {
   const path=new URL(request.url).pathname;

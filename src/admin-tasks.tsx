@@ -6,19 +6,19 @@ import { requestJson } from './api';
 import { articleStatusLabel, formatDateTime, StandaloneHeader } from './components';
 
 type Task = {
-  id: string; articleId: string; articleTitle?: string; state: string;
+  id: string; kind?: string; sourceId?: string; articleId: string | null; articleTitle?: string; state: string;
   attemptNo: number; workflowInstanceId: string | null; attemptState: string | null;
   articleStatus: string | null; dueAt: number; lastError: string | null;
 };
 const states: Record<string, string> = {
-  queued: '等待接手', starting: '正在交接', running: '采集中', succeeded: '采集结束',
+  queued: '等待接手', starting: '正在交接', running: '执行中', succeeded: '执行结束',
   deferred: '已延期', blocked: '等待处理', failed: '执行失败', cancelled: '已取消',
 };
 function parseTask(value: unknown): Task {
   if (!value || typeof value !== 'object') throw new Error('任务数据不完整。');
   const row = value as Record<string, unknown>;
   if (typeof row.id !== 'string' || !/^[a-f0-9]{24}$/.test(row.id)
-    || typeof row.articleId !== 'string' || !/^[a-f0-9]{24}$/.test(row.articleId)
+    || (row.articleId !== null && (typeof row.articleId !== 'string' || !/^[a-f0-9]{24}$/.test(row.articleId)))
     || typeof row.state !== 'string' || !Object.hasOwn(states, row.state)
     || !Number.isSafeInteger(row.attemptNo) || typeof row.dueAt !== 'number') throw new Error('任务数据不完整。');
   for (const key of ['workflowInstanceId', 'attemptState', 'articleStatus', 'lastError']) {
@@ -95,7 +95,11 @@ export function AdminTasksPage() {
   }
 
   return <div className="feed-standalone-page">
-    <StandaloneHeader />
+    <StandaloneHeader actions={
+      <Button asChild variant="outline" size="sm">
+        <Link to="/admin/sources">来源管理</Link>
+      </Button>
+    } />
     <ContentContainer width="standard">
       <div className="feed-admin-content">
         <PageHeader title="采集任务管理" description="对已发现的通知发起采集，查看任务接手、延期和归档结果。"
@@ -128,13 +132,13 @@ export function AdminTasksPage() {
             <p className="feed-admin-id">任务 ID：{activeTask.id}</p>
             <p className="feed-admin-id">实例 ID：{activeTask.workflowInstanceId ?? '尚未创建'}</p>
             {activeTask.lastError && <p role="status">{activeTask.lastError}</p>}
-            <Button asChild variant="outline"><Link to={`/articles/${activeTask.articleId}`}>查看通知</Link></Button>
+            {activeTask.articleId && <Button asChild variant="outline"><Link to={`/articles/${activeTask.articleId}`}>查看通知</Link></Button>}
           </section>}
           <section aria-label="最近采集任务">
             <h2>最近采集任务</h2>
             {tasks.length === 0 ? <PageState state="empty" title="还没有采集任务" description="填写已发现通知的 ID，发起第一次采集。" /> :
               <div className="feed-article-list">{tasks.map(task => <article className="feed-card" key={task.id}>
-                <div className="feed-article-topline"><strong>{task.articleTitle ?? task.articleId}</strong><span className="feed-status">{label(task.state)}</span></div>
+                <div className="feed-article-topline"><strong>{task.articleTitle ?? task.articleId ?? `栏目发现 / 验证 · ${task.sourceId ?? ''}`}</strong><span className="feed-status">{label(task.state)}</span></div>
                 <p className="feed-admin-id">{task.id}</p>
                 <Button variant="outline" onClick={() => setSelected(task.id)} aria-pressed={selected === task.id}>查看任务详情</Button>
               </article>)}</div>}
