@@ -358,7 +358,7 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
       .bind(timestamp(),taskId,input.eventId,input.sourceId,input.generation).run();
   }
 
-  async function subscriptionRuntimes(ownerSubs){
+  async function subscriptionRuntimes(ownerSubs,accounts=new Map()){
     const owners=[...new Set(ownerSubs)];
     if(!owners.length)return new Map();
     const rows=await env.DB.prepare(`SELECT id,owner_sub AS ownerSub,name,requested_enabled AS requestedEnabled,priority,
@@ -369,7 +369,7 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
       .bind(...owners).all();
     const result=new Map();
     for(const owner of owners){
-      const account=await auth.getRecipient(owner);
+      const account=accounts.get(owner)??await auth.getRecipient(owner);
       const policyState=account.ok
         ?{status:'available',policy:account.data.policy}
         :{status:'auth_unavailable',policy:{access:false,subscriptionLimit:{kind:'missing'}}};
@@ -378,6 +378,22 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
       for(const [subscriptionId,runtime] of runtimes)result.set(subscriptionId,runtime);
     }
     return result;
+  }
+
+  // Mail preparation and first submission use the same date and runtime rules as matching.
+  async function assessDelivery(ownerSub,eventId){
+    const account=await auth.getRecipient(ownerSub);
+    const stamp=await env.DB.prepare(`SELECT COALESCE(json_group_array(id||':'||config_version),'[]') AS value
+      FROM (SELECT id,config_version FROM subscriptions WHERE owner_sub=? ORDER BY id)`).bind(ownerSub).first();
+    const current=await eventWithSources(eventId);
+    if(!current)return {eligible:false,suppressionReason:'event_missing'};
+    const runtimes=await subscriptionRuntimes([ownerSub],new Map([[ownerSub,account]]));
+    const candidate=(await ownerCandidates(current,[ownerSub],runtimes)).get(ownerSub);
+    const recipient=account.ok&&account.data.recipient.status==='verified'?account.data.recipient.email:null;
+    const reason=!account.ok?'auth_unavailable':!account.data.policy.access?'access_revoked':!recipient?'email_unverified':candidate.suppressionReason;
+    return {...candidate,suppressionReason:reason,recipient,event:current.event,
+      configStamp:stamp.value,sourceCount:current.sources.length,
+      corrections:current.sources.reduce((sum,source)=>sum+(source.evidence.correctionGeneration??0),0)};
   }
 
   function decide(event,source,row){
@@ -414,9 +430,11 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
 
   async function subscriptionMatches(subscriptionId,runtime){
     if(!idPattern.test(subscriptionId??''))return [];
+    const mailEnabled=env.MAIL_ENABLED==='true';
     const rows=await env.DB.prepare(`SELECT m.event_id AS eventId,e.kind AS eventKind,r.title,m.eligibility_kind AS eligibilityKind,
         m.reason,e.ready_at AS readyAt,m.matched_at AS matchedAt,s.email_mode AS emailMode,
-        d.id AS deliveryId,d.state AS deliveryState,d.delivery_kind AS deliveryKind,d.suppression_reason AS suppressionReason,
+        d.id AS deliveryId,${mailEnabled?'COALESCE(mm.state,d.state)':'d.state'} AS deliveryState,d.delivery_kind AS deliveryKind,
+        ${mailEnabled?'COALESCE(mm.last_error,d.suppression_reason)':'d.suppression_reason'} AS suppressionReason,
         es.date_precision AS sourceDatePrecision,c.corrected_dates_json AS correctedDatesJson,c.generation AS correctionGeneration
       FROM notification_matches m
       JOIN content_events e ON e.id=m.event_id
@@ -427,11 +445,14 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
       LEFT JOIN event_source_corrections c ON c.event_id=m.event_id AND c.source_id=es.source_id
         AND c.generation=(SELECT MAX(generation) FROM event_source_corrections where event_id=m.event_id AND source_id=es.source_id)
       LEFT JOIN user_deliveries d ON d.owner_sub=m.owner_sub AND d.event_id=m.event_id
+      ${mailEnabled?'LEFT JOIN mail_messages mm ON mm.id=d.claimed_message_id':''}
       WHERE m.subscription_id=? ORDER BY m.matched_at DESC,m.event_id LIMIT 50`)
       .bind(subscriptionId).all();
     return rows.results.map(row=>{
       let status,reason=row.reason;
-      if(row.eligibilityKind==='pending'){
+      if(row.deliveryId&&['accepted','delivered','submission_unknown','bounced','complained','submitting'].includes(row.deliveryState)){
+        status=row.deliveryState;reason=row.suppressionReason??row.reason;
+      }else if(row.eligibilityKind==='pending'){
         status='waiting_date_verification';reason='日期待核实';
       }else if(row.reason==='邮件已关闭'||row.emailMode==='off'){
         status='mail_off';reason='邮件已关闭';
@@ -453,6 +474,7 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
       }else{
         status='suppressed';reason=row.reason||'按历史规则抑制';
       }
+      if(['deferred','rejected'].includes(status)&&row.suppressionReason)reason=row.suppressionReason;
       return {
         eventId:row.eventId,eventKind:row.eventKind,title:row.title,status,reason,
         readyAt:new Date(row.readyAt).toISOString(),matchedAt:new Date(row.matchedAt).toISOString(),
@@ -551,7 +573,7 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
   }
 
   return {
-    enqueueEvent,reconcileSourceAssociation,processMatchTask,verifyDate,readDateEvidence,eventStatus,readSubscription,
+    enqueueEvent,reconcileSourceAssociation,processMatchTask,verifyDate,readDateEvidence,eventStatus,readSubscription,assessDelivery,
   };
 }
 

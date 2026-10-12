@@ -479,3 +479,13 @@ node scripts/compare-ocr.mjs publish mistral-ocr-4-1
 验证并启用后的栏目可用 `POST /internal/sources/:id/backfill` 启动历史补抓，请求带 8–100 字符 `requestId`，可选 1–3650 天 `windowDays`；未提供时使用 `DEFAULT_BACKFILL_WINDOW_DAYS`（默认 365，可配置 1–3650）。一个 backfill Workflow 只处理一页，游标、去重后的通知进度、下一页任务和执行回执同批提交；`POST /internal/sources/:id/backfill/pause` 与 `/resume` 只改变持久控制状态，不删除任务、证据或首次发现时间。调度先处理到期 live，再按 `MAX_LIVE_DISCOVERY_TASKS_PER_RUN` 与 `MAX_BACKFILL_TASKS_PER_RUN` 的独立预算推进历史；预算未用完的到期源保持 due，不伪报完成。历史基线进入网页/RSS 但无新增邮件资格，未知日期仍待核实，后续核实为历史也不补发。
 
 本地验收：真实 Worker 管理及 BFF 阅读入口、Miniflare D1/R2/Queue、外部 Auth 与 Firecrawl Adapter；覆盖异步验证、重复请求、旧配置结果、分页原子恢复、多栏目身份、限流隔离、暂停阅读和日期精度。真实站点样本、云 Queue/Workflow 交接与生产开关验收属于 T17/T18，不能用这些本地结果替代。
+
+## 正式版邮件（T11）
+
+启用前应用 0014 迁移，配置独立 `FEED_MAIL` Queue 与 DLQ、`MAIL_FROM`，并通过 Worker secrets 设置 `RESEND_API_KEY` 和 `RESEND_WEBHOOK_SECRET`。API key 需支持发送和邮件查询；发件域须在 Resend 验证。Webhook 地址为当前环境的 `/webhooks/resend`，使用该 endpoint 自己的签名密钥。不得把密钥写入 Git、请求日志或操作记录。`MAIL_ENABLED` 默认 false，不会因合入代码自动发信。
+
+匹配完成后准备及时邮件；Cron 每五分钟恢复遗漏准备、持久延期、超时提交及已落盘但尚未处理的回调，再分发 outbox。`MAIL_PREPARE_LIMIT` 每轮默认20、上限50，`MAX_MAIL_ATTEMPTS` 默认6、上限10。定时器和 Queue 同时触发也共用 delivery 条件占用。每代 outbox 的投递次数也受同一上限约束；快照读取等提交前故障耗尽 Queue 重试后，不会被 Cron 无限重新入队，而是保留消息与占用、停止自动恢复，显示待人工处理。关闭发送时，保留 webhook 签名密钥仍会继续恢复已落盘回执；该流程不准备或提交新邮件。
+
+管理员 `GET /internal/mail` 查看安全状态；`POST /internal/mail/prepare` 与 `/internal/mail/recover` 复用生产准备/恢复规则。`POST /internal/mail/:id/reconcile` 仅查询已经确认的 provider ID，不发送新邮件；未知 provider ID 不能靠猜测恢复。受理表示服务商接受，delivered 表示收件服务器接受，均不等于读者已阅读。退信/投诉独立抑制邮箱，不关闭订阅或 RSS。
+
+以上是本地实现和配置说明。真实 Queue、供应商与指定邮箱的完整验收仍在 T17；正式开启按 T18 上线方案审批。

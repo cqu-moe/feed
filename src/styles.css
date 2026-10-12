@@ -1135,3 +1135,65 @@ body {
 .feed-reader-document .react-pdf__Page {
   box-shadow: var(--shadow-popover);
 }
+
+.feed-admin-mail {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.feed-admin-mail > .feed-source-heading p {
+  margin: var(--space-1) 0 0;
+  color: var(--muted-foreground);
+  font-size: var(--text-sm);
+}
+
+.feed-mail-item {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.feed-mail-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.feed-mail-meta > div {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--muted);
+}
+
+.feed-mail-meta dt {
+  color: var(--muted-foreground);
+  font-size: var(--text-xs);
+}
+
+.feed-mail-meta dd {
+  margin: 0;
+  color: var(--foreground);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+.feed-mail-reason {
+  margin: 0;
+  padding: var(--space-3);
+  border: 1px solid color-mix(in oklab, var(--warning) 45%, transparent);
+  border-radius: var(--radius-md);
+  color: var(--foreground);
+  background: color-mix(in oklab, var(--warning) 12%, var(--surface));
+  font-size: var(--text-sm);
+  line-height: 1.65;
+}
+
+@media (max-width: 640px) {
+  .feed-mail-meta {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

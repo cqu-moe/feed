@@ -1,3 +1,4 @@
+import {createMail} from './notification-mail.mjs';
 import {Buffer} from 'node:buffer';
 import {json,equal} from './utils.mjs';
 import {createArchive} from './archive.mjs';
@@ -10,6 +11,16 @@ import {createArchiveMigration,MigrationConflictError,MigrationNotFoundError,Mig
 export async function internalRoute(request,env){
   const url=new URL(request.url);
   if(!await requireAdmin(request,env))return json({error:'Unauthorized'},401);
+  if(url.pathname==='/internal/mail'&&request.method==='GET')return json(await createMail(env).list());
+  const mailReconcile=/^\/internal\/mail\/([a-f0-9]{24})\/reconcile$/.exec(url.pathname);
+  if(mailReconcile&&request.method==='POST'){
+    const result=await createMail(env).reconcile(mailReconcile[1]);
+    return result?json(result):json({error:'Mail message not found'},404);
+  }
+  if(['/internal/mail/prepare','/internal/mail/recover'].includes(url.pathname)&&request.method==='POST'){
+    const mail=createMail(env);
+    return json(await (url.pathname.endsWith('/prepare')?mail.preparePending():mail.recover()),202);
+  }
   if(url.pathname==='/internal/archive-migration/articles'){
     if(request.method!=='GET')return json({error:'Method not allowed'},405);
     try{return json(await createArchiveMigration(env).articles({after:url.searchParams.get('after'),

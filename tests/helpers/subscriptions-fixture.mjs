@@ -9,18 +9,36 @@ const policyOrigin = 'https://policy.test';
 export const staticSiteId = '7fd03676e5751e9b6dd95ecb';
 export const sharedArticleUrl = 'https://jwc.cqu.edu.cn/info/2026/1.htm';
 
-export async function subscriptionsFixture({ editingMigration = true, clock, notificationPageSize } = {}) {
+export async function subscriptionsFixture({ editingMigration = true, clock, notificationPageSize, mailHarness } = {}) {
   const app = await build({
     stdin: { contents: `
       import worker from './worker/index.mjs';
+      import {createMail} from './worker/notification-mail.mjs';
       import {createSubscriptions} from './worker/subscriptions.mjs';
       import {createNotifications} from './worker/notifications.mjs';
       import {handleFeedJobs} from './worker/task-runtime.mjs';
       import {replayMatchOutbox} from './tests/helpers/notification-replay.mjs';
       import {reconcileRevision} from './worker/archive-reconcile.mjs';
+      let mailClock=${clock ?? 'Date.now()'};
       const workerErrors=[];
       console.error=(...args)=>{workerErrors.push(args.map(String));};
       export default {async fetch(request,env,context){
+        if(new URL(request.url).pathname==='/__test/mail'){
+          const {method,args=[],at}=await request.json();
+          if(at!==undefined)mailClock=at;
+          if(method==='clock')return Response.json({at:mailClock});
+          if(method==='recoverDisabled')return Response.json(await createMail({...env,MAIL_ENABLED:'false'},{now:()=>mailClock}).recover());
+          if(method==='replay'){
+            const rows=await env.DB.prepare("SELECT payload_json FROM outbox WHERE topic='feed-mail' AND (state='queued' OR ?=1) ORDER BY created_at,id").bind(args[0]?.duplicate?1:0).all();
+            let acked=0,retried=0;
+            for(const row of rows.results){const body=JSON.parse(row.payload_json);
+              await handleFeedJobs({messages:[{body,ack(){acked++},retry(){retried++}}]},env,{now:()=>mailClock});
+              if(!retried)await env.DB.prepare("UPDATE outbox SET state='sent' WHERE id=?").bind(body.outboxId).run();
+            }
+            return Response.json({acked,retried});
+          }
+          return Response.json(await createMail(env,{now:()=>mailClock})[method](...args));
+        }
         if(${clock !== undefined}&&new URL(request.url).pathname==='/__test/subscriptions'){
           const {method,actor,args}=await request.json();
           try{return Response.json(await createSubscriptions(env,{now:()=>${clock ?? 0}})[method](actor,...args));}
@@ -131,7 +149,8 @@ export async function subscriptionsFixture({ editingMigration = true, clock, not
         script: app.outputFiles[0].text,
         compatibilityDate: '2026-10-11',
         compatibilityFlags: ['nodejs_compat'],
-        bindings: { ...provider.bindings, ADMIN_TOKEN: 'test-admin-token', BASE_URL: feedOrigin, SOURCE_MANAGEMENT_ENABLED: 'true', FEED_AUTH_RPC_CLIENT_ID: 'feed-rpc-client', FEED_AUTH_RPC_CLIENT_SECRET: 'feed-rpc-secret', ...(notificationPageSize === undefined ? {} : { NOTIFICATION_MATCH_PAGE_SIZE: notificationPageSize }) },
+        bindings: { ...(mailHarness?{MAIL_ENABLED:'true',MAIL_FROM:'Feed <notifications@feed.test>',RESEND_API_KEY:'test-key',RESEND_WEBHOOK_SECRET:'whsec_dGVzdC1zaWduaW5nLWtleQ=='}:{}),...provider.bindings, ADMIN_TOKEN: 'test-admin-token', BASE_URL: feedOrigin, SOURCE_MANAGEMENT_ENABLED: 'true', FEED_AUTH_RPC_CLIENT_ID: 'feed-rpc-client', FEED_AUTH_RPC_CLIENT_SECRET: 'feed-rpc-secret', ...(notificationPageSize === undefined ? {} : { NOTIFICATION_MATCH_PAGE_SIZE: notificationPageSize }) },
+        ...(mailHarness?{outboundService:request=>mailHarness.fetch(request)}:{}),
         d1Databases: ['DB'],
         r2Buckets: ['ARCHIVE'],
         serviceBindings: { AUTH: request => provider.fetch(request), AUTH_FEED_RPC: { name: 'policy', entrypoint: 'AuthService' } },
@@ -149,6 +168,7 @@ export async function subscriptionsFixture({ editingMigration = true, clock, not
   const migrationNames = ['0001_feed.sql', '0002_auth.sql', '0003_collection_lease.sql', '0004_pdf_ocr.sql', '0005_task_runtime.sql', '0006_sources.sql', '0007_archive_versions.sql', '0008_content_events.sql', '0009_subscriptions.sql'];
   if (editingMigration) migrationNames.push('0010_subscription_editing.sql');
   migrationNames.push('0013_notification_matching.sql');
+  if(mailHarness)migrationNames.push('0014_mail_delivery.sql');
   for (const name of migrationNames) {
     await applyMigration(db, await readFile(`migrations/${name}`, 'utf8'));
   }
@@ -156,6 +176,9 @@ export async function subscriptionsFixture({ editingMigration = true, clock, not
   return {
     mf,
     db,
+    async mail(method,...args){const res=await mf.dispatchFetch(feedOrigin+'/__test/mail',{method:'POST',body:JSON.stringify({method,args})});return res.json();},
+    async mailClock(at){const res=await mf.dispatchFetch(feedOrigin+'/__test/mail',{method:'POST',body:JSON.stringify({method:'clock',at})});return res.json();},
+    async replayMail(options={}){const res=await mf.dispatchFetch(feedOrigin+'/__test/mail',{method:'POST',body:JSON.stringify({method:'replay',args:[options]})});return res.json();},
     login: (subject = 'user-a') => login(mf, provider, subject),
     revokeAccess() { provider.setAccess(false); },
     async setPolicy(subject, policy) { await post(policyWorker, `${policyOrigin}/state`, { policies: { [subject]: policy } }); },
