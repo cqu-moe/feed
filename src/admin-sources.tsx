@@ -432,7 +432,7 @@ function BackfillControls({
 }) {
   const [windowDays, setWindowDays] = useState(String(source.backfill.windowDays ?? 365));
   const [busy, setBusy] = useState(false);
-  const locked = source.backfill.state === 'running' || source.backfill.state === 'paused';
+  const locked = ['running', 'paused', 'completed'].includes(source.backfill.state);
 
   async function run(work: () => Promise<Source>) {
     if (busy) return;
@@ -490,7 +490,9 @@ function BackfillControls({
         onChange={event => setWindowDays(event.target.value)}
         disabled={busy || locked}
       />
-      {source.backfill.state === 'paused' ? (
+      {source.backfill.state === 'completed' ? (
+        <Button type="button" disabled>补抓已完成</Button>
+      ) : source.backfill.state === 'paused' ? (
         <Button type="button" onClick={resume} disabled={busy}>继续补抓</Button>
       ) : source.backfill.state === 'running' ? (
         <Button type="button" variant="outline" onClick={pause} disabled={busy}>暂停补抓</Button>
