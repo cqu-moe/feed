@@ -7,10 +7,29 @@ import {createTaskRuntime,ValidationError} from './task-runtime.mjs';
 import {repairPdfText} from './pdf-text.mjs';
 import {createNotifications} from './notifications.mjs';
 import {createArchiveMigration,MigrationConflictError,MigrationNotFoundError,MigrationValidationError} from './archive-migration.mjs';
+import {createArchiveRecheck} from './archive-recheck.mjs';
 
 export async function internalRoute(request,env){
   const url=new URL(request.url);
   if(!await requireAdmin(request,env))return json({error:'Unauthorized'},401);
+  if(url.pathname==='/internal/rechecks'){
+    const rechecks=createArchiveRecheck(env);
+    if(request.method==='GET')return json(await rechecks.status());
+    if(request.method==='POST'){
+      if(env.TASK_RUNTIME_ENABLED!=='true'||env.CRAWL_ENABLED!=='true'||env.ARCHIVE_VERSIONS_ENABLED!=='true')
+        return json({error:'Archive recheck runtime is disabled'},503);
+      let payload;
+      try{payload=await readJson(request);}catch{return json({error:'Invalid JSON'},400);}
+      if(!payload||typeof payload!=='object'||Array.isArray(payload)
+        ||Object.keys(payload).some(key=>key!=='limit'))return json({error:'limit is required'},400);
+      const limit=payload.limit??20;
+      if(!Number.isSafeInteger(limit)||limit<1||limit>100)return json({error:'limit must be an integer from 1 to 100'},400);
+      const result=await rechecks.scheduleDue({limit});
+      await createTaskRuntime(env).dispatchDueOutbox().catch(()=>{});
+      return json(result,202);
+    }
+    return json({error:'Method not allowed'},405);
+  }
   if(url.pathname==='/internal/mail'&&request.method==='GET')return json(await createMail(env).list());
   if(url.pathname==='/internal/mail/digests/prepare'&&request.method==='POST')return json(await createMail(env).prepareDigests(),202);
   const mailReconcile=/^\/internal\/mail\/([a-f0-9]{24})\/reconcile$/.exec(url.pathname);

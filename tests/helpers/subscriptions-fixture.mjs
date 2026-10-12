@@ -9,7 +9,57 @@ const policyOrigin = 'https://policy.test';
 export const staticSiteId = '7fd03676e5751e9b6dd95ecb';
 export const sharedArticleUrl = 'https://jwc.cqu.edu.cn/info/2026/1.htm';
 
-export async function subscriptionsFixture({ editingMigration = true, clock, notificationPageSize, mailHarness } = {}) {
+const recheckWorkersPlugin = {
+  name: 'recheck-workers-stub',
+  setup(buildApi) {
+    buildApi.onResolve({ filter: /^cloudflare:workers$/ }, () => ({ path: 'cloudflare-workers', namespace: 'recheck-workers-stub' }));
+    buildApi.onLoad({ filter: /.*/, namespace: 'recheck-workers-stub' }, () => ({
+      loader: 'js',
+      contents: 'export class WorkflowEntrypoint{constructor(env={}){this.env=env;}}',
+    }));
+  },
+};
+
+const recheckFirecrawlPlugin = {
+  name: 'recheck-firecrawl-stub',
+  setup(buildApi) {
+    buildApi.onResolve({ filter: /firecrawl\.mjs$/ }, () => ({ path: 'recheck-firecrawl', namespace: 'recheck-firecrawl-stub' }));
+    buildApi.onLoad({ filter: /.*/, namespace: 'recheck-firecrawl-stub' }, () => ({
+      loader: 'js',
+      contents: `
+        const calls=[];
+        globalThis.RECHECK_SOURCE_CALLS=calls;
+        globalThis.RECHECK_SOURCE_MODE='changed';
+        const base64=value=>btoa(String.fromCharCode(...new TextEncoder().encode(value)));
+        const source=mode=>{
+          if(mode==='unavailable')throw new Error('source unavailable');
+          const changed=mode==='changed';
+          const body=changed?'实质修改正文':'原始正文';
+          const attachment=changed?'%PDF-1.7\\nchanged':'%PDF-1.7\\noriginal';
+          const snapshot='<html><body><main><h1>复查通知</h1><p>'+body+'</p></main></body></html>';
+          const attachmentUrl='https://jwc.cqu.edu.cn/system/_content/download.jsp?urltype=1501&recheck.pdf';
+          return {markdown:body,rawHtml:snapshot,metadata:{statusCode:200,creditsUsed:1},actions:{javascriptReturns:[{value:JSON.stringify({
+            bodyRecognized:true,page:{url:${JSON.stringify(sharedArticleUrl)}},heading:'复查通知',bodyText:body,bodyCapturedAt:new Date().toISOString(),errors:[],
+            artifacts:[
+              {name:'attachment-1.pdf',base64:base64(attachment),contentType:'application/pdf'},
+              {name:'snapshot.html',base64:base64(snapshot),contentType:'text/html; charset=utf-8'},
+              {name:'offline.html',base64:base64(snapshot),contentType:'text/html; charset=utf-8'},
+            ],
+            attachmentCandidates:[{url:attachmentUrl,name:'复查附件.pdf',role:'attachment'}],
+            downloads:[{url:attachmentUrl,originalFile:true,saved:{name:'attachment-1.pdf'},fetchedAt:new Date().toISOString()}],
+          })}]},
+          };
+        };
+        export async function scrape(_env,url){
+          calls.push({url,mode:globalThis.RECHECK_SOURCE_MODE});
+          return source(globalThis.RECHECK_SOURCE_MODE);
+        }
+      `,
+    }));
+  },
+};
+
+export async function subscriptionsFixture({ editingMigration = true, clock, notificationPageSize, mailHarness, recheckMigration = false, recheckHarness = false, recheckVars = {} } = {}) {
   const app = await build({
     stdin: { contents: `
       import worker from './worker/index.mjs';
@@ -17,6 +67,10 @@ export async function subscriptionsFixture({ editingMigration = true, clock, not
       import {createSubscriptions} from './worker/subscriptions.mjs';
       import {createNotifications} from './worker/notifications.mjs';
       import {handleFeedJobs} from './worker/task-runtime.mjs';
+      import {createArchive} from './worker/archive.mjs';
+      import {createCollector} from './worker/collect.mjs';
+      import {finishCaptureTask} from './worker/task-runtime.mjs';
+      import {scrape} from './worker/firecrawl.mjs';
       import {replayMatchOutbox} from './tests/helpers/notification-replay.mjs';
       import {reconcileRevision} from './worker/archive-reconcile.mjs';
       let mailClock=${clock ?? 'Date.now()'};
@@ -64,6 +118,34 @@ export async function subscriptionsFixture({ editingMigration = true, clock, not
           const {revisionId}=await request.json();
           return Response.json(await reconcileRevision(env,revisionId));
         }
+        if(new URL(request.url).pathname==='/__test/scheduled'){
+          const pending=[];
+          await worker.scheduled({cron:'*/5 * * * *'},env,{waitUntil(promise){pending.push(promise);}});
+          await Promise.all(pending);
+          return Response.json({completed:true});
+        }
+        if(new URL(request.url).pathname==='/__test/recheck-source'){
+          if(request.method==='POST'){
+            const body=await request.json();
+            globalThis.RECHECK_SOURCE_MODE=body.mode;
+          }
+          return Response.json({mode:globalThis.RECHECK_SOURCE_MODE,calls:globalThis.RECHECK_SOURCE_CALLS});
+        }
+        if(new URL(request.url).pathname==='/__test/recheck-capture'){
+          const {taskId}=await request.json();
+          const existing=await env.DB.prepare('SELECT result_json FROM task_attempts WHERE task_id=? AND attempt_no=1').bind(taskId).first();
+          if(existing?.result_json)return Response.json(JSON.parse(existing.result_json));
+          const task=await env.DB.prepare("SELECT id FROM tasks WHERE id=? AND kind='recheck' AND state='queued'").bind(taskId).first();
+          if(!task)return Response.json({error:'Recheck task is not queued'},{status:409});
+          await env.DB.batch([
+            env.DB.prepare("UPDATE tasks SET state='running',updated_at=? WHERE id=? AND state='queued'").bind(Date.now(),taskId),
+            env.DB.prepare("INSERT INTO task_attempts(task_id,attempt_no,workflow_instance_id,state,started_at) VALUES (?,1,?,'running',?) ON CONFLICT(task_id,attempt_no) DO NOTHING")
+              .bind(taskId,'task-'+taskId+'-a1',Date.now()),
+          ]);
+          const result=await createArchive(env,{collector:createCollector({scrape})}).captureTask(taskId,1);
+          await finishCaptureTask(env,taskId,1,result);
+          return Response.json(result);
+        }
         if(new URL(request.url).pathname==='/__test/errors')return Response.json(workerErrors);
         if(new URL(request.url).pathname==='/__test/rss-failure'){
           const {url}=await request.json();
@@ -83,6 +165,7 @@ export async function subscriptionsFixture({ editingMigration = true, clock, not
     format: 'esm',
     platform: 'browser',
     external: ['node:buffer', 'node:*', 'cloudflare:workers'],
+    plugins: recheckHarness ? [recheckWorkersPlugin, recheckFirecrawlPlugin] : [],
   });
   const policy = await build({
     stdin: {
@@ -152,7 +235,7 @@ export async function subscriptionsFixture({ editingMigration = true, clock, not
         script: app.outputFiles[0].text,
         compatibilityDate: '2026-10-11',
         compatibilityFlags: ['nodejs_compat'],
-        bindings: { ...(mailHarness?{MAIL_ENABLED:'true',MAIL_FROM:'Feed <notifications@feed.test>',RESEND_API_KEY:'test-key',RESEND_WEBHOOK_SECRET:'whsec_dGVzdC1zaWduaW5nLWtleQ==',...mailHarness.bindings}:{}),...provider.bindings, ADMIN_TOKEN: 'test-admin-token', BASE_URL: feedOrigin, SOURCE_MANAGEMENT_ENABLED: 'true', FEED_AUTH_RPC_CLIENT_ID: 'feed-rpc-client', FEED_AUTH_RPC_CLIENT_SECRET: 'feed-rpc-secret', ...(notificationPageSize === undefined ? {} : { NOTIFICATION_MATCH_PAGE_SIZE: notificationPageSize }) },
+        bindings: { ...(mailHarness?{MAIL_ENABLED:'true',MAIL_FROM:'Feed <notifications@feed.test>',RESEND_API_KEY:'test-key',RESEND_WEBHOOK_SECRET:'whsec_dGVzdC1zaWduaW5nLWtleQ==',...mailHarness.bindings}:{}),...provider.bindings, ADMIN_TOKEN: 'test-admin-token', BASE_URL: feedOrigin, SOURCE_MANAGEMENT_ENABLED: 'true', FEED_AUTH_RPC_CLIENT_ID: 'feed-rpc-client', FEED_AUTH_RPC_CLIENT_SECRET: 'feed-rpc-secret', ...(notificationPageSize === undefined ? {} : { NOTIFICATION_MATCH_PAGE_SIZE: notificationPageSize }), ...(recheckMigration ? { ARCHIVE_VERSIONS_ENABLED: 'true', ARCHIVE_READS_ENABLED: 'true', TASK_RUNTIME_ENABLED: 'true', CRAWL_ENABLED: 'true', BRIDGE_SECRET: 'test-bridge-secret', ...recheckVars } : {}) },
         ...(mailHarness?{outboundService:request=>mailHarness.fetch(request)}:{}),
         d1Databases: ['DB'],
         r2Buckets: ['ARCHIVE'],
@@ -172,6 +255,7 @@ export async function subscriptionsFixture({ editingMigration = true, clock, not
   if (editingMigration) migrationNames.push('0010_subscription_editing.sql');
   migrationNames.push('0013_notification_matching.sql');
   if(mailHarness)migrationNames.push('0014_mail_delivery.sql','0016_mail_digests.sql');
+  if(recheckMigration)migrationNames.push('0015_history_backfill.sql','0017_archive_recheck.sql');
   for (const name of migrationNames) {
     await applyMigration(db, await readFile(`migrations/${name}`, 'utf8'));
   }
