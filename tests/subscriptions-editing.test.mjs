@@ -29,6 +29,17 @@ test('distinct target changes remain valid when the server clock has the same mi
       assert.equal(edited.body.subscription.version, index + 2);
       assert.deepEqual(edited.body.subscription.targetSourceIds, [sourceId]);
     }
+    const deleted = await invoke('delete', id, { requestId: 'same-clock-delete', expectedVersion: 4 });
+    assert.equal(deleted.status, 200, JSON.stringify(deleted));
+    assert.deepEqual(deleted.body.subscription.savedSourceIds, ['intex']);
+    const replay = await invoke('delete', id, { requestId: 'same-clock-delete', expectedVersion: 4 });
+    assert.deepEqual(replay.body.subscription, deleted.body.subscription);
+    const restored = await invoke('restore', id, {
+      requestId: 'same-clock-restore', expectedVersion: 5, name: '栏目切换',
+      sourceIds: deleted.body.subscription.savedSourceIds, emailMode: 'off', requestedEnabled: true, priority: 0,
+    });
+    assert.equal(restored.status, 200, JSON.stringify(restored));
+    assert.deepEqual(restored.body.subscription.targetSourceIds, ['intex']);
   } finally { await mf.dispose(); }
 });
 
@@ -358,6 +369,7 @@ test('an owner can delete and later restore a subscription with a fresh quota ch
     });
     assert.equal(replayDelete.status, 200, JSON.stringify(replayDelete));
     assert.equal(replayDelete.body.changed, false);
+    assert.deepEqual(replayDelete.body.subscription, deleted.body.subscription);
     const listed = await subscriptionCall(mf, '/api/subscriptions', { cookie });
     assert.equal(listed.body.usage, 0);
     assert.equal(listed.body.subscriptions.length, 1);

@@ -1,6 +1,8 @@
 PRAGMA foreign_keys=ON;
 
 ALTER TABLE subscriptions ADD COLUMN config_version INTEGER NOT NULL DEFAULT 1 CHECK(config_version>=1);
+ALTER TABLE subscriptions ADD COLUMN deleted_source_ids_json TEXT NOT NULL DEFAULT '[]'
+  CHECK(json_valid(deleted_source_ids_json) AND json_type(deleted_source_ids_json)='array');
 
 CREATE TABLE feed_accounts(
   auth_sub TEXT PRIMARY KEY,

@@ -89,16 +89,15 @@ export function createSubscriptions(env,{now=()=>Date.now()}={}){
   async function subscriptionView(row,runtime){
     const rows=await env.DB.prepare(`SELECT t.source_id AS sourceId,t.effective_from AS effectiveFrom,s.name AS sourceName
       FROM subscription_sources t JOIN sources s ON s.id=t.source_id WHERE t.subscription_id=? AND t.removed_at IS NULL ORDER BY t.source_id`).bind(row.id).all();
-    const savedRows=await env.DB.prepare(`SELECT source_id AS sourceId FROM subscription_sources
-      WHERE subscription_id=? AND (removed_at IS NULL OR removed_at=?) GROUP BY source_id ORDER BY source_id`)
-      .bind(row.id,row.deletedAt??null).all();
+    const deletedSnapshot=row.deletedAt===null||row.deletedAt===undefined?null:
+      await env.DB.prepare('SELECT deleted_source_ids_json FROM subscriptions WHERE id=?').bind(row.id).first();
     return {
       id:row.id,name:row.name,requestedEnabled:row.requestedEnabled===1,priority:row.priority,version:row.configVersion,
       emailMode:row.emailMode,activatedAt:new Date(row.activatedAt).toISOString(),
       createdAt:new Date(row.createdAt).toISOString(),
       deletedAt:row.deletedAt===null||row.deletedAt===undefined?null:new Date(row.deletedAt).toISOString(),
       targetSourceIds:rows.results.map(target=>target.sourceId),
-      savedSourceIds:savedRows.results.map(target=>target.sourceId),
+      savedSourceIds:deletedSnapshot?JSON.parse(deletedSnapshot.deleted_source_ids_json):rows.results.map(target=>target.sourceId),
       targets:rows.results.map(target=>({sourceId:target.sourceId,sourceName:target.sourceName,effectiveFrom:new Date(target.effectiveFrom).toISOString()})),
       effectiveStatus:runtime.effectiveStatus,
       selected:runtime.selected,
@@ -118,7 +117,7 @@ export function createSubscriptions(env,{now=()=>Date.now()}={}){
 
   async function ownedSubscription(owner,subscriptionId){
     const row=await env.DB.prepare(`SELECT id,owner_sub AS ownerSub,name,requested_enabled AS requestedEnabled,priority,
-      email_mode AS emailMode,activated_at AS activatedAt,created_at AS createdAt,deleted_at AS deleted_at,
+      email_mode AS emailMode,activated_at AS activatedAt,created_at AS createdAt,deleted_at AS deletedAt,
       rss_token_generation AS rssTokenGeneration,rss_token_ciphertext AS rssTokenCiphertext,
       rss_revoked_at IS NOT NULL AS rssRevoked,deleted_at IS NOT NULL AS deleted,
       config_version AS configVersion FROM subscriptions WHERE id=? AND owner_sub=?`).bind(subscriptionId,owner).first();
@@ -382,7 +381,9 @@ export function createSubscriptions(env,{now=()=>Date.now()}={}){
           SELECT ?,?,?,?,?,?,? FROM subscriptions WHERE id=? AND owner_sub=? AND config_version=? AND deleted_at IS NULL
           ON CONFLICT(owner_sub,request_id) DO NOTHING`)
           .bind(owner,input.requestId,subscriptionId,'delete',input.hash,input.expectedVersion,at,subscriptionId,owner,input.expectedVersion),
-        env.DB.prepare(`UPDATE subscriptions SET deleted_at=?,rss_revoked_at=?,config_version=?
+        env.DB.prepare(`UPDATE subscriptions SET deleted_at=?,rss_revoked_at=?,config_version=?,
+          deleted_source_ids_json=(SELECT json_group_array(source_id) FROM
+            (SELECT source_id FROM subscription_sources WHERE subscription_id=subscriptions.id AND removed_at IS NULL ORDER BY source_id))
           WHERE id=? AND owner_sub=? AND config_version=? AND deleted_at IS NULL AND ${commandGuard} RETURNING config_version`)
           .bind(at,at,nextVersion,subscriptionId,owner,input.expectedVersion,...commandArgs,input.expectedVersion),
         env.DB.prepare(`UPDATE subscription_sources SET removed_at=?
@@ -471,7 +472,7 @@ export function createSubscriptions(env,{now=()=>Date.now()}={}){
           .bind(owner,input.requestId,at,subscriptionId,owner,input.expectedVersion,
             owner,input.requestId,subscriptionId,input.hash,input.expectedVersion,
             input.requestId,...(limit.kind==='limited'?[limit.value]:[])),
-        env.DB.prepare(`UPDATE subscriptions SET name=?,requested_enabled=?,priority=?,email_mode=?,deleted_at=NULL,
+        env.DB.prepare(`UPDATE subscriptions SET name=?,requested_enabled=?,priority=?,email_mode=?,deleted_at=NULL,deleted_source_ids_json='[]',
           rss_token_hash=?,rss_token_ciphertext=?,rss_token_generation=?,rss_revoked_at=NULL,config_version=?
           WHERE id=? AND owner_sub=? AND config_version=? AND deleted_at IS NOT NULL${quotaGuard}
             AND EXISTS(SELECT 1 FROM feed_accounts a WHERE a.auth_sub=? AND a.active_subscription_count>0 AND a.reservation_request_id=?)

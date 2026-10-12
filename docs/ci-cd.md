@@ -4,7 +4,7 @@
 
 ## GitHub Actions
 
-`.github/workflows/ci.yml` 在 main push、PR 和手动触发时运行 `pnpm run ci`：测试、TypeScript/Vite/PDF 静态资源构建、设计规范检查。只授予 `contents: read`，不配置 Cloudflare secret，不负责部署。
+`.github/workflows/ci.yml` 在 main push、PR 和手动触发时运行 `pnpm run ci`：测试、TypeScript/Vite/PDF 静态资源构建、设计规范检查和 Worker dry-run。最后一步验证 Wrangler 配置及 Worker 打包，不上传或部署，也不证明远端绑定可用。只授予 `contents: read`，不配置 Cloudflare secret，不负责部署。
 
 ## Cloudflare Workers Builds
 
