@@ -22,6 +22,10 @@
 | T07 / #8 | 已解除依赖，开始实现 | 按 Auth 配额创建多订阅，保存固定栏目集及每订阅独立 RSS 身份 |
 | T08–T18 / #9–#19 | 等待各自依赖 | 未声称实现或验收完成 |
 
+## 会话中的规格调整
+
+- 2026-10-12：用户确认私有 RSS 链接可以持续展示。订阅所有者登录后可随时查看和复制；以加密保存凭证支持取回，保留 hash 校验及独立轮换/撤销。此决定替换旧的一次性展示约定，已同步 T07/T08 规格。
+
 ## 云端前置配置与核对
 
 - 当前 `cqu-feed` 仍有 MVP 的 `FeedIngest`、`PdfOcrWorkflow`；尚无正式版三条业务 Queue 及配套 DLQ。旧 `rss-*` 资源归属未在此任务中确认，不复用。
@@ -29,7 +33,7 @@
 - 仅查询密钥名称，未读取值：用户配置后已确认 `cqu-feed` 存在 `FIRECRAWL_API_KEY`。未读取密钥值；供应商有效性和正式任务调用仍待云端验收。
 - 当前 Feed 没有新的后台 Auth RPC 客户端或邮件服务密钥。不得把 OAuth 浏览器客户端直接当后台服务身份。
 - 首版邮件供应商已由用户确定为 Resend，要求后期可替换；决定见 [T11 选型记录](https://github.com/cqu-moe/feed/issues/12#issuecomment-6117297565)。独立 Adapter 负责供应商 API 和 webhook 协议，Notifications 保留业务去重、快照与恢复规则。
-- 隔离验收收件人已获用户授权；Resend 已创建专用发件域 `feed.cqu.moe`，四条 DNS 记录已在 Cloudflare 保存（DNS only，TTL 300），Resend 已确认域和四条记录全部 verified。正式权益默认值和费用上限尚待确定；这些条件不阻止不依赖它们的代码实现，但不能用 mock 关闭云端验收任务。
+- 隔离验收收件人已获用户授权；Resend 已创建专用发件域 `feed.cqu.moe`，四条 DNS 记录已在 Cloudflare 保存（DNS only，TTL 300），Resend 已确认域和四条记录全部 verified。隔离云端验收总费用上限已由用户确认为人民币 50 元，覆盖抓取、OCR、邮件和新增 Cloudflare 资源；正式权益默认值及生产预算仍待确定。未确定的条件不阻止不依赖它们的代码实现，但不能用 mock 关闭云端验收任务。
 
 已向用户指定的验收邮箱发送一封发件域测试邮件，Resend 返回 `delivered`（收件服务器已接收）。本次通过 Resend Connector 验证供应商通路，不经过 Feed Queue，不作为 T11/T17 的应用内投递验收。
 
