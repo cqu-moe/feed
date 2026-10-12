@@ -191,7 +191,7 @@ export function createMail(env,{now=()=>Date.now(),provider=createResendProvider
           lease_token=NULL,lease_until=NULL,next_attempt_at=NULL,last_error=NULL,updated_at=?
           WHERE id=? AND lease_token=?`).bind(result.providerId,at,at,id,token),
         env.DB.prepare(`UPDATE user_deliveries SET state='accepted',updated_at=? WHERE claimed_message_id=?
-          AND EXISTS(SELECT 1 FROM mail_messages WHERE id=? AND accepted_at IS NOT NULL)`)
+          AND EXISTS(SELECT 1 FROM mail_messages WHERE id=? AND state='accepted')`)
           .bind(at,id,id),
       ]);
     }else{

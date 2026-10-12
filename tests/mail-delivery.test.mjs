@@ -118,6 +118,31 @@ test('provider acceptance followed by a local commit failure retries the origina
   }finally{await f.mf.dispose();}
 });
 
+test('a delivered callback arriving before the send response cannot be downgraded by its later acceptance commit',async()=>{
+  let callback;
+  const f=await subscriptionsFixture({clock:start,mailHarness:{async fetch(request){
+    const mail=await request.json();await callback(mail);
+    return Response.json({id:'66666666-6666-4666-8666-666666666666'});
+  }}});
+  try{
+    callback=async mail=>{
+      const id='evt_early_delivered',timestamp=String(Math.floor(Date.now()/1000));
+      const body=JSON.stringify({type:'email.delivered',created_at:new Date().toISOString(),data:{email_id:'66666666-6666-4666-8666-666666666666',to:[mail.to],tags:{feed_message_id:mail.tags[0].value}}});
+      const signature=createHmac('sha256','test-signing-key').update(`${id}.${timestamp}.${body}`).digest('base64');
+      const response=await f.mf.dispatchFetch('https://feed.test/webhooks/resend',{method:'POST',body,headers:{'svix-id':id,'svix-timestamp':timestamp,'svix-signature':`v1,${signature}`}});
+      assert.equal(response.status,200);
+    };
+    await subscriptionsInvoke(f.mf,'change',{id:'mail-owner'},{requestId:'mail-early-webhook',name:'及时通知',sourceIds:['jwc'],emailMode:'immediate'});
+    const id=await seedReadyEvent(f.mf,{id:'f22222222222222222222222',sourceId:'jwc',firstSeenAt:start+1,observedAt:start+1,readyAt:start+2,publishedAt:new Date(start+1).toISOString(),datePrecision:'minute'});
+    await notificationInvoke(f.mf,'enqueueEvent',id);await notificationInvoke(f.mf,'replayMatchOutbox');
+    await f.mailClock(start+120_000);await f.mail('preparePending');await f.replayMail();
+    const message=await adminRequest(f.mf,'/internal/mail',undefined,{method:'GET'});
+    assert.equal(message.body.messages[0].state,'delivered');
+    const event=await adminRequest(f.mf,`/internal/notification-events/${id}`,undefined,{method:'GET'});
+    assert.equal(event.body.delivery.state,'delivered');
+  }finally{await f.mf.dispose();}
+});
+
 test('first submission rechecks current Auth, target preference, address and unconsumed date corrections',async()=>{
   for(const scenario of ['auth','unverified','off','date','address']){
     const submissions=[];
