@@ -1,6 +1,6 @@
 import {Buffer} from 'node:buffer';
 import {readingText,readingExcerpt} from './reading.mjs';
-import {pdfText,PDF_TEXT_UNAVAILABLE} from './pdf-text.mjs';
+import {pdfPages,PDF_TEXT_UNAVAILABLE} from './pdf-text.mjs';
 import {enqueuePdfOcr} from './pdf-ocr.mjs';
 import {script as bundle} from 'single-file-cli/lib/single-file-bundle.js';
 import options from './singlefile-options.json';
@@ -65,10 +65,15 @@ async function collectArticle(env,source,article,dependencies,captureContext){
     if(saved&&row.role==='body-pdf'&&row.kind==='pdf'){
       try{
         const object=await env.ARCHIVE.get(saved.key);
-        const converted=await pdfText(await object.arrayBuffer());
-        if(converted.text?.trim())nativePdfs.add(saved.name);
-        body+='\n\n'+(converted.text||PDF_TEXT_UNAVAILABLE);
-        report.artifacts.push(await put(env,prefix,`${saved.name}.txt`,converted.text,'text/plain; charset=utf-8'));
+        const analysis=await pdfPages(await object.arrayBuffer());
+        const nativeText=analysis.pages.filter(page=>!page.needsOcr).map(page=>page.text.trim()).filter(Boolean).join('\n\n');
+        const fullyNative=analysis.pages.length&&!analysis.pages.some(page=>page.needsOcr);
+        if(fullyNative)nativePdfs.add(saved.name);
+        // While OCR is required, keep the captured HTML body and marker only. The
+        // adopted per-page result later replaces that marker without duplicating native text.
+        body+='\n\n'+(fullyNative?nativeText:PDF_TEXT_UNAVAILABLE);
+        report.artifacts.push(await put(env,prefix,`${saved.name}.pages.json`,JSON.stringify(analysis),'application/json'));
+        report.artifacts.push(await put(env,prefix,`${saved.name}.txt`,nativeText,'text/plain; charset=utf-8'));
       }catch(error){body+='\n\n'+PDF_TEXT_UNAVAILABLE;report.errors.push(cleanError(error));}
     }
   }

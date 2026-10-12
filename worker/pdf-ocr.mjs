@@ -17,7 +17,7 @@ async function pdfBytes(env,job){
   return bytes;
 }
 
-async function reservePages(env,count){
+export async function reservePages(env,count){
   const day=new Date().toISOString().slice(0,10),month=day.slice(0,7);
   const daily=Number(env.MAX_PDF_OCR_PAGES_PER_DAY||50),monthly=Number(env.MAX_PDF_OCR_PAGES_PER_MONTH||1000);
   if(!Number.isSafeInteger(count)||count<1||!Number.isSafeInteger(daily)||!Number.isSafeInteger(monthly))throw new Error('Invalid OCR budget');

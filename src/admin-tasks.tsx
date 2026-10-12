@@ -9,6 +9,7 @@ type Task = {
   id: string; kind?: string; sourceId?: string; articleId: string | null; articleTitle?: string; state: string;
   attemptNo: number; workflowInstanceId: string | null; attemptState: string | null;
   articleStatus: string | null; dueAt: number; lastError: string | null;
+  missingRequirements?: Array<{ kind: string; name: string | null; filename: string | null; state: string; error: string | null }>;
 };
 const states: Record<string, string> = {
   queued: '等待接手', starting: '正在交接', running: '执行中', succeeded: '执行结束',
@@ -23,6 +24,13 @@ function parseTask(value: unknown): Task {
     || !Number.isSafeInteger(row.attemptNo) || typeof row.dueAt !== 'number') throw new Error('任务数据不完整。');
   for (const key of ['workflowInstanceId', 'attemptState', 'articleStatus', 'lastError']) {
     if (row[key] !== null && typeof row[key] !== 'string') throw new Error('任务状态不完整。');
+  }
+  if (row.missingRequirements !== undefined && !Array.isArray(row.missingRequirements)) throw new Error('任务缺项数据不完整。');
+  for (const requirement of row.missingRequirements ?? []) {
+    if (!requirement || typeof requirement !== 'object' || typeof requirement.kind !== 'string'
+      || typeof requirement.state !== 'string' || (requirement.name !== null && typeof requirement.name !== 'string')
+      || (requirement.filename !== null && typeof requirement.filename !== 'string')
+      || (requirement.error !== null && typeof requirement.error !== 'string')) throw new Error('任务缺项数据不完整。');
   }
   return row as Task;
 }
@@ -128,6 +136,18 @@ export function AdminTasksPage() {
               <div><dt>Workflow 接手</dt><dd>{label(activeTask.attemptState)}</dd></div>
               <div><dt>通知归档</dt><dd>{activeTask.articleStatus ? articleStatusLabel(activeTask.articleStatus) : '未记录'}</dd></div>
               {activeTask.state === 'deferred' && <div><dt>最早恢复时间</dt><dd>{formatDateTime(new Date(activeTask.dueAt).toISOString())}</dd></div>}
+              {(activeTask.missingRequirements?.length ?? 0) > 0 && <div className="feed-admin-missing">
+                <dt>必要内容缺项</dt>
+                <dd>
+                  <ul>
+                    {(activeTask.missingRequirements ?? []).map(requirement => (
+                      <li key={`${requirement.kind}-${requirement.filename ?? requirement.name ?? ''}`}>
+                        {requirement.name ?? requirement.filename ?? requirement.kind} · {requirement.error ?? requirement.state}
+                      </li>
+                    ))}
+                  </ul>
+                </dd>
+              </div>}
             </dl>
             <p className="feed-admin-id">任务 ID：{activeTask.id}</p>
             <p className="feed-admin-id">实例 ID：{activeTask.workflowInstanceId ?? '尚未创建'}</p>

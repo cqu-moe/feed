@@ -1,5 +1,6 @@
 import {cleanError,sha} from './utils.mjs';
 import {createSources} from './sources.mjs';
+import {reconcileRevision} from './archive-reconcile.mjs';
 import {launchDedupeKey,launchOutboxId,launchOutboxStatement} from './task-statements.mjs';
 
 const activeStates=['queued','starting','running'];
@@ -65,7 +66,7 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
       if(message.attempt<task.attempt_no)return {state:task.state,acked:'stale-attempt'};
       if(message.attempt!==task.attempt_no)throw new SchemaError('Future task attempt');
       if(!activeStates.includes(task.state))return {state:task.state,acked:'terminal'};
-      if(!['capture','discover'].includes(task.kind))throw new SchemaError('Unsupported workflow kind');
+      if(!['capture','discover','ocr'].includes(task.kind))throw new SchemaError('Unsupported workflow kind');
       const instanceId=workflowInstanceId(task.id,message.attempt),timestamp=now();
       const workflowBinding=selectWorkflow(env,{workflow,workflows},task.kind);
       await env.DB.batch([
@@ -160,10 +161,21 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
     async list({limit=50}={}){
       const rows=await env.DB.prepare(`SELECT t.id,t.kind,t.state,t.article_id AS articleId,t.source_id AS sourceId,
         t.last_error AS lastError,t.created_at AS createdAt,t.updated_at AS updatedAt,t.due_at AS dueAt,t.attempt_no AS attemptNo,
-        a.workflow_instance_id AS workflowInstanceId,a.state AS attemptState,ar.title AS articleTitle,${articleStatus} AS articleStatus
+        a.workflow_instance_id AS workflowInstanceId,a.state AS attemptState,a.result_json AS attemptResultJson,
+        ar.title AS articleTitle,${articleStatus} AS articleStatus
         FROM tasks t LEFT JOIN task_attempts a ON a.task_id=t.id AND a.attempt_no=t.attempt_no
         LEFT JOIN articles ar ON ar.id=t.article_id ORDER BY t.created_at DESC,t.id DESC LIMIT ?`)
-        .bind(boundedInteger(limit,50,1,100)).all();return rows.results;
+        .bind(boundedInteger(limit,50,1,100)).all();
+      return Promise.all(rows.results.map(async row=>{
+        const {attemptResultJson,...task}=row;
+        let revisionId=null;
+        try{revisionId=JSON.parse(attemptResultJson??'{}').revisionId??null;}catch{revisionId=null;}
+        if(!revisionId)return {...task,missingRequirements:[]};
+        const requirements=await env.DB.prepare(`SELECT kind,name,filename,state,error_code AS error
+          FROM revision_requirements WHERE revision_id=? AND required=1 AND state<>'fulfilled' ORDER BY slot_key`)
+          .bind(revisionId).all();
+        return {...task,missingRequirements:requirements.results};
+      }));
     },
   };
   return runtime;
@@ -172,12 +184,51 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
 export async function handleFeedJobs(batch,env,dependencies={}){
   const runtime=createTaskRuntime(env,dependencies);
   for(const message of batch.messages){
-    try{await runtime.startJob(message.body);message.ack();}
-    catch(error){
-      console.warn(JSON.stringify({event:'job_handoff_failed',error:cleanError(error)}));
+    try{
+      if(message.body?.type==='check-ready'||message.body?.type==='event-ready')await handleFeedEvent(env,message);
+      else await runtime.startJob(message.body);
+      message.ack();
+    }catch(error){
+      console.warn(JSON.stringify({event:'feed_message_failed',type:message.body?.type,error:cleanError(error)}));
       message.retry({delaySeconds:Math.min(300,30*2**Math.max(0,(message.attempts??1)-1))});
     }
   }
+}
+
+async function handleFeedEvent(env,message){
+  const payload=parseFeedEventMessage(message.body);
+  const outbox=await env.DB.prepare("SELECT dedupe_key,payload_json FROM outbox WHERE id=? AND topic='feed-events'")
+    .bind(payload.outboxId).first();
+  if(!outbox||outbox.dedupe_key!==feedEventDedupeKey(payload)||JSON.stringify(payload)!==outbox.payload_json)
+    throw new SchemaError('Message does not match its persisted outbox');
+  if(payload.type==='check-ready'){
+    const result=await reconcileRevision(env,payload.revisionId);
+    if(result.notFound)throw new SchemaError('Ready revision is missing');
+    return result;
+  }
+  const event=await env.DB.prepare('SELECT id,revision_id FROM content_events WHERE id=?').bind(payload.eventId).first();
+  if(!event||event.revision_id!==payload.revisionId)throw new SchemaError('Content event is missing');
+  return {eventReady:true};
+}
+
+function parseFeedEventMessage(payload){
+  if(!payload||typeof payload!=='object'||Array.isArray(payload)||payload.v!==1)throw new SchemaError('Invalid feed event payload');
+  if(!idPattern.test(payload.outboxId??''))throw new SchemaError('Invalid feed event outbox id');
+  if(payload.type==='check-ready'){
+    if(!idPattern.test(payload.revisionId??''))throw new SchemaError('Invalid ready revision id');
+    return {v:1,type:payload.type,outboxId:payload.outboxId,revisionId:payload.revisionId,
+      ...(payload.generation===undefined?{}:{generation:payload.generation}),...(payload.sourceTaskId===undefined?{}:{sourceTaskId:payload.sourceTaskId})};
+  }
+  if(payload.type==='event-ready'){
+    if(!idPattern.test(payload.eventId??'')||!idPattern.test(payload.revisionId??''))throw new SchemaError('Invalid content event identity');
+    return {v:1,type:payload.type,outboxId:payload.outboxId,eventId:payload.eventId,revisionId:payload.revisionId};
+  }
+  throw new SchemaError('Invalid feed event type');
+}
+function feedEventDedupeKey(payload){
+  return payload.type==='check-ready'
+    ? `ready:${payload.revisionId}:${payload.generation??`task:${payload.sourceTaskId}`}`
+    : `event:${payload.eventId}`;
 }
 
 export async function finishCaptureTask(env,taskId,attemptNo,result,now=()=>Date.now()){
@@ -186,6 +237,10 @@ export async function finishCaptureTask(env,taskId,attemptNo,result,now=()=>Date
 
 export async function finishDiscoveryTask(env,taskId,attemptNo,result,now=()=>Date.now()){
   return finishTask(env,'discover',taskId,attemptNo,result,now);
+}
+
+export async function finishOcrTask(env,taskId,attemptNo,result,now=()=>Date.now()){
+  return finishTask(env,'ocr',taskId,attemptNo,result,now);
 }
 
 async function finishTask(env,kind,taskId,attemptNo,result,now=()=>Date.now()){
@@ -216,6 +271,10 @@ export async function failCaptureTask(env,taskId,attemptNo,error,now=()=>Date.no
 
 export async function failDiscoveryTask(env,taskId,attemptNo,error,now=()=>Date.now()){
   return failTask(env,'discover',taskId,attemptNo,error,now);
+}
+
+export async function failOcrTask(env,taskId,attemptNo,error,now=()=>Date.now()){
+  return failTask(env,'ocr',taskId,attemptNo,error,now);
 }
 
 async function failTask(env,kind,taskId,attemptNo,error,now=()=>Date.now()){
@@ -266,6 +325,7 @@ function sameMessage(a,b){return ['v','type','outboxId','taskId','attempt'].ever
 function selectWorkflow(env,{workflow,workflows},kind){
   if(workflows?.[kind])return workflows[kind];
   if(kind==='discover')return env.DISCOVERY;
+  if(kind==='ocr')return env.ARCHIVE_OCR;
   return workflow??env.CAPTURE;
 }
 function workflowInstanceId(taskId,attempt){return `task-${taskId}-a${attempt}`;}

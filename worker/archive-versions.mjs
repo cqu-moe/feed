@@ -1,10 +1,13 @@
 import {sha} from './utils.mjs';
 import {readingExcerpt} from './reading.mjs';
+import {adoptExistingOcrStatements,ocrTaskStatements,withOcrIdentity} from './archive-ocr.mjs';
+import {applyOcrEntries,flattenOcrEntries,validateOcrProjection} from './archive-ocr-view.mjs';
 
 export async function commitCaptureRevision(env,capture,context){
   const {taskId,attemptNo,fence}=context,timestamp=Date.now();
+  const requirements=await Promise.all(capture.requirements.map(row=>withOcrIdentity(env,row)));
   if(!Number.isSafeInteger(capture.revisionNo)||capture.revisionNo<1
-    ||new Set(capture.requirements.map(row=>row.slotKey)).size!==capture.requirements.length)throw new Error('Invalid capture inventory');
+    ||new Set(requirements.map(row=>row.slotKey)).size!==requirements.length)throw new Error('Invalid capture inventory');
   const guard=`EXISTS(SELECT 1 FROM articles a JOIN tasks t ON t.article_id=a.id
     JOIN task_attempts attempt ON attempt.task_id=t.id AND attempt.attempt_no=t.attempt_no AND attempt.state='running'
     WHERE a.id=? AND a.capture_fence=? AND a.lease_until>? AND t.id=? AND t.attempt_no=? AND t.state='running')`;
@@ -30,7 +33,7 @@ export async function commitCaptureRevision(env,capture,context){
   const unchanged=previous?.state==='ready'&&previous.raw_fingerprint===capture.rawFingerprint;
   const revisionId=unchanged?previous.id:(await sha(`revision:${taskId}`)).slice(0,24);
   const changeKind=!previousReady?'baseline':previousReady.semantic_fingerprint===capture.semanticFingerprint?'presentation_only':'substantive';
-  const blocked=capture.requirements.some(row=>row.required&&row.state==='failed');
+  const blocked=requirements.some(row=>row.required&&row.state==='failed');
   const statements=capture.objects.map(object=>env.DB.prepare(`INSERT INTO artifact_objects(sha256,r2_key,byte_size,media_type,verified_at)
     SELECT ?,?,?,?,? WHERE ${guard} ON CONFLICT(sha256) DO NOTHING`)
     .bind(object.sha256,object.r2Key,object.byteSize,object.mediaType,object.verifiedAt,...args));
@@ -39,37 +42,35 @@ export async function commitCaptureRevision(env,capture,context){
       observed_at,state,requirement_count,manifest_object_hash,raw_fingerprint,semantic_fingerprint,change_kind,title,published_at,source_metadata_json,diagnostics_json)
       SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE ${guard} ON CONFLICT(capture_task_id) DO NOTHING`)
       .bind(revisionId,capture.articleId,capture.revisionNo,previous?.id??null,taskId,capture.observedAt,blocked?'blocked':'assembling',
-        capture.requirements.length,capture.manifestHash,capture.rawFingerprint,capture.semanticFingerprint,changeKind,capture.title,
+        requirements.length,capture.manifestHash,capture.rawFingerprint,capture.semanticFingerprint,changeKind,capture.title,
         capture.publishedAt,JSON.stringify(capture.sourceMetadata),JSON.stringify(capture.diagnostics),...args));
-    for(const row of capture.requirements){
+    for(const row of requirements){
       statements.push(env.DB.prepare(`INSERT INTO revision_requirements(revision_id,slot_key,kind,original_url,filename,name,required,state,
-        object_hash,input_hash,derived_output_id,fetched_at,error_code)
-        SELECT ?,?,?,?,?,?,?,?,?,?,?,?,? WHERE ${guard}
+        object_hash,input_hash,derived_output_id,fetched_at,error_code,processor,processor_version,options_hash)
+        SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE ${guard}
         AND EXISTS(SELECT 1 FROM article_revisions WHERE id=? AND capture_task_id=? AND state<>'ready')
         ON CONFLICT(revision_id,slot_key) DO NOTHING`)
         .bind(revisionId,row.slotKey,row.kind,row.originalUrl??null,row.filename??null,row.name??null,row.required?1:0,row.state,
-          row.objectHash,row.inputHash,row.derivedOutputId,row.fetchedAt,row.errorCode,...args,revisionId,taskId));
+          row.objectHash,row.inputHash,row.derivedOutputId,row.fetchedAt,row.errorCode,row.processor??null,row.processorVersion??null,
+          row.optionsHash??null,...args,revisionId,taskId));
     }
-    statements.push(env.DB.prepare(`UPDATE article_revisions SET state='ready',ready_at=?
-      WHERE id=? AND state='assembling' AND ${guard}
-      AND requirement_count=(SELECT COUNT(*) FROM revision_requirements WHERE revision_id=article_revisions.id)
-      AND NOT EXISTS(SELECT 1 FROM revision_requirements WHERE revision_id=article_revisions.id AND required=1 AND state<>'fulfilled')`)
-      .bind(timestamp,revisionId,...args));
-    // Publish the newest complete reading model only. Original MVP fields remain
-    // unchanged, so disabling version reads restores the intact legacy archive.
-    statements.push(env.DB.prepare(`INSERT INTO article_read_models(article_id,revision_id,title,summary,readable_text)
-      SELECT article_id,id,title,?,? FROM article_revisions r WHERE id=? AND state='ready' AND ${guard}
-      AND NOT EXISTS(SELECT 1 FROM article_read_models m JOIN article_revisions current ON current.id=m.revision_id
-        WHERE m.article_id=r.article_id AND current.revision_no>=r.revision_no)
-      ON CONFLICT(article_id) DO UPDATE SET revision_id=excluded.revision_id,title=excluded.title,
-        summary=excluded.summary,readable_text=excluded.readable_text,extraction_generation=1`)
-      .bind(readingExcerpt(capture.body),capture.body,revisionId,...args));
+    for(const row of requirements){
+      statements.push(...await ocrTaskStatements(env,row,timestamp,{articleId:capture.articleId}));
+      statements.push(...await adoptExistingOcrStatements(env,revisionId,row,timestamp));
+    }
+    const checkOutboxId=(await sha(`outbox:ready:${revisionId}:1`)).slice(0,24);
+    statements.push(env.DB.prepare(`INSERT INTO outbox(id,topic,dedupe_key,payload_json,available_at,created_at,updated_at)
+      SELECT ?,'feed-events',?,?,?,?,?
+      WHERE ${guard} AND EXISTS(SELECT 1 FROM article_revisions WHERE id=? AND article_id=? AND state<>'ready')
+      ON CONFLICT(topic,dedupe_key) DO NOTHING`)
+      .bind(checkOutboxId,`ready:${revisionId}:1`,JSON.stringify({v:1,type:'check-ready',outboxId:checkOutboxId,revisionId,generation:1}),
+        timestamp,timestamp,timestamp,...args,revisionId,capture.articleId));
   }
   statements.push(env.DB.prepare(`INSERT INTO capture_observations(task_id,article_id,revision_id,observed_at,outcome)
     SELECT ?,?,?,?,? WHERE ${guard} AND EXISTS(SELECT 1 FROM article_revisions WHERE id=? AND article_id=?)
     ON CONFLICT(task_id) DO NOTHING`)
     .bind(taskId,capture.articleId,revisionId,capture.observedAt,unchanged?'unchanged':'new',...args,revisionId,capture.articleId));
-  const resultState=unchanged?'ready':blocked?'blocked':capture.requirements.some(row=>row.required&&row.state!=='fulfilled')?'assembling':'ready';
+  const resultState=unchanged?'ready':blocked?'blocked':'assembling';
   const result=captureResult(capture,revisionId,resultState,unchanged?'unchanged':'new');
   const receiptIndex=statements.length;
   statements.push(env.DB.prepare(`UPDATE task_attempts SET result_json=COALESCE(result_json,
@@ -113,19 +114,17 @@ export async function readRevision(env,articleId,revisionId,{current=false}={}){
     WHERE r.id=? AND r.article_id=?`).bind(revisionId,articleId).first();
   if(!row)return null;
   const rows=await env.DB.prepare(`SELECT q.slot_key AS slotKey,q.kind,q.required,q.state,q.filename,q.name,q.original_url AS originalUrl,
-      q.fetched_at AS fetchedAt,q.error_code AS error,q.object_hash AS objectHash,o.r2_key AS objectKey,o.byte_size AS bytes,o.media_type AS contentType
+      q.fetched_at AS fetchedAt,q.error_code AS error,q.object_hash AS objectHash,o.r2_key AS objectKey,o.byte_size AS bytes,o.media_type AS contentType,
+      q.input_hash AS inputHash,q.derived_output_id AS derivedOutputId
     FROM revision_requirements q LEFT JOIN artifact_objects o ON o.sha256=q.object_hash WHERE q.revision_id=? ORDER BY q.slot_key`)
     .bind(revisionId).all();
   const ready=row.state==='ready',base=`/api/articles/${articleId}/revisions/${revisionId}`;
-  const bodyRequirement=rows.results.find(item=>item.kind==='body');
   let bodyText='';
-  if(ready&&bodyRequirement?.objectKey){
-    const object=await env.ARCHIVE.get(bodyRequirement.objectKey);
-    if(!object)throw new Error('Ready revision body is missing');
-    bodyText=await object.text();
-  }
-  const model=current?await env.DB.prepare('SELECT readable_text FROM article_read_models WHERE article_id=? AND revision_id=?').bind(articleId,revisionId).first():null;
+  if(ready)bodyText=await frozenRevisionBody(env,rows.results);
+  const model=current?await env.DB.prepare(`SELECT readable_text,ocr_result_hash AS ocrResultHash,ocr_model AS ocrModel,
+      ocr_updated_at AS ocrUpdatedAt FROM article_read_models WHERE article_id=? AND revision_id=?`).bind(articleId,revisionId).first():null;
   if(ready&&model)bodyText=model.readable_text;
+  const ocr=await revisionOcr(env,rows.results,model);
   const files=rows.results.filter(item=>item.kind==='attachment'||item.kind==='body_pdf');
   const attachments=files.map(item=>({id:`${revisionId}:${item.slotKey}`,name:item.name,filename:item.filename,
     bytes:item.bytes??null,contentType:item.contentType??null,status:item.state==='fulfilled'?'complete':item.state,
@@ -134,10 +133,68 @@ export async function readRevision(env,articleId,revisionId,{current=false}={}){
   const revision=presentRevision(Object.fromEntries(Object.keys({id:1,articleId:1,revisionNo:1,title:1,state:1,observedAt:1,readyAt:1,changeKind:1,missingCount:1}).map(key=>[key,row[key]])));
   return {revision,requirements:rows.results.map(({objectHash,objectKey,...item})=>({...item,fetchedAt:iso(item.fetchedAt)})),
     article:{id:articleId,title:row.title,sourceId:row.sourceId,sourceName:row.sourceName,url:row.url,publishedAt:row.publishedAt,
-      capturedAt:revision.observedAt,status:ready?'complete':'partial',attachmentCount:attachments.length,excerpt:readingExcerpt(bodyText),bodyText,bodyHtml:null,
+      capturedAt:revision.observedAt,status:ready?'complete':'partial',attachmentCount:attachments.length,excerpt:readingExcerpt(bodyText),bodyText,bodyHtml:null,...(ocr?{ocr}:{}),
       error:ready?null:`${row.missingCount} 项必要内容尚未完成`,
       snapshotUrl:ready?`${base}/snapshot`:null,screenshotUrl:ready&&rows.results.some(item=>item.kind==='screenshot')?`${base}/screenshot`:null},attachments};
 }
+
+async function frozenRevisionBody(env,requirements){
+  const body=requirements.find(item=>item.kind==='body');
+  if(!body?.objectKey)throw new Error('Ready revision body is missing');
+  let text=await(await env.ARCHIVE.get(body.objectKey)).text();
+  const entries=[];
+  for(const requirement of requirements.filter(item=>item.kind==='body_ocr')){
+    if(requirement.state!=='fulfilled'||!requirement.objectHash)continue;
+    const object=await env.ARCHIVE.get(objectKeyFromHash(requirement.objectHash));
+    if(!object)throw new Error('Frozen OCR result is unavailable');
+    const output=await object.json();
+    if(output?.inputHash!==requirement.inputHash||!Array.isArray(output.pages))throw new Error('Frozen OCR identity is invalid');
+    entries.push({slotKey:requirement.slotKey,inputHash:requirement.inputHash,resultHash:requirement.objectHash,
+      filename:requirement.filename,model:output.model??null,updatedAt:output.createdAt??null,pages:output.pages});
+  }
+  return entries.length?applyOcrEntries(text,entries):text;
+}
+
+async function revisionOcr(env,requirements,projection=null){
+  const rows=requirements.filter(item=>item.kind==='body_ocr');
+  if(!rows.length)return null;
+  if(rows.some(item=>item.state!=='fulfilled'||!item.objectHash))return {status:'pending',model:env.PDF_OCR_MODEL??'mistral-ocr-4-1',htmlText:'',pages:[],updatedAt:null};
+  if(projection?.ocrResultHash){
+    const object=await env.ARCHIVE.get(objectKeyFromHash(projection.ocrResultHash));
+    if(!object)throw new Error('Current projection OCR result is unavailable');
+    const output=await object.json();
+    if(Array.isArray(output?.inputs)){
+      validateOcrProjection(output,rows);
+      return {status:'complete',model:projection.ocrModel??output.model??env.PDF_OCR_MODEL??'mistral-ocr-4-1',htmlText:'',
+        pages:flattenOcrEntries(output.inputs),updatedAt:projection.ocrUpdatedAt??output.updatedAt??null};
+    }
+    if(!rows.some(item=>item.inputHash===output?.inputHash)||!Array.isArray(output.pages))throw new Error('Current projection OCR identity is invalid');
+    const filenameByInput=new Map(rows.map(item=>[item.inputHash,item.filename]));
+    return {status:'complete',model:projection.ocrModel??output.model??env.PDF_OCR_MODEL??'mistral-ocr-4-1',htmlText:'',
+      pages:output.pages.map(page=>({page:page.index+1,filename:filenameByInput.get(output.inputHash)??null,
+        source:page.source==='native'?'native':'ocr',markdown:String(page.markdown??page.text??''),text:String(page.text??'')})),
+      updatedAt:projection.ocrUpdatedAt??output.createdAt??null};
+  }
+  const pages=[];
+  let model=env.PDF_OCR_MODEL??'mistral-ocr-4-1',updatedAt=null;
+  const entries=[];
+  for(const requirement of rows){
+    const object=await env.ARCHIVE.get(objectKeyFromHash(requirement.objectHash));
+    if(!object)throw new Error('Frozen OCR result is unavailable');
+    const output=await object.json();
+    if(output?.inputHash!==requirement.inputHash||!Array.isArray(output.pages))throw new Error('Frozen OCR identity is invalid');
+    model=output.model??model;
+    updatedAt=output.createdAt??updatedAt;
+    entries.push({slotKey:requirement.slotKey,inputHash:requirement.inputHash,resultHash:requirement.objectHash,
+      filename:requirement.filename,model:output.model??null,updatedAt:output.createdAt??null,pages:output.pages});
+  }
+  return {status:'complete',model,htmlText:'',pages:flattenOcrEntries(entries),updatedAt};
+}
+
+function objectKeyFromHash(hash){
+  return `objects/sha256/${hash.slice(0,2)}/${hash}`;
+}
+
 export async function revisionArtifact(env,articleId,revisionId,{filename,kind}){
   return env.DB.prepare(`SELECT q.filename,q.name,q.kind,o.r2_key AS objectKey,o.media_type AS contentType,r.state
     FROM article_revisions r JOIN revision_requirements q ON q.revision_id=r.id JOIN artifact_objects o ON o.sha256=q.object_hash
