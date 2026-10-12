@@ -22,7 +22,7 @@
 
 - 当前 `cqu-feed` 仍有 MVP 的 `FeedIngest`、`PdfOcrWorkflow`；尚无正式版三条业务 Queue 及配套 DLQ。旧 `rss-*` 资源归属未在此任务中确认，不复用。
 - 当前 Git Connector 仅部署 main，非生产分支构建关闭。隔离验收必须显式使用独立 D1、R2、Queue、Workflow、Auth 客户端与邮件配置。
-- 仅查询密钥名称，未读取值：当前 Feed 没有 `FIRECRAWL_API_KEY`，与 MVP 运维文档记录的 keyless 入口一致。正式付费抓取凭据仍需明确配置。
+- 仅查询密钥名称，未读取值：用户配置后已确认 `cqu-feed` 存在 `FIRECRAWL_API_KEY`。未读取密钥值；供应商有效性和正式任务调用仍待云端验收。
 - 当前 Feed 没有新的后台 Auth RPC 客户端或邮件服务密钥。不得把 OAuth 浏览器客户端直接当后台服务身份。
 - 首版邮件供应商已由用户确定为 Resend，要求后期可替换；决定见 [T11 选型记录](https://github.com/cqu-moe/feed/issues/12#issuecomment-6117297565)。独立 Adapter 负责供应商 API 和 webhook 协议，Notifications 保留业务去重、快照与恢复规则。
 - 隔离验收收件人已获用户授权；Resend 已创建专用发件域 `feed.cqu.moe`，四条 DNS 记录已在 Cloudflare 保存（DNS only，TTL 300），Resend 已确认域和四条记录全部 verified。正式权益默认值和费用上限尚待确定；这些条件不阻止不依赖它们的代码实现，但不能用 mock 关闭云端验收任务。
