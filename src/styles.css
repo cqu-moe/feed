@@ -28,6 +28,64 @@
 .feed-admin-evidence { margin-top: var(--space-5); padding-top: var(--space-5); border-top: 1px solid var(--border); }
 .feed-admin-error-detail { display: block; margin-top: var(--space-2); overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--text-xs); }
 .feed-admin-server-error { margin: 0; color: var(--destructive); font-size: var(--text-sm); overflow-wrap: anywhere; }
+.feed-admin-operations {
+  display: grid;
+  gap: var(--space-4);
+}
+.feed-admin-operations h3 {
+  margin: 0;
+  color: var(--foreground);
+  font-size: var(--text-lg);
+  font-weight: 650;
+}
+.feed-operations-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+.feed-operations-metric {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--muted);
+}
+.feed-operations-metric dt {
+  color: var(--muted-foreground);
+  font-size: var(--text-xs);
+}
+.feed-operations-metric dd {
+  margin: 0;
+  color: var(--foreground);
+  font-size: var(--text-sm);
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+.feed-operations-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0;
+}
+.feed-operations-links span {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  background: var(--muted);
+  font-size: var(--text-xs);
+}
+.feed-operations-links code {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
 
 body {
   margin: 0;
@@ -975,6 +1033,10 @@ body {
   .feed-source-grid {
     grid-template-columns: 1fr;
   }
+
+  .feed-operations-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 640px) {
@@ -995,6 +1057,10 @@ body {
 
   .feed-admin-fields {
     grid-template-columns: 1fr;
+  }
+
+  .feed-operations-metrics {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .feed-subscription-layout {

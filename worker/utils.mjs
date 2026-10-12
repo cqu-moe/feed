@@ -2,7 +2,12 @@ import { Buffer } from 'node:buffer';
 export const encoder = new TextEncoder();
 export const json = (value, status = 200) => Response.json(value, { status, headers: {'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'} });
 export const sha = async value => Buffer.from(await crypto.subtle.digest('SHA-256', typeof value === 'string' ? encoder.encode(value) : value)).toString('hex');
-export const cleanError = error => String(error?.message ?? error).replace(/https?:\/\/\S+/g, '[URL]').replace(/Bearer\s+\S+/gi,'[token]').slice(0, 400);
+export const cleanError = error => String(error?.message ?? error)
+  .replace(/https?:\/\/\S+/g, '[URL]')
+  .replace(/Bearer\s+\S+/gi,'[token]')
+  .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi,'[email]')
+  .replace(/\b(api[_-]?key|token|secret|password)\b\s*[:=]\s*\S+/gi,'$1=[redacted]')
+  .slice(0, 400);
 export async function equal(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
   return crypto.subtle.timingSafeEqual(await crypto.subtle.digest('SHA-256',encoder.encode(a)), await crypto.subtle.digest('SHA-256',encoder.encode(b)));

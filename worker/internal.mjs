@@ -7,10 +7,27 @@ import {createTaskRuntime,ValidationError} from './task-runtime.mjs';
 import {repairPdfText} from './pdf-text.mjs';
 import {createNotifications} from './notifications.mjs';
 import {createArchiveMigration,MigrationConflictError,MigrationNotFoundError,MigrationValidationError} from './archive-migration.mjs';
+import {createOperations,OperationsError} from './operations.mjs';
 
 export async function internalRoute(request,env){
   const url=new URL(request.url);
   if(!await requireAdmin(request,env))return json({error:'Unauthorized'},401);
+  if(url.pathname==='/internal/operations/diagnostics'&&request.method==='GET'){
+    const limit=url.searchParams.has('limit')?Number(url.searchParams.get('limit')):undefined;
+    try{return json(await createOperations(env).diagnostics({requestedLimit:limit}));}
+    catch(error){return operationsResponse(error);}
+  }
+  if(url.pathname==='/internal/operations/replay'&&request.method==='POST'){
+    try{return json(await createOperations(env).replay(await readJson(request)),202);}
+    catch(error){return operationsResponse(error);}
+  }
+  const taskRecovery=/^\/internal\/operations\/tasks\/([a-f0-9]{24})\/recover$/.exec(url.pathname);
+  if(taskRecovery&&request.method==='POST'){
+    try{
+      const result=await createTaskRuntime(env).recoverTask(taskRecovery[1]);
+      return result?json(result,202):json({error:'Task not found'},404);
+    }catch(error){return operationsResponse(error);}
+  }
   if(url.pathname==='/internal/mail'&&request.method==='GET')return json(await createMail(env).list());
   const mailReconcile=/^\/internal\/mail\/([a-f0-9]{24})\/reconcile$/.exec(url.pathname);
   if(mailReconcile&&request.method==='POST'){
@@ -240,6 +257,12 @@ function validationResponse(error){
 }
 
 function validationJsonError(message){const error=new Error(message);error.name='ValidationError';return error;}
+
+function operationsResponse(error){
+  if(error instanceof OperationsError||error instanceof ValidationError||error?.name==='ValidationError')
+    return json({error:error.message},error.status??400);
+  throw error;
+}
 
 export async function requireAdmin(request,env){
   return Boolean(env.ADMIN_TOKEN&&await equal(request.headers.get('Authorization'),`Bearer ${env.ADMIN_TOKEN}`));

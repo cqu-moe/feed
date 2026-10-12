@@ -279,7 +279,7 @@ async function fixture({
     queueConsumers:{'feed-jobs':{maxBatchSize:1,maxRetries:3,deadLetterQueue:'feed-jobs-dlq'}},
   }));
   const db=await mf.getD1Database('DB'),bucket=await mf.getR2Bucket('ARCHIVE');
-  for(const name of ['0001_feed.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql']){
+  for(const name of ['0001_feed.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0018_outbox_receipts.sql']){
     await applyMigration(db,await readFile(`migrations/${name}`,'utf8'));
   }
   await db.prepare("INSERT INTO sources(id,name,url) VALUES ('jwc','教务处','https://jwc.cqu.edu.cn/')").run();

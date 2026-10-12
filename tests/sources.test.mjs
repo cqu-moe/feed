@@ -264,7 +264,7 @@ async function fixture({versioned=false,notifications=false,discoveryPages=2}={}
   });
   const mf=new Miniflare(convertV4MiniflareOptions({workers}));
   const db=await mf.getD1Database('DB');
-  const migrationNames=['0001_feed.sql','0002_auth.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql','0007_archive_versions.sql','0008_content_events.sql'];
+  const migrationNames=['0001_feed.sql','0002_auth.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql','0007_archive_versions.sql','0008_content_events.sql','0018_outbox_receipts.sql'];
   for(const name of migrationNames){
     await applyMigration(db,await readFile(`migrations/${name}`,'utf8'));
   }
