@@ -23,6 +23,7 @@ import {
 } from '@cqu-moe/ui';
 import { ExternalLink, Plus, RefreshCw } from 'lucide-react';
 import { StandaloneHeader } from './components';
+import { readValidationSnapshot } from './admin-source-validation';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -593,10 +594,10 @@ export function AdminSourcesPage() {
     let timer: ReturnType<typeof setTimeout>;
     async function poll() {
       try {
-        const [source, task] = await Promise.all([
-          adminJson(`/internal/sources/${encodeURIComponent(sourceId!)}`, token, parseSourceResponse),
-          adminJson(`/internal/capture-tasks/${encodeURIComponent(taskId!)}`, token, parseValidationTask),
-        ]);
+        const { source, task } = await readValidationSnapshot(
+          () => adminJson(`/internal/sources/${encodeURIComponent(sourceId!)}`, token, parseSourceResponse),
+          () => adminJson(`/internal/capture-tasks/${encodeURIComponent(taskId!)}`, token, parseValidationTask),
+        );
         if (cancelled) return;
         setSources(prior => prior.map(item => item.id === source.id ? source : item));
         if (task.state === 'succeeded' && source.validationState !== 'verified') {
