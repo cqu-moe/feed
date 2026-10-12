@@ -5,6 +5,53 @@ import {subscriptionsFixture,subscriptionsInvoke,notificationInvoke,adminRequest
 import {seedReadyEvent} from './helpers/notification-event.mjs';
 
 const start=Date.parse('2026-10-12T04:00:00Z');
+test('a suppression committed at the final submission boundary prevents a provider call',async()=>{
+  let submissions=0;
+  const f=await subscriptionsFixture({clock:start,mailHarness:{async fetch(){submissions++;return Response.json({id:'77777777-7777-4777-8777-777777777777'});}}});
+  try{
+    await subscriptionsInvoke(f.mf,'change',{id:'mail-owner'},{requestId:'mail-concurrent-bounce',name:'及时通知',sourceIds:['jwc'],emailMode:'immediate'});
+    const id=await seedReadyEvent(f.mf,{id:'f33333333333333333333333',sourceId:'jwc',firstSeenAt:start+1,observedAt:start+1,readyAt:start+2,publishedAt:new Date(start+1).toISOString(),datePrecision:'minute'});
+    await notificationInvoke(f.mf,'enqueueEvent',id);await notificationInvoke(f.mf,'replayMatchOutbox');
+    await f.mailClock(start+120_000);await f.mail('preparePending');
+    await f.db.prepare(`CREATE TRIGGER concurrent_suppression BEFORE UPDATE ON mail_messages
+      WHEN NEW.state='submitting' AND OLD.state='prepared' BEGIN
+      INSERT INTO mail_suppressions(recipient_hash,reason,provider_id,created_at)
+      VALUES (OLD.recipient_hash,'bounced','concurrent-webhook',${start}); END`).run();
+    await f.replayMail();await f.mail('recover');await f.replayMail();
+    assert.equal(submissions,0);
+    const view=await adminRequest(f.mf,'/internal/mail',undefined,{method:'GET'});
+    assert.equal(view.body.messages[0].state,'cancelled');
+    assert.equal(view.body.messages[0].lastError,'email_bounced');
+  }finally{await f.mf.dispose();}
+});
+
+test('repeated queue exhaustion before provider submission stops automatic recovery',async()=>{
+  let submissions=0;
+  const f=await subscriptionsFixture({clock:start,mailHarness:{async fetch(){submissions++;throw new Error('unexpected provider call');}}});
+  try{
+    await subscriptionsInvoke(f.mf,'change',{id:'mail-owner'},{requestId:'mail-bounded-recovery',name:'及时通知',sourceIds:['jwc'],emailMode:'immediate'});
+    const id=await seedReadyEvent(f.mf,{id:'f44444444444444444444444',sourceId:'jwc',firstSeenAt:start+1,observedAt:start+1,readyAt:start+2,publishedAt:new Date(start+1).toISOString(),datePrecision:'minute'});
+    await notificationInvoke(f.mf,'enqueueEvent',id);await notificationInvoke(f.mf,'replayMatchOutbox');
+    await f.mailClock(start+120_000);await f.mail('preparePending');
+    await f.db.prepare("UPDATE mail_messages SET payload_hash=?").bind('0'.repeat(64)).run();
+    assert.equal((await f.replayMail()).retried,1);
+    // Queue dispatches succeeded, but every delivery exhausted its platform retries before a provider call.
+    for(let attempt=1;attempt<=7;attempt++){
+      await f.db.prepare("UPDATE outbox SET state='sent',attempts=? WHERE topic='feed-mail'").bind(attempt).run();
+      await f.mail('recover');
+    }
+    const view=await adminRequest(f.mf,'/internal/mail',undefined,{method:'GET'});
+    assert.equal(view.body.messages[0].state,'deferred');
+    assert.equal(view.body.messages[0].nextAttemptAt,null);
+    assert.equal(view.body.messages[0].lastError,'retry_limit_reached');
+    assert.equal((await f.replayMail()).retried,0);
+    assert.equal(submissions,0);
+    const event=await adminRequest(f.mf,`/internal/notification-events/${id}`,undefined,{method:'GET'});
+    assert.equal(event.body.delivery.state,'claimed');
+    assert.equal((await f.mail('preparePending')).prepared,0);
+  }finally{await f.mf.dispose();}
+});
+
 test('two subscriptions and duplicate preparation submit one immutable version email',async()=>{
   const submissions=[];
   const fixture=await subscriptionsFixture({clock:start,mailHarness:{async fetch(request){
