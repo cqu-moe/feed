@@ -19,6 +19,7 @@ import {
 import { BellPlus, Copy, RefreshCw } from 'lucide-react';
 import {
   parseSubscriptionCreate,
+  parseSubscriptionChange,
   parseSubscriptionList,
   requestJson,
   type Subscription,
@@ -55,6 +56,7 @@ const statusLabels = new Map([
   ['access_revoked', '缺少访问权益'],
   ['quota_exceeded', '超出当前额度'],
   ['auth_unavailable', 'Auth 暂不可用'],
+  ['deleted', '已删除'],
 ] as const);
 
 function emptyDraft(): Draft {
@@ -96,6 +98,172 @@ function statusClass(status: Subscription['effectiveStatus']): string {
   return 'is-error';
 }
 
+type EditDraft = Pick<Subscription, 'name' | 'emailMode' | 'requestedEnabled' | 'priority'> & {
+  sourceIds: string[];
+};
+type Mutation = { path: string; method: string; body: Record<string, unknown> };
+
+function SubscriptionCard({ subscription, data, onChanged }: {
+  subscription: Subscription; data: SubscriptionList; onChanged: () => Promise<void>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState<EditDraft>(() => editable(subscription));
+  const [save, setSave] = useState<SaveState>('idle');
+  const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<'delete' | 'rotate' | 'revoke' | null>(null);
+  const [pending, setPending] = useState<Mutation | null>(null);
+  const busy = useRef(false);
+  const [copied, setCopied] = useState(false);
+  const base = `/api/subscriptions/${subscription.id}`;
+  const deleted = subscription.deletedAt !== null;
+  const availableIds = new Set(data.sources.map(source => source.id));
+  const options = [
+    ...data.sources.map(source => {
+      const siteName = data.sites.find(site => site.id === source.siteId)?.name;
+      return { id: source.id, name: !siteName || siteName === source.name ? source.name : `${siteName} · ${source.name}` };
+    }),
+    ...subscription.targets.filter(target => !availableIds.has(target.sourceId))
+      .map(target => ({ id: target.sourceId, name: `${target.sourceName}（暂不可新增）` })),
+    ...(deleted ? subscription.savedSourceIds.filter(id => !availableIds.has(id))
+      .map(id => ({ id, name: '已停用的原栏目（恢复前请移除或改选）' })) : []),
+  ];
+
+  function editable(value: Subscription): EditDraft {
+    return { name: value.name, emailMode: value.emailMode, requestedEnabled: value.requestedEnabled,
+      priority: value.priority, sourceIds: value.deletedAt ? value.savedSourceIds : value.targetSourceIds };
+  }
+  function edit(changes: Partial<EditDraft>) {
+    if (busy.current) return;
+    setDraft(current => ({ ...current, ...changes }));
+    setPending(null); setError(null); setSave('idle');
+  }
+  function operation(path: string, method: string, changes: Record<string, unknown> = {}): Mutation {
+    return { path, method, body: { requestId: crypto.randomUUID(), expectedVersion: subscription.version, ...changes } };
+  }
+  async function run(mutation: Mutation) {
+    if (busy.current) return;
+    busy.current = true; setPending(mutation); setSave('loading'); setError(null); setMessage(null);
+    const result = await requestJson(mutation.path, parseSubscriptionChange, {
+      method: mutation.method, body: JSON.stringify(mutation.body),
+    });
+    busy.current = false;
+    if (!result.ok) {
+      setSave('error'); setError(result.message);
+      if (result.status >= 400 && result.status < 500) setPending(null);
+      return;
+    }
+    setSave('success'); setPending(null); setConfirm(null); setEditing(false); setCopied(false);
+    setMessage('修改已保存。');
+    await onChanged();
+  }
+  async function copy() {
+    if (!subscription.rssUrl) return;
+    try {
+      await navigator.clipboard.writeText(new URL(subscription.rssUrl, window.location.origin).href);
+      setCopied(true); setMessage('RSS 链接已复制。');
+    } catch { setError('暂时无法复制，请手动选择链接。'); }
+  }
+  function saveEdit(event: FormEvent) {
+    event.preventDefault();
+    if (!draft.name.trim() || !draft.sourceIds.length || !Number.isSafeInteger(draft.priority) || draft.priority < 0) {
+      setError('请填写名称、至少选择一个栏目，并使用非负整数优先级。'); return;
+    }
+    void run(pending ?? operation(deleted ? `${base}/restore` : base, deleted ? 'POST' : 'PATCH', draft));
+  }
+  const emailStatus = subscription.emailStatus === 'mail_off' ? '邮件已关闭'
+    : subscription.emailStatus === 'email_unverified' ? '邮箱未验证，邮件暂停；RSS 不受影响'
+      : statusLabels.get(subscription.emailStatus);
+  return (
+    <article className="feed-card feed-subscription-card" aria-label={`订阅：${subscription.name}`}>
+      <div className="feed-source-heading">
+        <div><h2>{subscription.name}</h2><p>创建时间：{formatDateTime(subscription.createdAt)}</p></div>
+        <span className={`feed-source-state ${statusClass(subscription.effectiveStatus)}`}>{statusLabels.get(subscription.effectiveStatus)}</span>
+      </div>
+      <dl className="feed-source-meta">
+        <div><dt>关注栏目</dt><dd>{deleted ? '配置已保留，恢复后重新生效' : subscription.targets.map(target => target.sourceName).join('、')}</dd></div>
+        <div><dt>邮件</dt><dd>{emailModeLabels.get(subscription.emailMode)} · {emailStatus}</dd></div>
+        <div><dt>运行优先级</dt><dd>{subscription.priority} · {subscription.requestedEnabled ? '希望启用' : '主动暂停'}</dd></div>
+      </dl>
+      {subscription.effectiveStatus === 'quota_exceeded' && <p>配置已保留。编辑优先级可选择额度内保留运行的订阅；数字较小的优先。</p>}
+      {subscription.rssStatus === 'rss_revoked' && !deleted && <p>RSS 已撤销。重置链接后可以重新订阅，不影响邮件设置。</p>}
+      {!deleted && subscription.rssUrl && (
+        <div className="feed-subscription-token">
+          <Label htmlFor={`rss-${subscription.id}`}>私有 RSS 链接</Label>
+          <Input id={`rss-${subscription.id}`} readOnly value={new URL(subscription.rssUrl, window.location.origin).href} />
+          <Button type="button" variant="outline" onClick={copy}><Copy aria-hidden="true" />{copied ? '已复制' : '复制链接'}</Button>
+        </div>
+      )}
+      {editing && (
+        <form className="feed-subscription-editor" onSubmit={saveEdit}>
+          {deleted && <p>恢复后栏目重新生效，并生成新的 RSS 链接。请检查栏目和启用意愿。</p>}
+          <div className="feed-subscription-field">
+            <Label htmlFor={`edit-name-${subscription.id}`}>订阅名称</Label>
+            <Input id={`edit-name-${subscription.id}`} value={draft.name} maxLength={80} disabled={save === 'loading'} onChange={event => edit({ name: event.target.value })} />
+          </div>
+          <fieldset className="feed-subscription-field">
+            <legend>关注栏目</legend>
+            <p>新增栏目从保存时开始生效；移除后再加入也重新计算生效时间。</p>
+            {options.map(source => (
+              <label className="feed-subscription-check" key={source.id}>
+                <Checkbox checked={draft.sourceIds.includes(source.id)} disabled={save === 'loading'}
+                  onCheckedChange={checked => edit({ sourceIds: checked ? [...draft.sourceIds, source.id] : draft.sourceIds.filter(id => id !== source.id) })} />
+                <span>{source.name}</span>
+              </label>
+            ))}
+          </fieldset>
+          <div className="feed-subscription-field">
+            <Label htmlFor={`edit-mail-${subscription.id}`}>邮件模式</Label>
+            <Select value={draft.emailMode} disabled={save === 'loading'} onValueChange={value => {
+              if (value === 'off' || value === 'immediate' || value === 'daily_digest') edit({ emailMode: value });
+            }}>
+              <SelectTrigger id={`edit-mail-${subscription.id}`} aria-label="编辑邮件模式"><SelectValue /></SelectTrigger>
+              <SelectContent>{[...emailModeLabels].map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent>
+            </Select>
+          </div>
+          <div className="feed-subscription-field">
+            <Label htmlFor={`edit-priority-${subscription.id}`}>运行优先级（数字越小越优先）</Label>
+            <Input id={`edit-priority-${subscription.id}`} type="number" min={0} max={1000000000} step={1}
+              value={draft.priority} disabled={save === 'loading'} onChange={event => edit({ priority: Number(event.target.value) })} />
+            <p>同值时优先保留较早创建的订阅。暂停的订阅仍占创建额度。</p>
+          </div>
+          <label className="feed-subscription-check"><Checkbox checked={draft.requestedEnabled} disabled={save === 'loading'} onCheckedChange={checked => edit({ requestedEnabled: checked === true })} /><span>希望启用此订阅</span></label>
+          <div className="feed-card-actions">
+            <ActionButton type="submit" state={save} labels={{ idle: deleted ? '确认恢复订阅' : '保存修改', loading: '正在保存…', success: '已保存', error: '重试保存' }} />
+            <Button type="button" variant="outline" disabled={save === 'loading'} onClick={() => { setEditing(false); setPending(null); setError(null); }}>取消编辑</Button>
+          </div>
+        </form>
+      )}
+      {!editing && (
+        <div className="feed-card-actions">
+          {deleted ? <Button type="button" disabled={save === 'loading'} onClick={() => { setDraft(editable(subscription)); setEditing(true); setPending(null); setSave('idle'); setError(null); }}>恢复订阅</Button> : <>
+            <Button type="button" variant="outline" disabled={save === 'loading'} onClick={() => { setDraft(editable(subscription)); setEditing(true); setConfirm(null); setPending(null); setSave('idle'); setError(null); }}>编辑订阅</Button>
+            <Button type="button" variant="outline" disabled={save === 'loading'} onClick={() => run(operation(base, 'PATCH', { ...editable(subscription), requestedEnabled: !subscription.requestedEnabled }))}>{subscription.requestedEnabled ? '暂停订阅' : '启用订阅'}</Button>
+            <Button type="button" variant="outline" disabled={save === 'loading'} onClick={() => setConfirm('rotate')}>重置 RSS</Button>
+            {subscription.rssUrl && <Button type="button" variant="outline" disabled={save === 'loading'} onClick={() => setConfirm('revoke')}>撤销 RSS</Button>}
+            <Button type="button" variant="outline" disabled={save === 'loading'} onClick={() => setConfirm('delete')}>删除订阅</Button>
+          </>}
+        </div>
+      )}
+      {confirm && <Alert>
+        <AlertTitle>{confirm === 'delete' ? '删除后停止此订阅的输出' : confirm === 'rotate' ? '重置后旧 RSS 链接立即失效' : '撤销后旧 RSS 链接立即失效'}</AlertTitle>
+        <AlertDescription>{confirm === 'delete' ? '配置会保留，可在额度允许时恢复。' : confirm === 'rotate' ? '请用新链接更新阅读器中的订阅。' : '邮件设置保留，之后可重置 RSS 生成新链接。'}</AlertDescription>
+        <div className="feed-card-actions">
+          <Button type="button" disabled={save === 'loading'} onClick={() => run(operation(confirm === 'delete' ? base : `${base}/rss/${confirm}`, confirm === 'delete' ? 'DELETE' : 'POST'))}>{save === 'loading' ? '正在保存…' : '确认操作'}</Button>
+          <Button type="button" variant="outline" disabled={save === 'loading'} onClick={() => setConfirm(null)}>取消</Button>
+        </div>
+      </Alert>}
+      {error && <Alert variant="destructive"><AlertTitle>修改结果未确认</AlertTitle><AlertDescription>{error}</AlertDescription>
+        <div className="feed-card-actions">
+          {pending && <Button type="button" disabled={save === 'loading'} onClick={() => run(pending)}>重试原操作</Button>}
+          <Button type="button" variant="outline" disabled={save === 'loading'} onClick={async () => { setEditing(false); setConfirm(null); setPending(null); setError(null); setSave('idle'); await onChanged(); }}>重新载入</Button>
+        </div>
+      </Alert>}
+      {message && <p role="status">{message}</p>}
+    </article>
+  );
+}
+
 export function SubscriptionsPage() {
   const [state, setState] = useState<ListState>({ kind: 'loading' });
   const [reloadKey, setReloadKey] = useState(0);
@@ -104,8 +272,6 @@ export function SubscriptionsPage() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [created, setCreated] = useState<SubscriptionCreateResponse | null>(null);
   const saving = useRef(false);
-  const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [copyError, setCopyError] = useState<string | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -182,16 +348,6 @@ export function SubscriptionsPage() {
 
   if (state.kind === 'unauthorized') return <LoginRequiredState />;
 
-  async function copyRss(subscription: Subscription) {
-    if (!subscription.rssUrl) return;
-    try {
-      await navigator.clipboard.writeText(new URL(subscription.rssUrl, window.location.origin).href);
-      setCopiedId(subscription.id);
-      setCopyError(null);
-    } catch {
-      setCopyError('暂时无法复制，请手动选择下方链接。');
-    }
-  }
 
   return (
     <>
@@ -334,7 +490,6 @@ export function SubscriptionsPage() {
           </section>
 
           <section className="feed-subscription-list" aria-label="已保存订阅">
-            {copyError && <p role="alert">{copyError}</p>}
             {created && (
               <Alert>
                 <AlertTitle>已保存「{created.subscription.name}」</AlertTitle>
@@ -353,41 +508,7 @@ export function SubscriptionsPage() {
               </div>
             ) : (
               state.data.subscriptions.map((subscription) => (
-                <article className="feed-card feed-subscription-card" key={subscription.id}>
-                  <div className="feed-source-heading">
-                    <div>
-                      <h2>{subscription.name}</h2>
-                      <p>创建时间：{formatDateTime(subscription.createdAt)}</p>
-                    </div>
-                    <span className={`feed-source-state ${statusClass(subscription.effectiveStatus)}`}>
-                      {statusLabels.get(subscription.effectiveStatus)}
-                    </span>
-                  </div>
-                  <dl className="feed-source-meta">
-                    <div>
-                      <dt>栏目快照</dt>
-                      <dd>{subscription.targets.map((target) => target.sourceName).join('、')}</dd>
-                    </div>
-                    <div>
-                      <dt>邮件模式</dt>
-                      <dd>{emailModeLabels.get(subscription.emailMode)}</dd>
-                    </div>
-                    <div>
-                      <dt>启用意愿</dt>
-                      <dd>{subscription.requestedEnabled ? '启用' : '暂停'}</dd>
-                    </div>
-                  </dl>
-                  {subscription.rssUrl && (
-                    <div className="feed-subscription-token">
-                      <Label htmlFor={`rss-${subscription.id}`}>私有 RSS 链接</Label>
-                      <Input id={`rss-${subscription.id}`} readOnly value={new URL(subscription.rssUrl, window.location.origin).href} />
-                      <Button type="button" variant="outline" onClick={() => copyRss(subscription)}>
-                        <Copy aria-hidden="true" />
-                        {copiedId === subscription.id ? '已复制' : '复制链接'}
-                      </Button>
-                    </div>
-                  )}
-                </article>
+                <SubscriptionCard key={subscription.id} subscription={subscription} data={state.data} onChanged={reload} />
               ))
             )}
           </section>

@@ -1,0 +1,150 @@
+import { readFile } from 'node:fs/promises';
+import { build } from 'esbuild';
+import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
+
+import { login, oauthProvider } from './oauth-provider.mjs';
+
+export const feedOrigin = 'https://feed.test';
+const policyOrigin = 'https://policy.test';
+export const staticSiteId = '7fd03676e5751e9b6dd95ecb';
+export const sharedArticleUrl = 'https://jwc.cqu.edu.cn/info/2026/1.htm';
+
+export async function subscriptionsFixture({ editingMigration = true } = {}) {
+  const app = await build({
+    stdin: { contents: "import worker from './worker/index.mjs'; export default {fetch:worker.fetch};", resolveDir: process.cwd() },
+    bundle: true,
+    write: false,
+    format: 'esm',
+    platform: 'browser',
+    external: ['node:buffer', 'node:*', 'cloudflare:workers'],
+  });
+  const policy = await build({
+    stdin: {
+      contents: `
+        import {WorkerEntrypoint} from 'cloudflare:workers';
+        const state={
+          policies:{},
+          defaultPolicy:{access:true,limit:{kind:'limited',value:10}},
+	          recipients:{},
+	          defaultRecipient:{status:'verified',email:'reader@example.test'},
+          outage:false,
+          result:'normal',
+          switchAfterCalls:0,
+          switchTo:null,
+          policyCalls:0,
+        };
+        function envelope(data){return {ok:true,contractVersion:1,checkedAt:Date.now(),data};}
+        function policyFor(userId){return state.policies[userId]??state.defaultPolicy;}
+	        function recipientFor(userId){return state.recipients[userId]??state.defaultRecipient;}
+        export class AuthService extends WorkerEntrypoint{
+          async getFeedPolicy(request){
+            if(request.contractVersion!==1||request.clientId!=='feed-rpc-client'||request.clientSecret!=='feed-rpc-secret'){
+              return {ok:false,code:request.contractVersion===1?'INVALID_CLIENT':'UNSUPPORTED_VERSION',retryable:false,requestId:'test'};
+            }
+            if(state.outage)throw new Error('policy unavailable');
+            if(state.result==='malformed')return envelope({access:true,subscriptionLimit:{kind:'limited',value:'2'}});
+            const policy=policyFor(request.userId);
+            state.policyCalls+=1;
+            if(state.switchAfterCalls===state.policyCalls&&state.switchTo){
+              if('outage' in state.switchTo)state.outage=state.switchTo.outage;
+              if('result' in state.switchTo)state.result=state.switchTo.result;
+              if('limit' in state.switchTo)state.policies[request.userId]={access:policy.access,limit:state.switchTo.limit};
+            }
+            return envelope({access:policy.access,subscriptionLimit:policy.limit});
+          }
+	          async getFeedRecipient(request){
+	            const checked=await this.getFeedPolicy(request);
+	            if(!checked.ok)return checked;
+	            return envelope({policy:checked.data,recipient:recipientFor(request.userId)});
+	          }
+        }
+        export default {
+          async fetch(request){
+            const url=new URL(request.url);
+            if(url.pathname==='/state'&&request.method==='POST'){
+              Object.assign(state,await request.json());
+              return Response.json(state);
+            }
+            return Response.json(state);
+          },
+        };
+      `,
+      resolveDir: process.cwd(),
+    },
+    bundle: true,
+    write: false,
+    format: 'esm',
+    platform: 'browser',
+    external: ['cloudflare:workers'],
+  });
+  const provider = oauthProvider();
+  const mf = new Miniflare(convertV4MiniflareOptions({
+    workers: [
+      {
+        name: 'feed',
+        modules: true,
+        script: app.outputFiles[0].text,
+        compatibilityDate: '2026-10-11',
+        compatibilityFlags: ['nodejs_compat'],
+        bindings: { ...provider.bindings, ADMIN_TOKEN: 'test-admin-token', BASE_URL: feedOrigin, SOURCE_MANAGEMENT_ENABLED: 'true', FEED_AUTH_RPC_CLIENT_ID: 'feed-rpc-client', FEED_AUTH_RPC_CLIENT_SECRET: 'feed-rpc-secret' },
+        d1Databases: ['DB'],
+        r2Buckets: ['ARCHIVE'],
+        serviceBindings: { AUTH: request => provider.fetch(request), AUTH_FEED_RPC: { name: 'policy', entrypoint: 'AuthService' } },
+      },
+      {
+        name: 'policy',
+        modules: true,
+        script: policy.outputFiles[0].text,
+        compatibilityDate: '2026-10-11',
+        compatibilityFlags: ['nodejs_compat'],
+      },
+    ],
+  }));
+  const db = await mf.getD1Database('DB', 'feed');
+  const migrationNames = ['0001_feed.sql', '0002_auth.sql', '0003_collection_lease.sql', '0004_pdf_ocr.sql', '0005_task_runtime.sql', '0006_sources.sql', '0007_archive_versions.sql', '0009_subscriptions.sql'];
+  if (editingMigration) migrationNames.push('0010_subscription_editing.sql');
+  for (const name of migrationNames) {
+    await applyMigration(db, await readFile(`migrations/${name}`, 'utf8'));
+  }
+  const policyWorker = await mf.getWorker('policy');
+  return {
+    mf,
+    db,
+    login: (subject = 'user-a') => login(mf, provider, subject),
+    revokeAccess() { provider.setAccess(false); },
+    async setPolicy(subject, policy) { await post(policyWorker, `${policyOrigin}/state`, { policies: { [subject]: policy } }); },
+	    async setRecipient(subject, recipient) { await post(policyWorker, `${policyOrigin}/state`, { recipients: { [subject]: recipient } }); },
+    async setPolicyService(changes) { await post(policyWorker, `${policyOrigin}/state`, changes); },
+    async switchAfterPolicyCall(subject, switchTo) { await post(policyWorker, `${policyOrigin}/state`, { switchAfterCalls: 1, switchTo, policies: { [subject]: { access: true, limit: { kind: 'limited', value: 1 } } } }); },
+  };
+}
+
+export async function subscriptionCall(mf, path, { cookie, method = 'GET', origin, body } = {}) {
+  const response = await mf.dispatchFetch(feedOrigin + path, {
+    method,
+    headers: { ...(cookie ? { Cookie: cookie } : {}), ...(origin ? { Origin: origin } : {}), ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  return { status: response.status, body: await response.json() };
+}
+
+export async function adminRequest(mf, path, body, { method = 'POST' } = {}) {
+  const response = await mf.dispatchFetch(feedOrigin + path, {
+    method,
+    headers: { Authorization: 'Bearer test-admin-token', 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return { status: response.status, body: await response.json() };
+}
+
+async function post(worker, path, body) {
+  const response = await worker.fetch(path, { method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } });
+  if (response.status !== 200) throw new Error(`policy fixture update failed: ${await response.text()}`);
+}
+
+export async function applyMigration(db, sql) {
+  const statements = sql.split(/;\s*\n(?=CREATE|ALTER|PRAGMA|CREATE INDEX|INSERT|UPDATE|$)/)
+    .map(statement => statement.trim())
+    .filter(statement => statement && !/^PRAGMA\b/i.test(statement));
+  for (const statement of statements) await db.prepare(statement).run();
+}

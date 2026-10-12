@@ -119,6 +119,10 @@ https://<feed-origin>/auth/callback
 - `0003_collection_lease.sql`：给通知增加采集 lease，避免手动和每日任务重复扣外部额度。
 - `0004_pdf_ocr.sql`：文档 OCR jobs、calls、原子预算、usage 和阅读派生字段。
 - `0005_task_runtime.sql`：任务、attempt 账本、outbox、文章 capture fence，以及后续 T04/T06 使用的任务 kind 和三个 topic 枚举。
+- `0006_sources.sql`：动态站点/栏目、验证状态与发现 journal。
+- `0007_archive_versions.sql`：不可变通知版本与物理对象引用。
+- `0009_subscriptions.sql`：个人订阅配置、目标区间和 RSS 凭证。
+- `0010_subscription_editing.sql`：订阅版本、编辑命令回执、所有者偏好版本和恢复额度原子计数。
 
 远程迁移：
 
@@ -209,6 +213,30 @@ PDF-only 缺失原件时保留 blocked 观察，列表明确显示缺项，待�
 更换上述密钥材料前，应使用旧密钥解密并迁移 RSS 密文，再切换运行时 secret；只更换 secret 会使旧 RSS 链接无法在设置中取回。RSS hash 校验与密文展示分别保留，后续轮换可重建凭证；不能通过静默重置链接掩盖密钥丢失。
 
 界面区分零/缺失额度、权限撤回、超额和 Auth 暂不可用；已保存配置保留。创建后发生降额或 Auth 查询故障，返回 `created` 与当前暂停原因；响应丢失时按同 requestId 重试，不断言保存失败。保存期间锁定表单，避免旧响应覆盖新草稿。
+
+## 4C. T08 订阅编辑与运行集合
+
+应用 `0010_subscription_editing.sql` 后，登录所有者可以编辑订阅名称、栏目、邮件模式、启用状态和优先级，也可以软删除、恢复、轮换或撤销 RSS 链接。除创建和恢复外，这些收窄或重排操作不重新消耗创建额度，也不因当前已超额、撤权或 Auth 暂不可用而丢失配置。
+
+写接口均要求同源 Origin 与当前会话，且不接受客户端指定 owner：
+
+| 方法与路径 | 作用 |
+| --- | --- |
+| `PATCH /api/subscriptions/:id` | 全量更新名称、栏目、邮件模式、启用意愿和优先级 |
+| `DELETE /api/subscriptions/:id` | 软删除配置，撤销当前 RSS 并关闭当前目标区间 |
+| `POST /api/subscriptions/:id/restore` | 重新检查 access 与创建额度后恢复配置 |
+| `POST /api/subscriptions/:id/rss/rotate` | 仅替换该订阅的 RSS 凭证 |
+| `POST /api/subscriptions/:id/rss/revoke` | 仅撤销该订阅的当前 RSS 凭证 |
+
+编辑、删除、恢复和 RSS 命令都携带 `{requestId,expectedVersion}`；恢复和编辑还携带完整配置。D1 在同一原子批中写入命令回执、主配置和派生目标区间，所有派生写同时要求本命令回执、命令 hash 和版本条件匹配。并发编辑只有一个命令能从 expected 版本推进，失败方不留下目标区间或偏好副作用；同 requestId 重放返回 `changed:false`，版本或内容冲突返回 409。恢复先用 `feed_accounts.active_subscription_count` 和本次请求预约做原子额度 CAS；并发恢复只允许限额内数量成功，失败回执会被清理，额度释放后可用原 requestId 重试。
+
+目标区间保留历史：移除后再次加入会生成新的 `effective_from`，不会沿用原创建时间。管理员停用或验证失效后，已选栏目可以继续保留在编辑请求中，重命名、关闭邮件、暂停、删除或缩小范围不受阻；只有新增目标才要求当前站点、栏目启用且验证通过。恢复删除同样生成新的目标生效时间，不复活旧区间。
+
+运行集合由 `worker/subscription-runtime.mjs` 统一计算：未删除且用户希望启用的配置按 `(priority,created_at,id)` 排序，在限额内输出；暂停、邮件关闭和 RSS 撤销仍计创建数量，软删除不计。配额下降只把超额项标为 `quota_exceeded`，不删除配置或 RSS 身份；配额恢复不会打开用户主动关闭的订阅。列表的 `usage` 只计未删除配置，已删除配置仍返回给所有者以便恢复，状态为 `deleted`。
+
+每个订阅的 `effectiveStatus` 表示整体权益/额度/启用状态，`rssStatus` 单独区分 `rss_revoked`，`emailStatus` 单独区分 `mail_off` 与 `email_unverified`。邮箱未验证不影响 RSS 配置；Auth 暂不可用时已保存配置保持可管理并显示 `auth_unavailable`。RSS 内容与邮件投递仍未开放，等待 T09/T11 接入实际输出。
+
+RSS 轮换生成新 token 与新代次密文，AAD 继续绑定所有者、订阅 ID 和代次；旧 hash 被原子替换，撤销将 `rssUrl` 置空。轮换和撤销不改变创建数量，也不写 token 到日志。密文仍复用 `FEED_SESSION_ENCRYPTION_KEY`（兼容别名 `SESSION_ENCRYPTION_KEY`）；更换密钥前必须先按 T07 说明迁移旧密文，再切换 secret。迁移后可要求所有者逐项轮换，不能用静默重置掩盖密文不可解。
 
 ## 5. 构建与部署
 

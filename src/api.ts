@@ -298,7 +298,8 @@ export type SubscriptionEffectiveStatus =
   | 'paused'
   | 'access_revoked'
   | 'quota_exceeded'
-  | 'auth_unavailable';
+  | 'auth_unavailable'
+  | 'deleted';
 
 export type SubscriptionTarget = {
   sourceId: string;
@@ -308,15 +309,20 @@ export type SubscriptionTarget = {
 
 export type Subscription = {
   id: string;
+  version: number;
   name: string;
   requestedEnabled: boolean;
   priority: number;
   emailMode: 'off' | 'immediate' | 'daily_digest';
   activatedAt: string;
   createdAt: string;
+  deletedAt: string | null;
   targetSourceIds: string[];
+  savedSourceIds: string[];
   targets: SubscriptionTarget[];
   effectiveStatus: SubscriptionEffectiveStatus;
+  rssStatus: SubscriptionEffectiveStatus | 'rss_revoked';
+  emailStatus: SubscriptionEffectiveStatus | 'mail_off' | 'email_unverified';
   rssUrl: string | null;
 };
 
@@ -362,7 +368,8 @@ function parseSubscriptionEffectiveStatus(value: unknown): SubscriptionEffective
     value === 'paused' ||
     value === 'access_revoked' ||
     value === 'quota_exceeded' ||
-    value === 'auth_unavailable'
+    value === 'auth_unavailable' ||
+    value === 'deleted'
   ) return value;
   throw new Error('订阅状态结构不匹配。');
 }
@@ -383,12 +390,16 @@ function parseSubscription(value: unknown): Subscription {
   if (
     !isRecord(value) ||
     typeof value.id !== 'string' ||
+    !Number.isSafeInteger(value.version) ||
+    (value.version as number) < 1 ||
     typeof value.name !== 'string' ||
     typeof value.requestedEnabled !== 'boolean' ||
     typeof value.priority !== 'number' ||
     typeof value.activatedAt !== 'string' ||
     typeof value.createdAt !== 'string' ||
     !Array.isArray(value.targetSourceIds) ||
+    !Array.isArray(value.savedSourceIds) ||
+    value.savedSourceIds.some((item) => typeof item !== 'string') ||
     value.targetSourceIds.some((item) => typeof item !== 'string') ||
     !Array.isArray(value.targets) ||
     (value.rssUrl !== null && (typeof value.rssUrl !== 'string' || !/^\/rss\?token=[A-Za-z0-9_-]{43}$/.test(value.rssUrl)))
@@ -401,9 +412,15 @@ function parseSubscription(value: unknown): Subscription {
     emailMode: parseSubscriptionEmailMode(value.emailMode),
     activatedAt: value.activatedAt,
     createdAt: value.createdAt,
+    version: value.version as number,
+    deletedAt: stringOrNull(value.deletedAt),
     targetSourceIds: value.targetSourceIds,
+    savedSourceIds: value.savedSourceIds,
     targets: value.targets.map(parseSubscriptionTarget),
     effectiveStatus: parseSubscriptionEffectiveStatus(value.effectiveStatus),
+    rssStatus: value.rssStatus === 'rss_revoked' ? value.rssStatus : parseSubscriptionEffectiveStatus(value.rssStatus),
+    emailStatus: value.emailStatus === 'mail_off' || value.emailStatus === 'email_unverified'
+      ? value.emailStatus : parseSubscriptionEffectiveStatus(value.emailStatus),
     rssUrl: value.rssUrl,
   };
 }
@@ -468,6 +485,11 @@ export function parseSubscriptionCreate(value: unknown): SubscriptionCreateRespo
     created: value.created,
     subscription: parseSubscription(value.subscription),
   };
+}
+
+export function parseSubscriptionChange(value: unknown): { changed: boolean; subscription: Subscription } {
+  if (!isRecord(value) || typeof value.changed !== 'boolean') throw new Error('订阅修改结果结构不匹配。');
+  return { changed: value.changed, subscription: parseSubscription(value.subscription) };
 }
 
 export function parseSources(value: unknown): Source[] {

@@ -24,6 +24,8 @@ async function fixture(){
         const state={
           policies:{},
           defaultPolicy:{access:true,limit:{kind:'limited',value:10}},
+          recipients:{},
+          defaultRecipient:{status:'verified',email:'reader@example.test'},
           outage:false,
           result:'normal',
           switchAfterCalls:0,
@@ -32,6 +34,7 @@ async function fixture(){
         };
         function envelope(data){return {ok:true,contractVersion:1,checkedAt:Date.now(),data};}
         function policyFor(userId){return state.policies[userId]??state.defaultPolicy;}
+        function recipientFor(userId){return state.recipients[userId]??state.defaultRecipient;}
         export class AuthService extends WorkerEntrypoint{
           async getFeedPolicy(request){
             if(request.contractVersion!==1||request.clientId!=='feed-rpc-client'||request.clientSecret!=='feed-rpc-secret'){
@@ -47,6 +50,11 @@ async function fixture(){
               if('limit' in state.switchTo)state.policies[request.userId]={access:policy.access,limit:state.switchTo.limit};
             }
             return envelope({access:policy.access,subscriptionLimit:policy.limit});
+          }
+          async getFeedRecipient(request){
+            const checked=await this.getFeedPolicy(request);
+            if(!checked.ok)return checked;
+            return envelope({policy:checked.data,recipient:recipientFor(request.userId)});
           }
         }
         export default {
@@ -82,7 +90,7 @@ async function fixture(){
     ],
   }));
   const db=await mf.getD1Database('DB','feed');
-  for(const name of ['0001_feed.sql','0002_auth.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql','0007_archive_versions.sql','0009_subscriptions.sql']){
+  for(const name of ['0001_feed.sql','0002_auth.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql','0007_archive_versions.sql','0009_subscriptions.sql','0010_subscription_editing.sql']){
     await applyMigration(db,await readFile(`migrations/${name}`,'utf8'));
   }
   const policyWorker=await mf.getWorker('policy');
