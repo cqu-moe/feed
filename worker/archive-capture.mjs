@@ -53,7 +53,7 @@ export async function saveCaptureRevision(env,source,article,context,{report,sto
   const semanticFingerprint=await sha(JSON.stringify({v:1,title:semanticText(title),body:semanticText(readingText(rawBody)),files:fileIdentity.map(row=>[semanticText(row.name),row.kind,row.objectHash])}));
   const capture={v:1,taskId:context.taskId,articleId:article.id,sourceId:source.id,url:article.url,
     revisionNo:context.observationNo,observedAt,title,publishedAt:article.published_at==='unknown'?null:article.published_at??null,body,
-    sourceMetadata:{sourceId:source.id,sourceUrl:source.url,configVersion:source.configVersion??1},
+    sourceMetadata:{sourceId:source.id,sourceUrl:source.url,configVersion:source.configVersion??1,captureIntent:context.captureIntent??'live'},
     rawFingerprint,semanticFingerprint,sourceBodyHash:rawBodyObject.sha256,sourceMarkupHash:markupObject?.sha256??null,requirements,diagnostics:report.errors,objects:[...objects.values()],
     creditsUsed:report.provider.creditsUsed??null};
   const manifest=await storeTextObject(env,JSON.stringify(capture),'application/json');

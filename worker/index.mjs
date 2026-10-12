@@ -13,6 +13,7 @@ export {FeedIngest} from './workflow.mjs';
 export {PdfOcrWorkflow} from './pdf-ocr.mjs';
 export {CaptureWorkflow} from './capture-workflow.mjs';
 export {DiscoveryWorkflow} from './discovery-workflow.mjs';
+export {ArchiveOcrWorkflow} from './archive-ocr.mjs';
 
 export default {
   async scheduled(controller,env,ctx){

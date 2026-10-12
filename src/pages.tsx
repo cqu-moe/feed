@@ -99,6 +99,12 @@ const requirementStates = new Map([
   ['failed', '失败'],
 ]);
 
+const requirementErrors = new Map([
+  ['ocr_pending', '正文扫描页仍在识别中'],
+  ['artifact_missing', '源站产物未保存成功'],
+  ['attachment_missing', '附件未保存成功'],
+]);
+
 function revisionStateLabel(state: string): string {
   return revisionStates.get(state) ?? state;
 }
@@ -113,6 +119,11 @@ function requirementKindLabel(kind: string): string {
 
 function requirementStateLabel(state: string): string {
   return requirementStates.get(state) ?? state;
+}
+
+function requirementErrorLabel(error: string | null | undefined): string | null {
+  if (!error) return null;
+  return requirementErrors.get(error) ?? error;
 }
 
 function revisionStatusClass(state: string): string {
@@ -835,7 +846,9 @@ function RequirementRow({ requirement }: { requirement: RevisionRequirement }) {
           {requirementKindLabel(requirement.kind)} · {requirement.required ? '必需' : '可选'} ·{' '}
           {requirementStateLabel(requirement.state)}
         </p>
-        {requirement.errorCode && <p className="feed-attachment-error">{requirement.errorCode}</p>}
+        {requirement.errorCode && (
+          <p className="feed-attachment-error">{requirementErrorLabel(requirement.errorCode)}</p>
+        )}
       </div>
     </article>
   );

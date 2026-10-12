@@ -205,6 +205,7 @@ before(async () => {
           };
           env.CAPTURE = workflow;
           env.FEED_JOBS = queue;
+          env.FEED_EVENTS = queue;
         }
 
         const step = {
@@ -471,6 +472,7 @@ before(async () => {
     '0004_pdf_ocr.sql',
     '0005_task_runtime.sql',
     '0007_archive_versions.sql',
+    '0008_content_events.sql',
   ]) {
     await applyMigration(db, await readFile(`migrations/${name}`, 'utf8'));
   }
@@ -492,7 +494,7 @@ test('immutable revisions preserve A-B-A bytes, reject incomplete defaults, and 
   if (unauthenticated.status !== 401) assert.fail(await unauthenticated.text());
 
   const first = await capture('request-version-a', 'a');
-  assert.equal(first.revisionState, 'ready');
+  assert.equal(first.revisionState, 'assembling');
   await replaySameTask(first.taskId);
 
   await capture('request-version-b', 'b');
@@ -650,6 +652,7 @@ test('R2 success followed by D1 failure reuses the captured observation on retry
   assert.equal(recovery.recovered, 1, JSON.stringify(recovery));
   assert.equal((await handleJobs()).handled, 1);
   const recovered = await waitWorkflows();
+  await handleJobs();
   const retryWorkflow = recovered.instances.at(-1);
   assert.ok(
     retryWorkflow?.status === 'complete' && !retryWorkflow.result?.error,
@@ -688,6 +691,7 @@ async function capture(requestId, variant, id = articleId) {
   const created = await submit(requestId, id);
   await handleJobs();
   const outcome = await waitWorkflows();
+  await handleJobs();
   const workflow = outcome.instances.at(-1);
   if (workflow?.status !== 'complete') assert.fail(JSON.stringify(workflow));
   return { ...created.task, ...workflow.result, taskId: created.task.id };

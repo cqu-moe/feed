@@ -1,6 +1,6 @@
 import {WorkflowEntrypoint} from 'cloudflare:workers';
 import {createArchive} from './archive.mjs';
-import {failCaptureTask,finishCaptureTask} from './task-runtime.mjs';
+import {createTaskRuntime,failCaptureTask,finishCaptureTask} from './task-runtime.mjs';
 
 export class CaptureWorkflow extends WorkflowEntrypoint{
   async run(event,step){
@@ -22,6 +22,9 @@ export class CaptureWorkflow extends WorkflowEntrypoint{
       if(!claimed)return {superseded:true};
       const result=await step.do('capture',{retries:{limit:0},timeout:'10 minutes'},()=>createArchive(this.env).captureTask(taskId,attempt));
       await step.do('finish',()=>finishCaptureTask(this.env,taskId,attempt,result));
+      // OCR tasks and check-ready messages are committed with capture; dispatch them
+      // after the durable task receipt so a Queue outage cannot lose the handoff.
+      await createTaskRuntime(this.env).dispatchDueOutbox().catch(()=>{});
       return result;
     }catch(error){
       await failCaptureTask(this.env,taskId,attempt,error);

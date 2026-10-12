@@ -6,6 +6,9 @@ import {
   pdfOcrStatus,
   resumePdfOcr,
 } from './pdf-ocr.mjs';
+import {archiveOcrStatus,redoArchiveOcr} from './archive-ocr.mjs';
+import {reconcileRevision} from './archive-reconcile.mjs';
+import {createTaskRuntime} from './task-runtime.mjs';
 import {cleanError} from './utils.mjs';
 
 function isGlobalLimitError(message){
@@ -25,12 +28,12 @@ export function createArchive(env,{
         .bind(taskId,attemptNo).first();
       if(!task)return {superseded:true};
       if(task.result_json)return JSON.parse(task.result_json);
-      const source=JSON.parse(task.payload_json).source??await createSources(env).find(task.source_id);
+      const taskPayload=JSON.parse(task.payload_json),source=taskPayload.source??await createSources(env).find(task.source_id);
       if(!source||source.id!==(task.task_source_id??task.source_id)||new URL(source.url).origin!==new URL(task.url).origin
         ||!new RegExp(source.articlePattern).test(new URL(task.url).pathname))throw new Error('Capture source context is invalid');
-      return this.capture(source,task,{taskId,attemptNo});
+      return this.capture(source,task,{taskId,attemptNo,captureIntent:taskPayload.captureIntent??(taskPayload.discovery?'live':'live')});
     },
-    async capture(source,article,{taskId=null,attemptNo=null}={}){
+    async capture(source,article,{taskId=null,attemptNo=null,captureIntent='live'}={}){
       const timestamp=Date.now();
       const versioned=taskId&&env.ARCHIVE_VERSIONS_ENABLED==='true';
       const lease=await env.DB.prepare(`UPDATE articles
@@ -42,7 +45,7 @@ export function createArchive(env,{
         .bind(timestamp+10*60000,article.id,timestamp,taskId,taskId,taskId,attemptNo).first();
       if(!lease)return {skipped:true};
       try{
-        return await collector(env,source,article,{fence:lease.capture_fence,taskId,attemptNo,observationNo:lease.observation_no});
+        return await collector(env,source,article,{fence:lease.capture_fence,taskId,attemptNo,observationNo:lease.observation_no,captureIntent});
       }catch(error){
         if(taskId){
           const receipt=await env.DB.prepare('SELECT result_json FROM task_attempts WHERE task_id=? AND attempt_no=?')
@@ -62,15 +65,22 @@ export function createArchive(env,{
       }
     },
     extract(articleId,options){
+      if(env.ARCHIVE_VERSIONS_ENABLED==='true')return redoArchiveOcr(env,articleId,options??{});
       return enqueuePdfOcr(env,articleId,options);
     },
+    reconcileRevision(revisionId){
+      return reconcileRevision(env,revisionId);
+    },
     resumeExtract(){
+      if(env.ARCHIVE_VERSIONS_ENABLED==='true')return createTaskRuntime(env).recover();
       return resumePdfOcr(env);
     },
     extractStatus(articleId){
+      if(env.ARCHIVE_VERSIONS_ENABLED==='true')return archiveOcrStatus(env,articleId);
       return pdfOcrStatus(env,articleId);
     },
     extractResults(articleId,model){
+      if(env.ARCHIVE_VERSIONS_ENABLED==='true')return archiveOcrStatus(env,articleId);
       return pdfOcrResults(env,articleId,model);
     },
   };

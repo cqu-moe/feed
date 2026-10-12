@@ -201,11 +201,11 @@ async function fixture({versioned=false}={}){
     bindings:{...provider.bindings,ADMIN_TOKEN:'test-admin-token',BASE_URL:'https://feed.test',BRIDGE_SECRET:'test-bridge-secret',
       ARCHIVE_VERSIONS_ENABLED:String(versioned),ARCHIVE_READS_ENABLED:String(versioned),SOURCE_MANAGEMENT_ENABLED:'true',CRAWL_ENABLED:'true',TASK_RUNTIME_ENABLED:'true',PDF_OCR_ENABLED:'false',MAX_DISCOVERY_PAGES_PER_RUN:'2'},
     d1Databases:['DB'],r2Buckets:['ARCHIVE'],
-    queueProducers:{FEED_JOBS:{queueName:'feed-jobs'}},
-    queueConsumers:{'feed-jobs':{maxBatchSize:1,maxRetries:3,deadLetterQueue:'feed-jobs-dlq'}},
+    queueProducers:{FEED_JOBS:{queueName:'feed-jobs'},FEED_EVENTS:{queueName:'feed-events'}},
+    queueConsumers:{'feed-jobs':{maxBatchSize:1,maxRetries:3,deadLetterQueue:'feed-jobs-dlq'},'feed-events':{maxBatchSize:1,maxRetries:3,deadLetterQueue:'feed-events-dlq'}},
   }));
   const db=await mf.getD1Database('DB');
-  for(const name of ['0001_feed.sql','0002_auth.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql','0007_archive_versions.sql']){
+  for(const name of ['0001_feed.sql','0002_auth.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql','0007_archive_versions.sql','0008_content_events.sql']){
     await applyMigration(db,await readFile(`migrations/${name}`,'utf8'));
   }
   return {mf,db,provider,gate,read:async path=>mf.dispatchFetch('https://feed.test'+path,{headers:{Cookie:await login(mf,provider)}})};
@@ -283,6 +283,10 @@ test('two discovered columns share one notification and capture while all finite
       assert.equal(tasks.filter(task=>task.kind==='discover').length,6);
       assert.ok(tasks.every(task=>task.state==='succeeded'),JSON.stringify(tasks));
       assert.equal(tasks.filter(task=>task.kind==='capture').length,1);
+    });
+    await waitFor(async()=>{
+      const result=await (await read(`/api/articles?source=${a}`)).json();
+      assert.equal(result.total,1);
     });
     let identity;
     for(const id of [a,b]){

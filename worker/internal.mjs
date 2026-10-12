@@ -97,6 +97,21 @@ export async function internalRoute(request,env){
   }
 
   const archive=createArchive(env);
+  const archiveOcrArticle=/^\/internal\/articles\/([a-f0-9]{24})\/pdf-ocr$/.exec(url.pathname);
+  if(archiveOcrArticle){
+    if(env.ARCHIVE_VERSIONS_ENABLED!=='true')return json({error:'Archive OCR runtime is disabled'},503);
+    if(request.method==='GET')return json(await archive.extractStatus(archiveOcrArticle[1]));
+    if(request.method==='POST'){
+      let payload={};
+      try{payload=await request.json();}catch{}
+      if(!payload||typeof payload!=='object'||Array.isArray(payload)
+        ||Object.keys(payload).some(key=>!['model','publish'].includes(key)))return json({error:'Invalid OCR redo request'},400);
+      const submitted=await archive.extract(archiveOcrArticle[1],payload);
+      await createTaskRuntime(env).dispatchDueOutbox().catch(()=>{});
+      return json(submitted,202);
+    }
+    return json({error:'Method not allowed'},405);
+  }
   const ocr=/^\/internal\/pdf-ocr\/([a-f0-9]{24})$/.exec(url.pathname);
   if(ocr){
     if(request.method==='GET')return json(url.searchParams.has('model')?await archive.extractResults(ocr[1],url.searchParams.get('model')):await archive.extractStatus(ocr[1]));

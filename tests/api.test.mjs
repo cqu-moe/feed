@@ -7,7 +7,7 @@ import {Miniflare,convertV4MiniflareOptions} from 'miniflare';
 let mf,db,bucket;
 const id='1234567890abcdef12345678',second='abcdef1234567890abcdef12';
 before(async()=>{
-  const bundle=await build({stdin:{contents:"import {apiRoute} from './worker/api.mjs'; export default {fetch:apiRoute};",resolveDir:process.cwd()},bundle:true,write:false,format:'esm',platform:'browser',external:['node:buffer'],target:'es2022'});
+  const bundle=await build({stdin:{contents:"import {apiRoute} from './worker/api.mjs'; export default {fetch:apiRoute};",resolveDir:process.cwd()},bundle:true,write:false,format:'esm',platform:'browser',external:['node:buffer','cloudflare:workers'],target:'es2022'});
   mf=new Miniflare(convertV4MiniflareOptions({modules:true,script:bundle.outputFiles[0].text,compatibilityDate:'2026-10-11',compatibilityFlags:['nodejs_compat'],d1Databases:['DB'],r2Buckets:['ARCHIVE']}));
   db=await mf.getD1Database('DB');bucket=await mf.getR2Bucket('ARCHIVE');
   const sql=await readFile('migrations/0001_feed.sql','utf8');
