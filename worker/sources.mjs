@@ -1,3 +1,4 @@
+import {backfillEnabledSql,readBackfillControl} from './backfill-control.mjs';
 import staticSources from './sources.json';
 import {savedDiscoveryPage} from './discovery-journal.mjs';
 import {verifySource} from './source-validation.mjs';
@@ -76,12 +77,12 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
       try{
         const rows=await env.DB.prepare(`SELECT source_id,COUNT(*) AS n FROM article_sources GROUP BY source_id`).all();
         const counts=new Map(rows.results.map(row=>[row.source_id,row.n]));
-        return sources.map(source=>({...source,articleCount:counts.get(source.id)??0}));
+        return sources.map(source=>({...source,backfill:{...source.backfill,defaultWindowDays:boundedInteger(env.DEFAULT_BACKFILL_WINDOW_DAYS,365,1,3650)},articleCount:counts.get(source.id)??0}));
       }catch(error){
         if(!/no such table/i.test(String(error)))throw error;
         const rows=await env.DB.prepare('SELECT source_id,COUNT(*) AS n FROM articles GROUP BY source_id').all();
         const counts=new Map(rows.results.map(row=>[row.source_id,row.n]));
-        return sources.map(source=>({...source,articleCount:counts.get(source.id)??0}));
+        return sources.map(source=>({...source,backfill:{...source.backfill,defaultWindowDays:boundedInteger(env.DEFAULT_BACKFILL_WINDOW_DAYS,365,1,3650)},articleCount:counts.get(source.id)??0}));
       }
     },
     async createSource(command){
@@ -105,7 +106,7 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
       const source=await this.find(id);
       if(!source)return null;
       const rows=await env.DB.prepare('SELECT COUNT(*) AS n FROM article_sources WHERE source_id=?').bind(id).first();
-      return {...source,articleCount:rows.n};
+      return {...source,backfill:{...source.backfill,defaultWindowDays:boundedInteger(env.DEFAULT_BACKFILL_WINDOW_DAYS,365,1,3650)},articleCount:rows.n};
     },
     async discoveries(id){
       const rows=await env.DB.prepare(`SELECT article_id AS articleId,source_id AS sourceId,
@@ -138,13 +139,27 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
       if(semanticChanged&&enabled)throw validationError('Disable the source before changing its adapter configuration');
       const version=semanticChanged?current.configVersion+1:current.configVersion;
       const state=semanticChanged?'draft':current.validationState;
-      const changed=await env.DB.prepare(`UPDATE sources SET site_id=?,name=?,url=?,list_url=?,config_json=?,config_version=?,
+      const resetBackfill=semanticChanged?`,backfill_state='idle',backfill_cursor=NULL,backfill_run_id=NULL,
+        backfill_window_start=NULL,backfill_window_end=NULL,backfill_next_at=0,backfill_started_at=NULL,backfill_completed_at=NULL,
+        backfill_seen_pages=0,backfill_processed_articles=0,backfill_last_error=NULL`:'';
+      const statements=[env.DB.prepare(`UPDATE sources SET site_id=?,name=?,url=?,list_url=?,config_json=?,config_version=?,
         enabled=?,refresh_interval_sec=?,baseline_cutoff_at=?,source_timezone=?,validation_state=?,validation_json=?,
-        validated_at=?,updated_at=? WHERE id=? AND config_version=? AND enabled=? RETURNING id`)
+        validated_at=?,updated_at=?${resetBackfill} WHERE id=? AND config_version=? AND enabled=? RETURNING id`)
         .bind(input.siteId,input.name,input.origin,input.listUrl.href,JSON.stringify(nextConfig),
           version,enabled?1:0,input.refreshIntervalSec,input.baselineCutoffAt,input.timezone,
-          state,semanticChanged?null:JSON.stringify(current.validationJson),semanticChanged?null:current.validatedAt,timestamp(),id,current.configVersion,current.enabled?1:0).first();
-      if(!changed){const error=validationError('Source changed; reload before saving');error.status=409;throw error;}
+          state,semanticChanged?null:JSON.stringify(current.validationJson),semanticChanged?null:current.validatedAt,timestamp(),id,current.configVersion,current.enabled?1:0)];
+      if(semanticChanged)statements.push(
+        env.DB.prepare(`UPDATE tasks SET state='cancelled',last_error='source_configuration_changed',updated_at=?
+          WHERE changes()>0 AND source_id=? AND kind='backfill' AND json_extract(payload_json,'$.source.configVersion')=?
+          AND state NOT IN ('succeeded','cancelled')`).bind(timestamp(),id,current.configVersion),
+        env.DB.prepare(`UPDATE task_attempts SET state='cancelled',ended_at=?,error_code='source_configuration_changed'
+          WHERE EXISTS(SELECT 1 FROM tasks t WHERE t.id=task_attempts.task_id AND t.attempt_no=task_attempts.attempt_no
+            AND t.source_id=? AND t.kind='backfill' AND t.state='cancelled'
+            AND json_extract(t.payload_json,'$.source.configVersion')=?) AND state IN ('starting','running')`)
+          .bind(timestamp(),id,current.configVersion),
+      );
+      const committed=await env.DB.batch(statements);
+      if(!committed[0].results?.length){const error=validationError('Source changed; reload before saving');error.status=409;throw error;}
       return {source:await this.readSource(id)};
     },
     async submitValidation(id,{requestId}={}){
@@ -176,7 +191,7 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
       if(!source)return null;
       if(!source.enabled||!source.siteEnabled||source.validationState!=='verified')
         throw validationError('Backfill requires an enabled, verified source');
-      if(source.backfill.state!=='idle'&&source.backfill.state!=='failed'){
+      if(source.backfill.state!=='idle'){
         return {source:await this.readSource(id),task:source.backfill.state==='running'
           ?await env.DB.prepare(`SELECT id,state FROM tasks WHERE source_id=? AND kind='backfill'
               AND state IN ('queued','starting','running','deferred') ORDER BY created_at DESC,id LIMIT 1`).bind(id).first()
@@ -184,22 +199,25 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
       }
       const at=timestamp(),windowDays=command.windowDays??source.backfill.windowDays
         ??boundedInteger(env.DEFAULT_BACKFILL_WINDOW_DAYS,365,1,3650);
-      const runId=(await sha(`backfill-run:${id}:${command.requestId}`)).slice(0,16);
-      const windowStart=localDay(at-windowDays*86400000,source.timezone);
-      const checkpoint={nextUrls:sourceStartUrls(source),visited:[],processedArticleIds:[]};
-      const snapshot={...source,backfill:{...source.backfill,state:'running',windowDays,windowStart,runId}};
+      const runId=(await sha(`backfill-run:${id}:${source.configVersion}:${command.requestId}`)).slice(0,16);
+      const windowEnd=localDay(at,source.timezone);
+      const windowStart=new Date(Date.parse(windowEnd+'T00:00:00Z')-windowDays*86400000).toISOString().slice(0,10);
+      const checkpoint={nextUrls:sourceStartUrls(source),visited:[]};
+      const maxPages=boundedInteger(env.MAX_BACKFILL_PAGES_PER_RUN,100,1,1000);
+      const snapshot={...source,backfill:{...source.backfill,state:'running',windowDays,windowStart,windowEnd,runId}};
       const built=await backfillTaskStatements(env,snapshot,{
-        page:1,checkpoint,runId,windowStart,
+        page:1,checkpoint,runId,windowStart,windowEnd,
       },{timestamp:at});
       const committed=await env.DB.batch([
         env.DB.prepare(`UPDATE sources SET backfill_state='running',backfill_window_days=?,backfill_window_start=?,
-            backfill_run_id=?,backfill_next_at=?,backfill_started_at=?,backfill_completed_at=NULL,
-            backfill_seen_pages=0,backfill_processed_articles=0,backfill_last_error=NULL,updated_at=?
-          WHERE id=? AND config_version=? AND enabled=1 AND backfill_state IN ('idle','failed')`)
-          .bind(windowDays,windowStart,runId,at+60000,at,at,id,source.configVersion),
+            backfill_window_end=?,backfill_run_id=?,backfill_next_at=?,backfill_started_at=?,backfill_completed_at=NULL,
+            backfill_seen_pages=0,backfill_processed_articles=0,backfill_last_error=NULL,backfill_max_pages=?,backfill_cursor=?,updated_at=?
+          WHERE id=? AND config_version=? AND enabled=1 AND validation_state='verified' AND backfill_state='idle'
+            AND EXISTS(SELECT 1 FROM sites WHERE sites.id=sources.site_id AND sites.enabled=1)`)
+          .bind(windowDays,windowStart,windowEnd,runId,at+60000,at,maxPages,JSON.stringify(checkpoint),at,id,source.configVersion),
         ...built.statements,
       ]);
-      if(!committed[0].meta?.changes){
+      if(!committed[0].meta?.changes||!committed[1].results?.length){
         const error=validationError('Backfill changed; reload before starting');error.status=409;throw error;
       }
       return {source:await this.readSource(id),task:await env.DB.prepare('SELECT id,state FROM tasks WHERE id=?').bind(built.taskId).first()};
@@ -217,24 +235,35 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
       return {source:await this.readSource(id)};
     },
 
-    async resumeBackfill(id){
+    async resumeBackfill(id,command={}){
       const source=await this.find(id);
       if(!source)return null;
-      if(source.backfill.state!=='paused'){
+      if(source.backfill.state==='running')return {source:await this.readSource(id)};
+      if(!['paused','failed'].includes(source.backfill.state)){
         const error=validationError(`Backfill cannot resume from ${source.backfill.state}`);error.status=409;throw error;
       }
+      if(!source.enabled||!source.siteEnabled||source.validationState!=='verified')throw validationError('Backfill requires an enabled, verified source');
+      const maxPages=command.maxPages??source.backfill.maxPages;
+      if(!Number.isSafeInteger(maxPages)||maxPages<1||maxPages>1000)throw validationError('maxPages must be between 1 and 1000');
+      if(source.backfill.seenPages>=maxPages){const error=validationError('Backfill page limit reached; raise maxPages explicitly to continue');error.status=409;throw error;}
+      const exhausted=await env.DB.prepare(`SELECT 1 FROM tasks WHERE source_id=? AND kind='backfill'
+        AND json_extract(payload_json,'$.runId')=? AND state IN ('failed','blocked','deferred') AND attempt_no>=1000`).bind(id,source.backfill.runId).first();
+      if(exhausted){const error=validationError('Task attempt identity limit reached; manual source review required');error.status=409;throw error;}
       const at=timestamp();
-      await env.DB.batch([
-        env.DB.prepare(`UPDATE tasks SET due_at=?,updated_at=?
-          WHERE source_id=? AND kind='backfill' AND state='deferred'`)
-          .bind(at,at,id),
-        env.DB.prepare(`UPDATE tasks SET state='deferred',due_at=?,updated_at=?
-          WHERE source_id=? AND kind='backfill' AND state IN ('failed','blocked','cancelled')`)
-          .bind(at,at,id),
-        env.DB.prepare(`UPDATE sources SET backfill_state='running',backfill_next_at=?,updated_at=?
-          WHERE id=? AND config_version=? AND backfill_state='paused'`)
-          .bind(at,at,id,source.configVersion),
+      const gate=`EXISTS(SELECT 1 FROM sources s WHERE s.id=? AND s.config_version=? AND s.backfill_run_id=?
+        AND s.backfill_state IN ('paused','failed') AND s.enabled=1 AND s.validation_state='verified'
+        AND EXISTS(SELECT 1 FROM sites st WHERE st.id=s.site_id AND st.enabled=1))`;
+      const args=[id,source.configVersion,source.backfill.runId];
+      const committed=await env.DB.batch([
+        env.DB.prepare(`UPDATE tasks SET state='deferred',due_at=?,backfill_retry_from=attempt_no+1,updated_at=?
+          WHERE source_id=? AND kind='backfill' AND json_extract(payload_json,'$.runId')=?
+            AND state IN ('deferred','failed','blocked') AND ${gate}`)
+          .bind(at,at,id,source.backfill.runId,...args),
+        env.DB.prepare(`UPDATE sources SET backfill_state='running',backfill_next_at=?,backfill_max_pages=?,backfill_last_error=NULL,updated_at=?
+          WHERE id=? AND ${gate}`)
+          .bind(at,maxPages,at,id,...args),
       ]);
+      if(!committed[1].meta.changes){const error=validationError('Backfill changed; reload before resuming');error.status=409;throw error;}
       return {source:await this.readSource(id)};
     },
     async recordValidation(id,configVersion,evidence,{taskId,attemptNo}){
@@ -277,7 +306,6 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
       if(env.CRAWL_ENABLED!=='true'||env.TASK_RUNTIME_ENABLED!=='true'||env.SOURCE_MANAGEMENT_ENABLED!=='true')return {scheduled:[]};
       const at=timestamp(),size=boundedInteger(limit,20,1,100);
       const liveBudget=Math.min(size,boundedInteger(env.MAX_LIVE_DISCOVERY_TASKS_PER_RUN,20,1,100));
-      const backfillBudget=Math.min(size,boundedInteger(env.MAX_BACKFILL_TASKS_PER_RUN,5,1,100));
       const rows=await env.DB.prepare(`${sourceSelect}
         WHERE s.enabled=1 AND st.enabled=1 AND s.validation_state='verified' AND s.next_discovery_at<=?
         ORDER BY s.next_discovery_at,s.id LIMIT ?`).bind(at,liveBudget).all();
@@ -297,38 +325,8 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
           if(!/UNIQUE constraint failed: tasks.business_key/i.test(String(error)))throw error;
         }
       }
-      const backfillRows=await env.DB.prepare(`${sourceSelect}
-        WHERE s.enabled=1 AND st.enabled=1 AND s.validation_state='verified'
-          AND s.backfill_state='running' AND s.backfill_next_at<=?
-          AND NOT EXISTS(SELECT 1 FROM tasks pending_backfill
-            WHERE pending_backfill.source_id=s.id AND pending_backfill.kind='backfill'
-              AND pending_backfill.state IN ('queued','starting','running','deferred'))
-        ORDER BY s.backfill_next_at,s.id LIMIT ?`).bind(at,backfillBudget).all();
-      for(const row of backfillRows.results){
-        try{
-          const source=rowFromDb(row),checkpoint=source.backfillCursor??{nextUrls:sourceStartUrls(source),visited:[],processedArticleIds:[]};
-          const page=boundedInteger(Number(source.backfillCursor?.page),1,1,1000);
-          const built=await backfillTaskStatements(env,source,{
-            page,checkpoint,runId:source.backfill.runId,windowStart:source.backfill.windowStart,
-          },{timestamp:at});
-          const committed=await env.DB.batch([
-            env.DB.prepare(`UPDATE sources SET backfill_next_at=?,updated_at=?
-              WHERE id=? AND config_version=? AND backfill_state='running'
-                AND NOT EXISTS(SELECT 1 FROM tasks pending_backfill
-                  WHERE pending_backfill.source_id=sources.id AND pending_backfill.kind='backfill'
-                    AND pending_backfill.state IN ('queued','starting','running','deferred'))`)
-              .bind(at+60000,at,source.id,source.configVersion),
-            ...built.statements,
-          ]);
-          if(!committed[0].meta?.changes&&!committed[1].results?.length)continue;
-          if(committed[1].results?.length){
-            scheduled.push(built.taskId);
-            scheduledIds.push(built.taskId);
-          }
-        }catch(error){
-          if(!/UNIQUE constraint failed: tasks.business_key/i.test(String(error)))throw error;
-        }
-      }
+      // Every history page already has a durable task/outbox. Admission, including
+      // continuations and retries, is bounded at dispatch instead of recreating work.
       return {scheduled,taskIds:scheduledIds};
     },
 
@@ -343,17 +341,19 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
       if(context.mode==='validate')return verifySource(env,this,source.id,{source,taskId,attemptNo,scrape});
       if(source?.id!==task.source_id||source?.configVersion===undefined)throw validationError('Discovery source snapshot is invalid');
       const isBackfill=context.mode==='backfill';
+      let backfillMaxPages;
       if(isBackfill){
-        const control=await env.DB.prepare('SELECT backfill_state FROM sources WHERE id=? AND config_version=?')
-          .bind(source.id,source.configVersion).first();
-        if(control?.backfill_state!=='running')
-          return {deferred:true,error:'Backfill is paused',retryAfterMs:12*60*60*1000};
+        const control=await readBackfillControl(env,source,context.runId);
+        if(control.superseded||control.deferred)return control;
+        backfillMaxPages=control.maxPages;
       }
       const checkpoint=context.checkpoint??{};
       let urls=Array.isArray(checkpoint.nextUrls)?checkpoint.nextUrls:[source.listUrl];
       const visited=new Set(Array.isArray(checkpoint.visited)?checkpoint.visited:[]);
       const processedArticleIds=new Set(Array.isArray(checkpoint.processedArticleIds)?checkpoint.processedArticleIds:[]);
-      const page=boundedInteger(context.page,1,1,1000);
+      const page=context.page;
+      if(!Number.isSafeInteger(page)||page<1||page>1000)throw validationError('Discovery page limit exceeded');
+      if(isBackfill&&page>backfillMaxPages)return {deferred:true,error:'Backfill page limit reached'};
       const currentUrl=urls.shift();
       if(typeof currentUrl!=='string'||visited.has(currentUrl))throw validationError('Discovery cursor is invalid');
       let result;
@@ -372,7 +372,7 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
       const nextPageUrls=[...new Set([...urls,...result.next])].filter(url=>!visited.has(url));
       const candidates=result.articles.filter(row=>{
         if(row.precision==='unknown')return true;
-        const today=new Date(timestamp()+86400000).toISOString().slice(0,10);
+        const today=isBackfill?context.windowEnd:localDay(timestamp(),source.timezone);
         return row.publishedDay>=result.baselineCutoff&&row.publishedDay<=today;
       });
       const at=timestamp(),statements=[];
@@ -380,12 +380,12 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
       // Pause may arrive while the source request is in flight. Publish the entire page
       // and its cursor together, or defer all of it and reuse the saved page on resume.
       if(isBackfill){
-        activeTask.sql+=" AND EXISTS(SELECT 1 FROM sources current_source WHERE current_source.id=? AND current_source.config_version=? AND current_source.backfill_run_id=? AND current_source.backfill_state='running')";
+        activeTask.sql+=` AND EXISTS(SELECT 1 FROM sources current_source WHERE current_source.id=? AND current_source.config_version=? AND current_source.backfill_run_id=? AND ${backfillEnabledSql('current_source')})`;
         activeTask.args.push(source.id,source.configVersion,context.runId);
       }
       for(const row of candidates){
         const aid=await articleId(row.url);
-        processedArticleIds.add(aid);
+        if(!isBackfill)processedArticleIds.add(aid);
         const captureBusinessKey=`capture:${aid}:discovery-initial`;
         const captureTaskId=(await sha(captureBusinessKey)).slice(0,24);
         statements.push(
@@ -408,6 +408,8 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
           launchOutboxStatement(env,{id:await launchOutboxId(captureTaskId,1),taskId:captureTaskId,attempt:1,timestamp:at,
             guardSql:'kind=? AND '+activeTask.sql,guardArgs:['capture',...activeTask.args]}),
         );
+        if(isBackfill)statements.push(env.DB.prepare(`INSERT INTO backfill_seen_articles(source_id,run_id,article_id)
+          SELECT ?,?,? WHERE ${activeTask.sql} ON CONFLICT DO NOTHING`).bind(source.id,context.runId,aid,...activeTask.args));
         const association=await articleSourceAssociationStatements(env,{
           articleId:aid,sourceId:source.id,timestamp:at,discoveryTaskId:taskId,taskGuard:activeTask,
         });
@@ -415,10 +417,12 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
       }
       const continuation=!isBackfill&&nextPageUrls.length&&page<boundedInteger(env.MAX_DISCOVERY_PAGES_PER_RUN,2,1,10);
       const hasBackfillContinuation=isBackfill&&nextPageUrls.length>0;
+      const pageLimitReached=hasBackfillContinuation&&page>=backfillMaxPages;
       const checkpointJson=JSON.stringify({
         nextUrls:continuation||hasBackfillContinuation?nextPageUrls:[],visited:[...visited],verifiedUpTo:currentUrl,page,
-        processedArticleIds:[...processedArticleIds],
+        ...(isBackfill?{}:{processedArticleIds:[...processedArticleIds]}),
       });
+      if(isBackfill&&new TextEncoder().encode(checkpointJson).byteLength>128*1024)throw validationError('Backfill cursor size limit reached; saved list retained for manual review');
       if(!isBackfill&&continuation){
         const continuationTask=await discoveryTaskStatements(env,source,{
           page:page+1,checkpoint:{nextUrls:nextPageUrls,visited:[...visited]},scheduledSlot:context.scheduledSlot,
@@ -428,8 +432,8 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
           .bind(JSON.stringify({continuationTaskId:continuationTask.taskId}),taskId,...activeTask.args));
       }else if(isBackfill&&nextPageUrls.length){
         const continuationTask=await backfillTaskStatements(env,source,{
-          page:page+1,checkpoint:{nextUrls:nextPageUrls,visited:[...visited],processedArticleIds:[...processedArticleIds]},
-          runId:context.runId,windowStart:context.windowStart,
+          page:page+1,checkpoint:{nextUrls:nextPageUrls,visited:[...visited]},
+          runId:context.runId,windowStart:context.windowStart,windowEnd:context.windowEnd,
         },{timestamp:at,taskGuard:activeTask});
         statements.push(...continuationTask.statements);
         statements.push(env.DB.prepare(`UPDATE tasks SET checkpoint_json=? WHERE id=? AND ${activeTask.sql} RETURNING id`)
@@ -445,13 +449,13 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
         .bind(JSON.stringify(outcome),taskId,attemptNo,...activeTask.args));
       statements.push(isBackfill
         ?env.DB.prepare(`UPDATE sources SET last_run_at=?,error=NULL,backfill_cursor=?,backfill_seen_pages=backfill_seen_pages+1,
-            backfill_processed_articles=?,backfill_next_at=?,
-            backfill_state=CASE WHEN ? THEN 'completed' ELSE 'running' END,
+            backfill_processed_articles=(SELECT COUNT(*) FROM backfill_seen_articles WHERE source_id=? AND run_id=?),backfill_next_at=?,
+            backfill_state=CASE WHEN ? THEN 'completed' WHEN ? THEN 'paused' ELSE 'running' END,
             backfill_completed_at=CASE WHEN ? THEN ? ELSE backfill_completed_at END,
-            backfill_last_error=NULL,updated_at=? WHERE id=? AND config_version=? AND backfill_state='running' AND ${activeTask.sql}`)
-          .bind(new Date(at).toISOString(),checkpointJson,processedArticleIds.size,at,
-            nextPageUrls.length?0:1,nextPageUrls.length?0:1,nextPageUrls.length?null:at,
-            at,source.id,source.configVersion,...activeTask.args)
+            backfill_last_error=?,updated_at=? WHERE id=? AND config_version=? AND backfill_state='running' AND ${activeTask.sql}`)
+          .bind(new Date(at).toISOString(),checkpointJson,source.id,context.runId,at,
+            nextPageUrls.length?0:1,pageLimitReached?1:0,nextPageUrls.length?0:1,nextPageUrls.length?null:at,
+            pageLimitReached?'Backfill page limit reached; raise maxPages explicitly to continue':null,at,source.id,source.configVersion,...activeTask.args)
         :env.DB.prepare(`UPDATE sources SET last_run_at=?,error=NULL,updated_at=? WHERE id=? AND config_version=? AND ${activeTask.sql}`)
           .bind(new Date(at).toISOString(),at,source.id,source.configVersion,...activeTask.args));
       let committed;
@@ -466,9 +470,8 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
       }
       if(!committed[checkpointIndex].results?.length){
         if(isBackfill){
-          const control=await env.DB.prepare('SELECT backfill_state FROM sources WHERE id=? AND config_version=? AND backfill_run_id=?')
-            .bind(source.id,source.configVersion,context.runId).first();
-          if(control?.backfill_state==='paused')return {deferred:true,error:'Backfill is paused',retryAfterMs:12*60*60*1000};
+          const control=await readBackfillControl(env,source,context.runId);
+          if(control.deferred||control.superseded)return control;
         }
         return {superseded:true};
       }
@@ -508,8 +511,8 @@ async function backfillTaskStatements(env,source,context,{timestamp,taskGuard}){
   const cursorHash=(await sha(JSON.stringify(context.checkpoint))).slice(0,16);
   const businessKey=`backfill:${source.id}:${context.runId}:p${context.page}:${cursorHash}`;
   const taskId=(await sha(businessKey)).slice(0,24);
-  const payload={source,mode:'backfill',page:context.page,checkpoint:context.checkpoint,
-    runId:context.runId,windowStart:context.windowStart};
+  const payload={source:{...source,backfillCursor:null,backfill:undefined},mode:'backfill',page:context.page,checkpoint:context.checkpoint,
+    runId:context.runId,windowStart:context.windowStart,windowEnd:context.windowEnd};
   const parentGuard=taskGuard?` AND ${taskGuard.sql}`:'';
   const parentGuardArgs=taskGuard?[...taskGuard.args]:[];
   return {
@@ -517,11 +520,10 @@ async function backfillTaskStatements(env,source,context,{timestamp,taskGuard}){
     statements:[
       env.DB.prepare(`INSERT INTO tasks(id,kind,business_key,source_id,payload_json,state,priority,due_at,attempt_no,created_at,updated_at)
         SELECT ?,'backfill',?,?,?,'queued',85,?,1,?,?
-        FROM sources WHERE id=? AND config_version=? AND enabled=1 AND backfill_state='running'
-          AND EXISTS(SELECT 1 FROM sites WHERE sites.id=sources.site_id AND sites.enabled=1)${parentGuard}
+        FROM sources WHERE id=? AND config_version=? AND backfill_run_id=? AND ${backfillEnabledSql('sources')}${parentGuard}
         ON CONFLICT(business_key) DO NOTHING RETURNING id`)
         .bind(taskId,businessKey,source.id,JSON.stringify(payload),timestamp,timestamp,timestamp,
-          source.id,source.configVersion,...parentGuardArgs),
+          source.id,source.configVersion,context.runId,...parentGuardArgs),
       launchOutboxStatement(env,{id:await launchOutboxId(taskId,1),taskId,attempt:1,timestamp,
         guardSql:"kind='backfill'",guardArgs:[]}),
     ],
@@ -552,7 +554,7 @@ function rowFromDb(row){
     validatedAt:row.validated_at,validationTaskId:row.validation_task_id,timezone:row.source_timezone,
     lastRunAt:row.last_run_at,error:row.error,
     backfill:{
-      state:row.backfill_state,windowDays:row.backfill_window_days,windowStart:row.backfill_window_start,
+      maxPages:row.backfill_max_pages,state:row.backfill_state,windowDays:row.backfill_window_days,windowStart:row.backfill_window_start,windowEnd:row.backfill_window_end,
       runId:row.backfill_run_id,nextAt:row.backfill_next_at,startedAt:row.backfill_started_at,
       completedAt:row.backfill_completed_at,seenPages:row.backfill_seen_pages,
       processedArticles:row.backfill_processed_articles,lastError:row.backfill_last_error,

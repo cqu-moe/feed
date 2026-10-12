@@ -122,7 +122,8 @@ export async function internalRoute(request,env){
     if(backfillResume&&request.method==='POST'){
       if(env.TASK_RUNTIME_ENABLED!=='true'||env.CRAWL_ENABLED!=='true')return json({error:'Discovery runtime is disabled'},503);
       try{
-        const result=await sources.resumeBackfill(backfillResume[1]);
+        const commandText=await request.text();
+        const result=await sources.resumeBackfill(backfillResume[1],commandText?JSON.parse(commandText):{});
         if(!result)return json({error:'Source not found'},404);
         const runtime=createTaskRuntime(env);
         await runtime.recover().catch(()=>{});

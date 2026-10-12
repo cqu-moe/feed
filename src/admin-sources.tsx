@@ -60,6 +60,9 @@ type Source = {
 
 type BackfillProgress = {
   state: string;
+  defaultWindowDays: number;
+  maxPages: number;
+  windowEnd: string | null;
   windowDays: number | null;
   windowStart: string | null;
   nextAt: number;
@@ -175,6 +178,9 @@ function parseBackfillProgress(value: unknown): BackfillProgress {
   const state = requiredString(value.state, '历史补抓状态');
   return {
     state,
+    defaultWindowDays: integerValue(value.defaultWindowDays) ?? 365,
+    maxPages: integerValue(value.maxPages) ?? 100,
+    windowEnd: typeof value.windowEnd === 'string' ? value.windowEnd : null,
     windowDays: integerValue(value.windowDays),
     windowStart: typeof value.windowStart === 'string' ? value.windowStart : null,
     nextAt: integerValue(value.nextAt) ?? 0,
@@ -362,6 +368,7 @@ function validateSourceForm(form: SourceForm, sites: Site[]): JsonRecord {
 
 function timestampLabel(value: number | null): string {
   if (value === null) return '未记录';
+  if (value === 0) return '等待调度';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '时间无效';
   return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Shanghai' }).format(date);
@@ -393,12 +400,12 @@ function backfillLabel(state: string): string {
   if (state === 'running') return '补抓进行中';
   if (state === 'paused') return '已暂停';
   if (state === 'completed') return '已完成';
-  if (state === 'failed') return '失败，可重启';
+  if (state === 'failed') return '失败，等待人工重试';
   return '未启动';
 }
 
 function backfillWindowLabel(source: Source): string {
-  if (!source.backfill.windowDays) return '默认一年';
+  if (!source.backfill.windowDays) return `默认 ${source.backfill.defaultWindowDays} 天`;
   return `过去 ${source.backfill.windowDays} 天`;
 }
 
@@ -425,32 +432,47 @@ function BackfillControls({
   source,
   token,
   onReplace,
+  onError,
 }: {
   source: Source;
   token: string;
   onReplace: (source: Source) => void;
+  onError: (cause: unknown) => void;
 }) {
-  const [windowDays, setWindowDays] = useState(String(source.backfill.windowDays ?? 365));
+  const [windowDays, setWindowDays] = useState(source.backfill.windowDays === null ? '' : String(source.backfill.windowDays));
   const [busy, setBusy] = useState(false);
-  const locked = ['running', 'paused', 'completed'].includes(source.backfill.state);
+  const [pageLimit, setPageLimit] = useState('');
+  const [error, setError] = useState('');
+  const locked = source.backfill.state !== 'idle';
+  const enabled = source.enabled && source.siteEnabled && source.validationState === 'verified';
+  const atPageLimit = source.backfill.seenPages >= source.backfill.maxPages;
+  const limitId = `backfill-pages-${safeFieldId(source.id)}`;
+  const errorId = `backfill-error-${safeFieldId(source.id)}`;
 
   async function run(work: () => Promise<Source>) {
     if (busy) return;
     setBusy(true);
     try {
+      setError('');
       onReplace(await work());
+    } catch (cause) {
+      if (cause instanceof AdminRequestError && cause.status === 401) onError(cause);
+      else setError(cause instanceof Error ? cause.message : '补抓操作未完成，请重试。');
     } finally {
       setBusy(false);
     }
   }
 
   function start() {
-    const days = Number(windowDays);
-    if (!Number.isSafeInteger(days) || days < 1 || days > 3650) return;
+    const days = windowDays.trim() ? Number(windowDays) : undefined;
+    if (days !== undefined && (!Number.isSafeInteger(days) || days < 1 || days > 3650)) {
+      setError('窗口天数应为 1–3650 的整数。');
+      return;
+    }
     void run(async () => {
       const result = await adminJson(`/internal/sources/${encodeURIComponent(source.id)}/backfill`, token, parseSourceResponse, {
         method: 'POST',
-        body: JSON.stringify({ requestId: crypto.randomUUID(), windowDays: days }),
+        body: JSON.stringify({ requestId: crypto.randomUUID(), ...(days === undefined ? {} : { windowDays: days }) }),
       });
       return result;
     });
@@ -466,9 +488,15 @@ function BackfillControls({
   }
 
   function resume() {
+    const maxPages = pageLimit.trim() ? Number(pageLimit) : source.backfill.maxPages;
+    if (!Number.isSafeInteger(maxPages) || maxPages <= source.backfill.seenPages || maxPages > 1000) {
+      setError('请填写大于已读取页数且不超过 1000 的总页数上限。');
+      return;
+    }
     void run(async () => {
       const result = await adminJson(`/internal/sources/${encodeURIComponent(source.id)}/backfill/resume`, token, parseSourceResponse, {
         method: 'POST',
+        body: JSON.stringify({ maxPages }),
       });
       return result;
     });
@@ -476,7 +504,7 @@ function BackfillControls({
 
   return <div className="feed-admin-backfill">
     <div className="feed-admin-section-heading">
-      <h3>一年历史补抓</h3>
+      <h3>历史补抓</h3>
       <p>{backfillLabel(source.backfill.state)}；历史只进入网页和 RSS，不生成新增邮件。</p>
     </div>
     <div className="feed-admin-backfill-controls">
@@ -487,28 +515,42 @@ function BackfillControls({
         min={1}
         max={3650}
         value={windowDays}
+        placeholder={String(source.backfill.defaultWindowDays)}
+        aria-describedby={error ? errorId : undefined}
+        aria-invalid={Boolean(error)}
         onChange={event => setWindowDays(event.target.value)}
         disabled={busy || locked}
       />
       {source.backfill.state === 'completed' ? (
         <Button type="button" disabled>补抓已完成</Button>
-      ) : source.backfill.state === 'paused' ? (
-        <Button type="button" onClick={resume} disabled={busy}>继续补抓</Button>
+      ) : ['paused', 'failed'].includes(source.backfill.state) ? (
+        <Button type="button" onClick={resume} disabled={busy || !enabled || source.backfill.seenPages >= 1000}>{source.backfill.state === 'failed' ? '重试当前分页' : '继续补抓'}</Button>
       ) : source.backfill.state === 'running' ? (
         <Button type="button" variant="outline" onClick={pause} disabled={busy}>暂停补抓</Button>
       ) : (
-        <Button type="button" onClick={start} disabled={busy}>启动补抓</Button>
+        <Button type="button" onClick={start} disabled={busy || !enabled}>启动补抓</Button>
       )}
     </div>
+    {source.backfill.state === 'paused' && atPageLimit && <div className="feed-admin-form">
+      <Label htmlFor={limitId}>继续补抓的总页数上限</Label>
+      <Input id={limitId} type="number" min={source.backfill.seenPages + 1} max={1000}
+        value={pageLimit} onChange={event => setPageLimit(event.target.value)}
+        placeholder={String(source.backfill.maxPages)} disabled={busy || source.backfill.seenPages >= 1000} />
+      <p className="feed-admin-note">已达到本次页数上限，存档与分页位置已保留。确认后可增加上限，最多 1000 页；达到 1000 页需先检查来源分页配置。</p>
+    </div>}
+    {error && <p id={errorId} role="alert" className="feed-admin-server-error">{error}</p>}
+    {!enabled && <p className="feed-admin-note">请先启用已验证的栏目及所属站点，再开始或恢复补抓。</p>}
     <dl className="feed-source-meta">
       <div><dt>历史窗口</dt><dd>{backfillWindowLabel(source)}</dd></div>
       <div><dt>窗口起点</dt><dd>{source.backfill.windowStart ?? '未记录'}</dd></div>
+      <div><dt>窗口终点</dt><dd>{source.backfill.windowEnd ?? '未记录'}</dd></div>
+      <div><dt>总页数上限</dt><dd>{source.backfill.maxPages}</dd></div>
       <div><dt>已处理通知</dt><dd>{source.backfill.processedArticles}</dd></div>
       <div><dt>已读取分页</dt><dd>{source.backfill.seenPages}</dd></div>
       <div><dt>待处理分页</dt><dd>{backfillRemainingLabel(source)}</dd></div>
       <div><dt>下次调度</dt><dd>{source.backfill.state === 'running' ? timestampLabel(source.backfill.nextAt) : '不调度'}</dd></div>
     </dl>
-    {source.backfill.lastError && <p role="status" className="feed-admin-server-error">补抓失败原因：{source.backfill.lastError}</p>}
+    {source.backfill.lastError && <p role="status" className="feed-admin-server-error">补抓状态说明：{source.backfill.lastError}</p>}
   </div>;
 }
 
@@ -899,7 +941,7 @@ export function AdminSourcesPage() {
                       <div><dt>已关联通知</dt><dd>{source.articleCount}</dd></div>
                     </dl>
                     {source.error && <p role="status" className="feed-admin-server-error">{source.error}</p>}
-                    <BackfillControls source={source} token={token} onReplace={replaceSource} />
+                    <BackfillControls source={source} token={token} onReplace={replaceSource} onError={reportError} />
                     <div className="feed-card-actions">
                       <Button
                         type="button"

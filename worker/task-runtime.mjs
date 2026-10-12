@@ -1,3 +1,4 @@
+import {admitDiscovery,backfillTaskSql,backfillFailureStatement} from './backfill-control.mjs';
 import {createMail,handleMailMessage} from './notification-mail.mjs';
 import {cleanError,sha} from './utils.mjs';
 import {createSources} from './sources.mjs';
@@ -36,15 +37,34 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
     },
 
     async dispatchDueOutbox(limit=20){
-      const timestamp=now();
-      const rows=await env.DB.prepare(`SELECT * FROM outbox WHERE state='queued' AND available_at<=?
-        ORDER BY available_at,id LIMIT ?`).bind(timestamp,boundedInteger(limit,20,1,100)).all();
+      const timestamp=now(),size=boundedInteger(limit,20,1,100);
+      if(env.SOURCE_MANAGEMENT_ENABLED==='true'){
+        const history=await env.DB.prepare(`SELECT 1 FROM outbox o JOIN tasks t
+          ON t.id=json_extract(o.payload_json,'$.taskId') WHERE o.topic='feed-jobs' AND o.state='queued'
+          AND t.kind='backfill' AND t.state='queued' AND o.available_at<=? LIMIT 1`).bind(timestamp).first();
+        if(history)await createSources(env,{now}).scheduleDue({limit});
+      }
+      const lane="CASE WHEN t.kind='discover' THEN 0 WHEN t.kind='backfill' THEN 2 ELSE 1 END";
+      // Read a bounded candidate batch from each lane: exhausted live permits
+      // must not hide history or events that still have capacity to dispatch.
+      const rows=await env.DB.prepare(`WITH candidates AS (
+        SELECT o.*,${lane} AS dispatch_lane,
+          ROW_NUMBER() OVER(PARTITION BY ${lane} ORDER BY o.available_at,o.id) AS lane_rank
+        FROM outbox o LEFT JOIN tasks t ON o.topic='feed-jobs' AND t.id=json_extract(o.payload_json,'$.taskId')
+        WHERE o.state='queued' AND o.available_at<=?
+          ${env.SOURCE_MANAGEMENT_ENABLED==='true'?`AND (t.kind IS NULL OR t.kind<>'backfill' OR (t.state IN ('queued','starting','running')
+            AND t.attempt_no=json_extract(o.payload_json,'$.attempt') AND ${backfillTaskSql()}))`:''})
+        SELECT * FROM candidates WHERE lane_rank<=? ORDER BY dispatch_lane,available_at,id`).bind(timestamp,size).all();
       const dispatched=[];
       for(const row of rows.results){
+        if(dispatched.length>=size)break;
         const target=row.topic==='feed-jobs'?queue:row.topic==='feed-events'?env.FEED_EVENTS:env.FEED_MAIL;
         try{
           if(!target)throw new Error(`Queue binding unavailable for ${row.topic}`);
-          await target.send(JSON.parse(row.payload_json),{contentType:'json'});
+          const message=JSON.parse(row.payload_json);
+          if(row.topic==='feed-jobs'&&env.SOURCE_MANAGEMENT_ENABLED==='true'
+            &&!await admitDiscovery(env,message.taskId,message.attempt,timestamp))continue;
+          await target.send(message,{contentType:'json'});
           // Sending first intentionally permits duplicates after a crash. The consumer owns idempotency.
           await env.DB.prepare(`UPDATE outbox SET state='sent',attempts=attempts+1,last_error=NULL,updated_at=?
             WHERE id=? AND state='queued'`).bind(timestamp,row.id).run();
@@ -109,8 +129,9 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
           }catch{ /* An unconfirmed handoff may only retry its original identity. */ }
         }
         if(row.attempts>=5){
-          await env.DB.prepare(`UPDATE tasks SET state='blocked',last_error='launch_delivery_exhausted',updated_at=?
-            WHERE id=? AND attempt_no=? AND state IN ('queued','starting')`).bind(timestamp,row.id,row.attempt_no).run();
+          await env.DB.batch([env.DB.prepare(`UPDATE tasks SET state='blocked',last_error='launch_delivery_exhausted',updated_at=?
+            WHERE id=? AND attempt_no=? AND state IN ('queued','starting')`).bind(timestamp,row.id,row.attempt_no),
+            ...(row.kind==='backfill'?[backfillFailureStatement(env,row.id,row.attempt_no,timestamp)]:[])]);
         }else{
           await env.DB.prepare("UPDATE outbox SET state='queued',available_at=?,updated_at=? WHERE id=? AND state='sent'")
             .bind(timestamp,timestamp,row.outbox_id).run();
@@ -118,7 +139,8 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
       }
       const rows=await env.DB.prepare(`SELECT t.*,a.workflow_instance_id,a.result_json FROM tasks t
         JOIN task_attempts a ON a.task_id=t.id AND a.attempt_no=t.attempt_no
-        WHERE t.state IN ('starting','running') OR (t.state='deferred' AND t.due_at<=?)
+        WHERE t.state IN ('starting','running') OR (t.state='deferred' AND t.due_at<=?
+          ${env.SOURCE_MANAGEMENT_ENABLED==='true'?`AND (t.kind<>'backfill' OR ${backfillTaskSql()})`:''})
         ORDER BY t.updated_at,t.id LIMIT ?`).bind(timestamp,pageSize).all();
       let recovered=0;
       for(const task of rows.results){
@@ -129,9 +151,9 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
             continue;
           }
           if(!terminalPlatformStates.has(status.status))continue;
-          if(task.attempt_no>=maxAttempts){
-            await env.DB.prepare("UPDATE tasks SET state='blocked',last_error='retry_limit_reached',updated_at=? WHERE id=? AND attempt_no=? AND state='deferred'")
-              .bind(timestamp,task.id,task.attempt_no).run();continue;
+          if(task.attempt_no>=1000||task.attempt_no-(task.kind==='backfill'?task.backfill_retry_from:1)+1>=maxAttempts){
+            await env.DB.batch([env.DB.prepare("UPDATE tasks SET state='blocked',last_error=COALESCE(last_error,'retry_limit_reached'),updated_at=? WHERE id=? AND attempt_no=? AND state='deferred'")
+              .bind(timestamp,task.id,task.attempt_no),...(task.kind==='backfill'?[backfillFailureStatement(env,task.id,task.attempt_no,timestamp)]:[])]);continue;
           }
           const next=task.attempt_no+1,id=await launchOutboxId(task.id,next);
           const result=await env.DB.batch([
@@ -275,10 +297,11 @@ export async function finishOcrTask(env,taskId,attemptNo,result,now=()=>Date.now
 
 async function finishTask(env,kind,taskId,attemptNo,result,now=()=>Date.now()){
   const timestamp=now(),maxAttempts=boundedInteger(env.MAX_TASK_ATTEMPTS,3,1,10);
-  let state='succeeded',errorCode=null,dueAt=timestamp;
+  const retryFrom=kind==='backfill'?(await env.DB.prepare('SELECT backfill_retry_from FROM tasks WHERE id=?').bind(taskId).first())?.backfill_retry_from??1:1;
+  let state=result.superseded&&kind==='backfill'?'cancelled':'succeeded',errorCode=null,dueAt=timestamp;
   if(result.skipped||result.deferred){
     errorCode=result.skipped?'capture_busy':classifyLimit(result.error);
-    state=errorCode==='quota_exhausted'||attemptNo>=maxAttempts?'blocked':'deferred';
+    state=errorCode==='quota_exhausted'||attemptNo>=1000||attemptNo-retryFrom+1>=maxAttempts?'blocked':'deferred';
     const retryAfter=Number.isFinite(result.retryAfterMs)?Math.max(0,result.retryAfterMs):0;
     if(retryAfter>24*60*60*1000)state='blocked';
     const jitter=(parseInt(taskId.slice(0,6),16)%60)*1000;
@@ -292,6 +315,7 @@ async function finishTask(env,kind,taskId,attemptNo,result,now=()=>Date.now()){
       WHERE task_id=? AND attempt_no=? AND state IN ('starting','running')
       AND EXISTS(SELECT 1 FROM tasks WHERE id=? AND attempt_no=? AND state=?)`)
       .bind(state,JSON.stringify(result),timestamp,errorCode,taskId,attemptNo,taskId,attemptNo,state),
+    ...(kind==='backfill'?[backfillFailureStatement(env,taskId,attemptNo,timestamp)]:[]),
   ]);
 }
 
