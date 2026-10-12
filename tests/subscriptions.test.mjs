@@ -11,7 +11,7 @@ const policyOrigin='https://policy.test';
 const staticSiteId='7fd03676e5751e9b6dd95ecb';
 const sharedArticleUrl='https://jwc.cqu.edu.cn/info/2026/1.htm';
 
-async function fixture(){
+async function fixture({mailEnabled=false}={}){
   const app=await build({
     stdin:{contents:`import worker from './worker/index.mjs'; export default {fetch:worker.fetch};`,resolveDir:process.cwd()},
     bundle:true,write:false,format:'esm',platform:'browser',
@@ -79,7 +79,7 @@ async function fixture(){
       {
         name:'feed',modules:true,script:app.outputFiles[0].text,compatibilityDate:'2026-10-11',
         compatibilityFlags:['nodejs_compat'],
-        bindings:{...provider.bindings,ADMIN_TOKEN:'test-admin-token',BASE_URL:feedOrigin,SOURCE_MANAGEMENT_ENABLED:'true',FEED_AUTH_RPC_CLIENT_ID:'feed-rpc-client',FEED_AUTH_RPC_CLIENT_SECRET:'feed-rpc-secret'},
+        bindings:{...provider.bindings,ADMIN_TOKEN:'test-admin-token',BASE_URL:feedOrigin,SOURCE_MANAGEMENT_ENABLED:'true',MAIL_ENABLED:String(mailEnabled),FEED_AUTH_RPC_CLIENT_ID:'feed-rpc-client',FEED_AUTH_RPC_CLIENT_SECRET:'feed-rpc-secret'},
         d1Databases:['DB'],r2Buckets:['ARCHIVE'],
     serviceBindings:{AUTH:request=>provider.fetch(request),AUTH_FEED_RPC:{name:'policy',entrypoint:'AuthService'}},
       },
@@ -105,7 +105,7 @@ async function fixture(){
 }
 
 test('an owner can retrieve the same private RSS link after creating, retrying and logging in again',async()=>{
-  const {mf,login,setPolicy}=await fixture();
+  const {mf,login,setPolicy}=await fixture({mailEnabled:true});
   try{
     await setPolicy('user-a',{access:true,limit:{kind:'limited',value:2}});
     const cookie=await login();
@@ -128,6 +128,7 @@ test('an owner can retrieve the same private RSS link after creating, retrying a
     assert.equal(replay.body.subscription.rssUrl,created.body.subscription.rssUrl);
     const newSession=await login('user-a');
     const listed=await call(mf,'/api/subscriptions',{cookie:newSession});
+    assert.deepEqual(listed.body.outputChannels.email,{enabled:true});
     assert.equal(listed.body.subscriptions[0].rssUrl,created.body.subscription.rssUrl);
     const otherSession=await login('other-owner');
     const other=await call(mf,'/api/subscriptions',{cookie:otherSession});
@@ -157,7 +158,7 @@ test('subscription listing exposes policy, source options, and preserved configu
     assert.equal(list.body.subscriptions[0].id,created.body.subscription.id);
     assert.ok(list.body.sites.some(site=>site.id===staticSiteId));
     assert.ok(list.body.sources.some(source=>source.id==='jwc'&&source.siteId===staticSiteId));
-    assert.deepEqual(list.body.outputChannels,{rss:{enabled:true},email:{enabled:false,reason:'pending_t11'}});
+    assert.deepEqual(list.body.outputChannels,{rss:{enabled:true},email:{enabled:false,reason:'disabled'}});
 
     const denied=await call(mf,'/api/subscriptions',{cookie,method:'POST',origin:feedOrigin,body:{
       requestId:'revoked-reader-new',name:'撤权后创建',siteIds:[],sourceIds:['jwc'],emailMode:'daily_digest',

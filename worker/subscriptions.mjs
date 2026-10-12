@@ -610,7 +610,7 @@ export function createSubscriptions(env,{now=()=>Date.now()}={}){
         sources:sources.map(source=>({id:source.id,siteId:source.siteId,name:source.name})),
         outputChannels:{
           rss:{enabled:true},
-          email:{enabled:false,reason:'pending_t11'},
+          email:env.MAIL_ENABLED==='true'?{enabled:true}:{enabled:false,reason:'disabled'},
         },
       };
     },

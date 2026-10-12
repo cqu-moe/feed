@@ -241,7 +241,7 @@ export function AccountPage() {
           <div>
             <h2>{session.user?.name ?? session.user?.email ?? '当前账号'}</h2>
             <p className="feed-account-note">
-              订阅功能正式开放前，额度只代表 Auth 当前授权，不会自动创建订阅。
+              订阅额度由 Auth 管理，可在“我的订阅”中选择栏目和投递方式。
             </p>
           </div>
           <span
@@ -348,7 +348,7 @@ export function ArticlesPage() {
     <>
       <PageHeader
         title="重大通知存档"
-        description="统一阅读教务处、国际处、土木学院、学工部和新闻网的已采集通知。"
+        description="统一阅读已接入站点和栏目的通知，查看正文、附件与历史版本。"
       />
 
       <form className="feed-list-toolbar" role="search" onSubmit={submit}>

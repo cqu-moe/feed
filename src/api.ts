@@ -353,7 +353,7 @@ export type SubscriptionList = {
   sources: SubscriptionSourceOption[];
   outputChannels: {
     rss: { enabled: true } | { enabled: false; reason: string };
-    email: { enabled: false; reason: string };
+    email: { enabled: true } | { enabled: false; reason: string };
   };
 };
 
@@ -440,9 +440,9 @@ function parseSubscriptionPolicy(value: unknown): SubscriptionPolicy {
   };
 }
 
-function parseRssOutputChannel(value: unknown): { enabled: true } | { enabled: false; reason: string } {
+function parseOutputChannel(value: unknown, label: string): { enabled: true } | { enabled: false; reason: string } {
   if (isRecord(value) && value.enabled === true) return { enabled: true };
-  return parseDisabledOutputChannel(value, 'RSS');
+  return parseDisabledOutputChannel(value, label);
 }
 
 function parseDisabledOutputChannel(value: unknown, label: string): { enabled: false; reason: string } {
@@ -476,8 +476,8 @@ export function parseSubscriptionList(value: unknown): SubscriptionList {
     sites: value.sites as SubscriptionSite[],
     sources: value.sources as SubscriptionSourceOption[],
     outputChannels: {
-      rss: parseRssOutputChannel(value.outputChannels.rss),
-      email: parseDisabledOutputChannel(value.outputChannels.email, '邮件'),
+      rss: parseOutputChannel(value.outputChannels.rss, 'RSS'),
+      email: parseOutputChannel(value.outputChannels.email, '邮件'),
     },
   };
 }
