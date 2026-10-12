@@ -9,9 +9,20 @@ const policyOrigin = 'https://policy.test';
 export const staticSiteId = '7fd03676e5751e9b6dd95ecb';
 export const sharedArticleUrl = 'https://jwc.cqu.edu.cn/info/2026/1.htm';
 
-export async function subscriptionsFixture({ editingMigration = true } = {}) {
+export async function subscriptionsFixture({ editingMigration = true, clock } = {}) {
   const app = await build({
-    stdin: { contents: "import worker from './worker/index.mjs'; export default {fetch:worker.fetch};", resolveDir: process.cwd() },
+    stdin: { contents: `
+      import worker from './worker/index.mjs';
+      import {createSubscriptions} from './worker/subscriptions.mjs';
+      export default {async fetch(request,env,context){
+        if(${clock !== undefined}&&new URL(request.url).pathname==='/__test/subscriptions'){
+          const {method,actor,args}=await request.json();
+          try{return Response.json(await createSubscriptions(env,{now:()=>${clock ?? 0}})[method](actor,...args));}
+          catch(error){return Response.json({error:error.message},{status:error.status??503});}
+        }
+        return worker.fetch(request,env,context);
+      }};
+    `, resolveDir: process.cwd() },
     bundle: true,
     write: false,
     format: 'esm',

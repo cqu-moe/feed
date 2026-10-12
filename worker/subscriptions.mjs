@@ -316,7 +316,7 @@ export function createSubscriptions(env,{now=()=>Date.now()}={}){
           AND ${derivedGuard}`)
         .bind(at,subscriptionId,...targetSourceIds,...derivedArgs));
       for(const sourceId of targetSourceIds){
-        const targetId=(await sha(`subscription-source:${subscriptionId}:${sourceId}:${at}`)).slice(0,24);
+        const targetId=(await sha(`subscription-source:${subscriptionId}:${sourceId}:${input.requestId}`)).slice(0,24);
         statements.push(env.DB.prepare(`INSERT INTO subscription_sources(id,subscription_id,source_id,effective_from)
           SELECT ?,?,?,? FROM subscriptions
           WHERE id=? AND owner_sub=? AND config_version=? AND ${derivedGuard}
@@ -481,7 +481,7 @@ export function createSubscriptions(env,{now=()=>Date.now()}={}){
             owner,input.requestId,...commandArgs,input.expectedVersion),
       ];
       for(const sourceId of targetSourceIds){
-        const targetId=(await sha(`subscription-source:${subscriptionId}:${sourceId}:${at}`)).slice(0,24);
+        const targetId=(await sha(`subscription-source:${subscriptionId}:${sourceId}:${input.requestId}`)).slice(0,24);
         statements.push(env.DB.prepare(`INSERT INTO subscription_sources(id,subscription_id,source_id,effective_from)
           SELECT ?,?,?,? FROM subscriptions WHERE id=? AND owner_sub=? AND config_version=? AND ${derivedGuard}
             AND NOT EXISTS(SELECT 1 FROM subscription_sources WHERE subscription_id=? AND source_id=? AND removed_at IS NULL)`)

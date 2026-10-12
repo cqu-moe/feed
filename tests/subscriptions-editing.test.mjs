@@ -9,6 +9,29 @@ import {
   subscriptionsFixture,
 } from './helpers/subscriptions-fixture.mjs';
 
+test('distinct target changes remain valid when the server clock has the same millisecond', async () => {
+  const { mf } = await subscriptionsFixture({ clock: 1791800000000 });
+  try {
+    const invoke = (method, ...args) => subscriptionCall(mf, '/__test/subscriptions', {
+      method: 'POST', body: { method, actor: { id: 'same-clock-owner' }, args },
+    });
+    const created = await invoke('change', {
+      requestId: 'same-clock-create', name: '栏目切换', sourceIds: ['jwc'], emailMode: 'off',
+    });
+    assert.equal(created.status, 200, JSON.stringify(created));
+    const id = created.body.subscription.id;
+    for (const [index, sourceId] of ['intex', 'jwc', 'intex'].entries()) {
+      const edited = await invoke('update', id, {
+        requestId: `same-clock-update-${index}`, expectedVersion: index + 1,
+        name: '栏目切换', sourceIds: [sourceId], emailMode: 'off', requestedEnabled: true, priority: 0,
+      });
+      assert.equal(edited.status, 200, JSON.stringify(edited));
+      assert.equal(edited.body.subscription.version, index + 2);
+      assert.deepEqual(edited.body.subscription.targetSourceIds, [sourceId]);
+    }
+  } finally { await mf.dispose(); }
+});
+
 test('an owner can edit subscription settings and targets with version guards and stable replay', async () => {
   const { mf, login, setPolicy } = await subscriptionsFixture();
   try {

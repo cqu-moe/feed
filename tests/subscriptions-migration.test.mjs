@@ -36,11 +36,6 @@ test('0010 migrates existing owner subscriptions into versions and the active qu
       .run();
 
     await applyMigration(db, await readFile('migrations/0010_subscription_editing.sql', 'utf8'));
-    const account = await db.prepare('SELECT active_subscription_count AS count FROM feed_accounts WHERE auth_sub=?')
-      .bind(row.ownerSub)
-      .first();
-    assert.equal(account.count, 1);
-
     await setPolicy(row.ownerSub, { access: true, limit: { kind: 'limited', value: 1 } });
     const cookie = await login(row.ownerSub);
     const listed = await subscriptionCall(mf, '/api/subscriptions', { cookie });
@@ -49,6 +44,12 @@ test('0010 migrates existing owner subscriptions into versions and the active qu
     assert.equal(listed.body.subscriptions[0].version, 1);
     assert.equal(listed.body.subscriptions[0].rssUrl, `/rss?token=${token}`);
 
+    const create = () => subscriptionCall(mf, '/api/subscriptions', {
+      cookie, method: 'POST', origin: feedOrigin,
+      body: { requestId: 'create-after-migration', name: '迁移后新建', sourceIds: ['jwc'] },
+    });
+    assert.equal((await create()).status, 403);
+
     const deleted = await subscriptionCall(mf, `/api/subscriptions/${row.id}`, {
       cookie,
       method: 'DELETE',
@@ -56,10 +57,8 @@ test('0010 migrates existing owner subscriptions into versions and the active qu
       body: { requestId: 'legacy-delete-command', expectedVersion: 1 },
     });
     assert.equal(deleted.status, 200, JSON.stringify(deleted));
-    const countAfterDelete = await db.prepare('SELECT active_subscription_count AS count FROM feed_accounts WHERE auth_sub=?')
-      .bind(row.ownerSub)
-      .first();
-    assert.equal(countAfterDelete.count, 0);
+    assert.equal((await create()).status, 201);
+    assert.equal((await subscriptionCall(mf, '/api/subscriptions', { cookie })).body.usage, 1);
   } finally {
     await mf.dispose();
   }
