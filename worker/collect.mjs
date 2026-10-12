@@ -77,7 +77,10 @@ async function collectArticle(env,source,article,dependencies,captureContext){
         body+='\n\n'+(fullyNative?nativeText:PDF_TEXT_UNAVAILABLE);
         report.artifacts.push(await put(env,prefix,`${saved.name}.pages.json`,JSON.stringify(analysis),'application/json'));
         report.artifacts.push(await put(env,prefix,`${saved.name}.txt`,nativeText,'text/plain; charset=utf-8'));
-      }catch(error){body+='\n\n'+PDF_TEXT_UNAVAILABLE;report.errors.push(cleanError(error));}
+      }catch(error){
+        migrationBody+='\n\n'+PDF_TEXT_UNAVAILABLE;
+        body+='\n\n'+PDF_TEXT_UNAVAILABLE;report.errors.push(cleanError(error));
+      }
     }
   }
   body=readingText(body);

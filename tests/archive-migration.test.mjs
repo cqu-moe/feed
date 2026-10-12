@@ -146,7 +146,7 @@ test('a complete legacy record stays blocked until its original PDF OCR is recov
   }finally{await mf.dispose();}
 });
 
-test('migration repair uses the frozen original hash even if legacy metadata later changes',async()=>{
+for(const pdfReadFailure of [false,true])test(`migration repair preserves originals and classifies rechecks with PDF read failure=${pdfReadFailure}`,async()=>{
   const {mf,auth,db,bucket,legacy}=await fixture();
   try{
     const original=await(await bucket.get(legacy.keys.normal)).arrayBuffer();
@@ -198,7 +198,7 @@ test('migration repair uses the frozen original hash even if legacy metadata lat
       const artifacts=await Promise.all(files.map(async file=>({name:file.filename,contentType:'application/pdf',
         base64:Buffer.from(await(await bucket.get(file.key)).arrayBuffer()).toString('base64')})));
       artifacts.push({name:'offline.html',contentType:'text/html',base64:Buffer.from(snapshot).toString('base64')});
-      const recaptured=await mf.dispatchFetch('https://feed.test/fixture/capture',{method:'POST',body:JSON.stringify({taskId,
+      const recaptured=await mf.dispatchFetch('https://feed.test/fixture/capture',{method:'POST',body:JSON.stringify({taskId,pdfReadFailure,
         page:{bodyRecognized:true,page:{url:articleUrl,title:'迁移通知'},bodyText:body,errors:[],artifacts,
           attachmentCandidates:files.map(file=>({url:file.url,name:file.name,role:file.role})),
           downloads:files.map(file=>({url:file.url,role:file.role,kind:'pdf',originalFile:true,saved:{name:file.filename},fetchedAt:new Date(clock).toISOString()}))}})});
@@ -381,10 +381,20 @@ async function fixture({pageCount=1,model='mistral-ocr-4-1',ocrRole='body-pdf',c
     export default{
       async fetch(request,raw){
         if(new URL(request.url).pathname==='/fixture/capture'){
-          const {taskId,page}=await request.json();
+          const {taskId,page,pdfReadFailure}=await request.json();
+          let failed=false;
+          const archive=new Proxy(raw.ARCHIVE,{get(target,key){
+            if(key==='get')return async path=>{
+              if(pdfReadFailure&&!failed&&path.endsWith('/attachment-1.pdf')){
+                failed=true;throw new Error('controlled original PDF read interruption');
+              }
+              return target.get(path);
+            };
+            const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;
+          }});
           const collector=createCollector({scrape:async()=>({markdown:page.bodyText,metadata:{statusCode:200,creditsUsed:1},
             actions:{javascriptReturns:[{value:JSON.stringify(page)}]}})});
-          return Response.json(await createArchive(raw,{collector}).captureTask(taskId,1));
+          return Response.json(await createArchive({...raw,ARCHIVE:archive},{collector}).captureTask(taskId,1));
         }
         if(new URL(request.url).pathname==='/fixture/read-switch'&&request.method==='POST'){
           reads=await request.text()==='true';return new Response(String(reads));
