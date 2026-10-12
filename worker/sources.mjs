@@ -377,6 +377,12 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
       });
       const at=timestamp(),statements=[];
       const activeTask={sql:'EXISTS(SELECT 1 FROM tasks active_task WHERE active_task.id=? AND active_task.attempt_no=? AND active_task.state=\'running\')',args:[taskId,attemptNo]};
+      // Pause may arrive while the source request is in flight. Publish the entire page
+      // and its cursor together, or defer all of it and reuse the saved page on resume.
+      if(isBackfill){
+        activeTask.sql+=" AND EXISTS(SELECT 1 FROM sources current_source WHERE current_source.id=? AND current_source.config_version=? AND current_source.backfill_run_id=? AND current_source.backfill_state='running')";
+        activeTask.args.push(source.id,source.configVersion,context.runId);
+      }
       for(const row of candidates){
         const aid=await articleId(row.url);
         processedArticleIds.add(aid);
@@ -458,7 +464,14 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
         if(receipt?.result_json)return JSON.parse(receipt.result_json);
         return {deferred:true,error:cleanError(error),savedPage:true};
       }
-      if(!committed[checkpointIndex].results?.length)return {superseded:true};
+      if(!committed[checkpointIndex].results?.length){
+        if(isBackfill){
+          const control=await env.DB.prepare('SELECT backfill_state FROM sources WHERE id=? AND config_version=? AND backfill_run_id=?')
+            .bind(source.id,source.configVersion,context.runId).first();
+          if(control?.backfill_state==='paused')return {deferred:true,error:'Backfill is paused',retryAfterMs:12*60*60*1000};
+        }
+        return {superseded:true};
+      }
       return outcome;
     },
   };

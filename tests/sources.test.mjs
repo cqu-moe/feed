@@ -514,6 +514,35 @@ test('pausing a persisted backfill prevents paid work and resume retries the sam
   }finally{await mf.dispose();}
 });
 
+test('pausing an in-flight history page retains its checkpoint and resumes without another scrape',async()=>{
+  const {mf,gate}=await fixture({versioned:true,discoveryPages:1});
+  try{
+    const site=await request(mf,'/internal/sites',{method:'POST',body:{name:'运行中暂停站点',origin:'https://a.test'}});
+    const sourceId=await createVerifiedSource(mf,site.data.site.id,'https://a.test/list-a.htm');
+    gate.url='https://a.test/list-a.htm';
+    const started=await request(mf,`/internal/sources/${sourceId}/backfill`,{method:'POST',body:{requestId:'pause-inflight-page'}});
+    await waitFor(async()=>assert.equal(gate.held,true));
+    await request(mf,`/internal/sources/${sourceId}/backfill/pause`,{method:'POST'});
+    gate.release();
+    await waitFor(async()=>{
+      const task=(await request(mf,`/internal/capture-tasks/${started.data.task.id}`)).data.task;
+      assert.equal(task.state,'deferred',JSON.stringify(task));
+    });
+    assert.equal((await request(mf,`/internal/sources/${sourceId}/discoveries`)).data.discoveries.length,0);
+    const callsBefore=(await(await mf.dispatchFetch('https://feed.test/fixture/scrapes')).json()).calls;
+    const firstPages=callsBefore.filter(call=>call.url==='https://a.test/list-a.htm').length;
+    await request(mf,`/internal/sources/${sourceId}/backfill/resume`,{method:'POST'});
+    await waitFor(async()=>{
+      const source=(await request(mf,`/internal/sources/${sourceId}`)).data.source;
+      assert.equal(source.backfill.state,'completed',JSON.stringify(source));
+      assert.equal(source.backfill.seenPages,2);
+      assert.equal(source.backfill.processedArticles,1);
+    });
+    const callsAfter=(await(await mf.dispatchFetch('https://feed.test/fixture/scrapes')).json()).calls;
+    assert.equal(callsAfter.filter(call=>call.url==='https://a.test/list-a.htm').length,firstPages);
+  }finally{gate.release?.();await mf.dispose();}
+});
+
 test('live discovery is scheduled before bounded and pausable history work',async()=>{
   const {mf,db}=await fixture({versioned:true,discoveryPages:1,env:{liveBudget:1,backfillBudget:1}});
   try{
