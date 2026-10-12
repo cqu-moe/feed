@@ -580,6 +580,7 @@ export function AdminSourcesPage() {
   const selectedSource = sources.find(source => source.id === selectedSourceId) ?? null;
   const selectedOriginal = selectedSource ? sourceForm(selectedSource) : null;
   const sourceDirty = selectedOriginal !== null && !sameSourceForm(sourceDraft, selectedOriginal);
+  const currentValidationStatus = sourceDirty ? '' : validationStatus;
   const selectedSite = sites.find(site => site.id === editingSiteId) ?? null;
   const siteDirty = selectedSite !== null && siteNameDraft.trim() !== selectedSite.name;
 
@@ -598,6 +599,10 @@ export function AdminSourcesPage() {
         ]);
         if (cancelled) return;
         setSources(prior => prior.map(item => item.id === source.id ? source : item));
+        if (task.state === 'succeeded' && source.validationState !== 'verified') {
+          setValidationStatus('');
+          return;
+        }
         const labels: Record<string, string> = {
           queued: '验证任务已保存，等待执行。', starting: '验证任务正在启动。', running: '服务端正在验证样本。',
           deferred: '验证已延期，系统会在到期后重试。', blocked: '验证需要管理员处理。',
@@ -619,7 +624,7 @@ export function AdminSourcesPage() {
     }
     void poll();
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [token, selectedSource?.id, selectedSource?.validationTaskId]);
+  }, [token, selectedSource?.id, selectedSource?.configVersion, selectedSource?.validationTaskId]);
 
   useEffect(() => {
     const sourceId = selectedSource?.id;
@@ -987,7 +992,7 @@ export function AdminSourcesPage() {
                       setDraftTouched(true);
                     }}
                   />
-                  {validationStatus && <p role="status">{validationStatus}</p>}
+                  {currentValidationStatus && <p role="status">{currentValidationStatus}</p>}
                   <div className="feed-card-actions">
                     <Button type="button" onClick={saveSource} disabled={busy !== '' || !sourceDirty || selectedSource.enabled}>
                       保存配置版本
