@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   check:
-    name: Tests, build and design
+    name: Tests, build, design and Worker packaging
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

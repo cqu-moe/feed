@@ -7,8 +7,9 @@
     "dev": "vite --host 127.0.0.1 --port 5174",
     "build": "tsc --noEmit && vite build && node scripts/copy-pdf-assets.mjs",
     "check:design": "node node_modules/@cqu-moe/ui/dist/check-design.mjs src",
+    "check:worker": "wrangler deploy --dry-run --outdir .wrangler/dry-run",
     "test": "node --test tests/*.test.mjs",
-    "ci": "pnpm test && pnpm build && pnpm check:design",
+    "ci": "pnpm test && pnpm build && pnpm check:design && pnpm check:worker",
     "deploy:ci": "wrangler d1 migrations apply cqu-feed-mvp --remote && wrangler deploy",
     "deploy": "pnpm build && pnpm deploy:ci"
   },
