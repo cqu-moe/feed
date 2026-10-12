@@ -60,6 +60,25 @@ pnpm exec wrangler secret put FEED_SESSION_ENCRYPTION_KEY --name cqu-feed
 
 不要把 `.private/production-secrets.json` 提交到仓库，也不要在文档、日志或终端回显中复制其内容。
 
+### Firecrawl 付费密钥配置
+
+当前生产 Worker 的密钥名固定为 `FIRECRAWL_API_KEY`。在已安装项目依赖的检出中执行：
+
+```sh
+pnpm exec wrangler secret put FIRECRAWL_API_KEY --name cqu-feed
+```
+
+仅在 Wrangler 的交互提示中粘贴密钥；不要放进命令参数、聊天、`wrangler.jsonc` 或 Git。也可在 Cloudflare 的 `cqu-feed` → Settings → Variables and Secrets 中添加同名 **Secret**。该密钥用于运行时，不是 Workers Builds 的构建变量。
+
+验证时只列名称：
+
+```sh
+pnpm exec wrangler secret list --name cqu-feed
+```
+
+看到名称只能证明配置存在，真实抓取与付费额度需要在验收时单独验证。正式版隔离验收 Worker 的 secrets 不会自动继承生产配置；待隔离资源确定后，对该 Worker 单独执行同一配置步骤。不要为配置密钥运行 `pnpm deploy`，它还会执行远程数据库迁移。
+
+
 ## 2. Auth 与访问控制
 
 Feed 使用机密 OAuth client + Feed BFF 会话：
