@@ -93,9 +93,9 @@ WHERE EXISTS (SELECT 1 FROM subscriptions WHERE id = :id AND owner_sub = :owner)
 | `event_source_corrections` | `id, event_id, source_id, generation, request_id, command_hash, evidence_object_hash, corrected_dates_json, verified_by, verified_at` | 唯一 `(event_id,source_id,generation)` 和 `(event_id,source_id,request_id)`；同请求同内容重放，改内容冲突；只追加核实证据，当前判定选择最大 generation |
 | `notification_matches` | `event_id, subscription_id, target_id, owner_sub, eligibility_kind, matched_at` | 唯一 `(event_id,subscription_id,target_id)`；索引 `(owner_sub,event_id)`；保留命中解释，不复制内容 |
 | `user_deliveries` | `id, owner_sub, event_id, state, delivery_kind, available_at, claimed_message_id?, suppression_reason?, backlog_at?` | 唯一 `(owner_sub,event_id)`；索引 `(state,available_at,owner_sub)`；`backlog_at` 保留暂停积压事实，恢复/重匹配不改回即时提醒 |
-| `mail_messages` | `id, owner_sub, kind, window_end?, generation, state, recipient_snapshot?, payload_object_hash?, payload_hash?, idempotency_key, provider_id?, submitted_at?, accepted_at?, delivered_at?, next_attempt_at?, last_error?` | `idempotency_key` 唯一；每日摘要基础批次唯一 `(owner_sub,window_end,generation)`；`provider_id` 非空时唯一 |
-| `mail_items` | `message_id, delivery_id` | PK `(message_id,delivery_id)`；已提交/结果不明的 delivery 不得被另一 message 占用；历史取消消息可保留同一 delivery 的旧关联 |
-| `mail_webhook_receipts` | `provider, provider_event_id, message_id?, payload_object_hash, received_at, processed_at?` | PK `(provider,provider_event_id)`；验签后持久化再返回成功；处理可重试 |
+| `mail_messages` | `id, owner_sub, kind, state, payload_key, payload_hash, recipient_hash, idempotency_key, provider_id?, submitted_at?, accepted_at?, delivered_at?, bounced_at?, complained_at?, lease_token?, lease_until?, next_attempt_at?, attempts, last_error?` | `idempotency_key` 唯一；`provider_id` 非空时唯一；首次提交前固定快照。T12 再加入摘要窗口及分批身份 |
+| `mail_items` | `message_id, delivery_id, event_id, ordinal` | PK `(message_id,delivery_id)`；已提交/结果不明的 delivery 不得被另一 message 占用；历史取消消息可保留同一 delivery 的旧关联 |
+| `mail_webhook_receipts` | `id, message_id?, payload_key, payload_hash, state, received_at, processed_at?, attempts, next_attempt_at, last_error?` | 供应商回调 ID 主键；主动查询证据使用独立 `lookup:` 前缀；验签后持久化再返回成功；处理有界重试 |
 
 事件只来自 ready 版本。历史基线也可以创建 `initial/history_only=1` 事件供 RSS 查询，但没有历史邮件资格；排版版本及 OCR 重做不创建 `update`。RSS GUID 使用永久稳定的 `urn:cqu-feed:event:<id>`，URL 指向对应 revision。正文和所有原件仍须登录检查 `feed.access`。
 
@@ -155,3 +155,9 @@ D1 使用 `DB.batch()` 的原子提交能力；其中一个语句失败会回滚
 首版搜索索引只跟随最新完整阅读投影；历史版本按通知时间线浏览。全版本全文搜索可后续增加，不把每个 OCR 重算都塞入主搜索结果。
 
 实现验收至少覆盖：并发建订阅不超额；降额保留配置；A→B→A 三版；同名附件替换不覆盖；旧 OCR 晚到不回退当前版本；失败补抓不混合版本；同事件多订阅只占一条 delivery；ready 与 outbox 原子；匹配延迟跨摘要窗口不丢；邮件结果不明不盲目重复提交。此文定义设计约束，尚未证明生产数据库行为。
+
+### T11 已实现边界
+
+邮件正文、收件地址和验签后的回调保存在私有 R2 `private/mail/sha256/` 下，D1 只保存 hash、对象引用及安全状态。普通文件 API 只允许文章/版本中已记录的引用，不提供任意 R2 key 下载。邮件快照不加入文章 artifact 表。
+
+首次提交的 CAS 同时复核订阅配置版本、事件来源数量及日期修正代数；CAS 失败不提交外部请求。提交前落盘 `submitting`、最早提交时间和两分钟租约；网络或本地受理记账失败都保留原占用。Resend 最多在最早提交后 23.5 小时内用原请求重试，留出窗口余量；超时、达到尝试上限或当前资格/邮箱改变时保留结果不明并等待对账，不更换 key。明确未受理的限流可持久延期，尝试上限后等待管理员处理。

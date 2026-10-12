@@ -6,6 +6,7 @@ import {apiRoute} from './api.mjs';
 import {internalRoute} from './internal.mjs';
 import {subscriptionsRoute} from './subscriptions.mjs';
 import {rssRoute} from './rss.mjs';
+import {createMail} from './notification-mail.mjs';
 import {json,encoder,cleanError} from './utils.mjs';
 import {createArchive} from './archive.mjs';
 import {createSources} from './sources.mjs';
@@ -27,6 +28,9 @@ export default {
     if(controller.cron==='*/5 * * * *'&&env.TASK_RUNTIME_ENABLED==='true'){
       jobs.push(sources.scheduleDue(),createTaskRuntime(env).recover());
     }
+    if(controller.cron==='*/5 * * * *'&&env.MAIL_ENABLED==='true'){
+      jobs.push(createMail(env).recover().then(()=>createTaskRuntime(env).dispatchDueOutbox()));
+    }
     ctx.waitUntil(Promise.all(jobs));
   },
   async queue(batch,env){await handleFeedJobs(batch,env);},
@@ -34,6 +38,11 @@ export default {
     const url=new URL(request.url);
     try{
       if(url.pathname==='/health')return json({ok:true,service:'cqu-feed'});
+      if(url.pathname==='/webhooks/resend'){
+        if(request.method!=='POST')return json({error:'Method not allowed'},405);
+        try{return json(await createMail(env).receiveWebhook(request));}
+        catch(error){return json({error:'Mail webhook could not be accepted'},error.status??503);}
+      }
       const rss=await rssRoute(request,env);if(rss)return rss;
       const bridge=await bridgeRoute(request,env);if(bridge)return bridge;
       if(url.pathname.startsWith('/internal/')){

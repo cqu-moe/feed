@@ -4,6 +4,7 @@ import { Alert, AlertDescription, AlertTitle, Button, ContentContainer, Input, L
 import { RefreshCw } from 'lucide-react';
 import { requestJson } from './api';
 import { articleStatusLabel, formatDateTime, StandaloneHeader } from './components';
+import { AdminMailPanel } from './admin-mail';
 import { AdminNotificationEvents } from './admin-notifications';
 
 type Task = {
@@ -156,6 +157,7 @@ export function AdminTasksPage() {
             {activeTask.articleId && <Button asChild variant="outline"><Link to={`/articles/${activeTask.articleId}`}>查看通知</Link></Button>}
           </section>}
           <AdminNotificationEvents token={token} />
+          <AdminMailPanel token={token} />
           <section aria-label="最近采集任务">
             <h2>最近采集任务</h2>
             {tasks.length === 0 ? <PageState state="empty" title="还没有采集任务" description="填写已发现通知的 ID，发起第一次采集。" /> :
