@@ -4,6 +4,7 @@
 
 - `README.md`：功能、来源范围、运行方式及已知边界。
 - `docs/operations.md`：Cloudflare、Auth、迁移、额度与运维。
+- `docs/ci-cd.md`：GitHub 检查、Cloudflare Git Connector 和发布验证；日常部署 push 到 main。
 - `docs/acceptance.md`：实际验收证据与未验证事项。
 - `worker/workflow.mjs`、`discovery.mjs`、`collect.mjs`：云任务与存档。
 - `worker/page-action.mjs`、`bridge*.mjs`：Firecrawl 源站浏览器与临时 OCR/上传桥接。保留 origin、HMAC、有效期、文件签名和额度校验。

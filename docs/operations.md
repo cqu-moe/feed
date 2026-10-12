@@ -109,23 +109,25 @@ pnpm exec wrangler d1 migrations list cqu-feed-mvp --local
 pnpm exec wrangler d1 migrations apply cqu-feed-mvp --local
 ```
 
-`pnpm deploy` 不会应用迁移。部署新 Worker 代码前必须先确认远程迁移已应用，避免 Worker 查询不存在的表。
+`pnpm deploy:ci` 和 `pnpm deploy` 都会先应用远程迁移，再部署 Worker。部署失败时先查看迁移和部署各自的日志；已成功应用的 D1 迁移不会随 Worker 回滚。
 
 ## 4. 构建与部署
 
+日常部署通过 push 到 main 触发 Cloudflare Git Connector；GitHub Actions 只运行检查。构建命令、部署命令和环境配置见 [ci-cd.md](ci-cd.md)。Cloudflare 执行 `pnpm run ci` 后，再执行 `pnpm deploy:ci`。
+
+本地检查及必要时的手动部署：
+
 ```sh
-pnpm install
-pnpm test
-pnpm build
-pnpm check:design
-pnpm exec wrangler d1 migrations apply cqu-feed-mvp --remote
+pnpm install --frozen-lockfile
+pnpm run ci
 pnpm deploy
 ```
 
 `pnpm deploy` 的实际内容是：
 
 ```sh
-pnpm build && wrangler deploy
+pnpm build && pnpm deploy:ci
+# deploy:ci: wrangler d1 migrations apply cqu-feed-mvp --remote && wrangler deploy
 ```
 
 部署后做只读检查：

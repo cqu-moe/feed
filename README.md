@@ -72,7 +72,7 @@ pnpm check:design
 完整部署顺序、Secret、迁移、运维和故障排查见 [docs/operations.md](docs/operations.md)。重点约束：
 
 1. D1 迁移必须先于 Worker 依赖新表上线。
-2. `pnpm deploy` 只执行构建和 `wrangler deploy`，不会自动应用 D1 迁移。
+2. 日常部署 push 到 main，由 Cloudflare Git Connector 检查、构建、应用 D1 迁移并部署；GitHub Actions 负责检查。配置见 [docs/ci-cd.md](docs/ci-cd.md)。
 3. `BASE_URL` 必须与 OAuth 回调 origin 一致；更换域名时要同步更新 Auth client 的 redirect URI。
 4. Firecrawl、Auth、桥接和管理入口的敏感配置都通过 Workers secrets 注入。
 5. R2 桶和 D1 不是公共读；所有文件出口经 Worker 鉴权。
