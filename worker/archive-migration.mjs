@@ -701,7 +701,8 @@ export function createArchiveMigration(env,{now=()=>Date.now()}={}){
       const result=await reconcileRevision(env,context.revision_id);
       state=result.state==='ready'?'ready':'blocked';
     }
-    const nextDifferences=state==='ready'?differences:[...parseJson(context.differences_json,[]),...differences];
+    const nextDifferences=[...new Map([...parseJson(context.differences_json,[]),...differences]
+      .map(item=>[JSON.stringify([item.code,item.slotKey??null,item.message??null,item.confirmed??false]),item])).values()];
     const comparison=await refreshComparison(articleId,context.revision_id,state);
     await env.DB.prepare(`UPDATE archive_migration_articles SET state=?,comparison_json=?,differences_json=?,updated_at=?
       WHERE run_id=? AND article_id=? AND state IN ('blocked','failed','imported')`)

@@ -319,9 +319,11 @@ test('migration resumes after storage succeeds but the database import is interr
   }finally{await mf.dispose();}
 });
 
-test('recovering a missing body PDF also requires its OCR before publishing the baseline',async()=>{
-  const {mf,bucket,legacy}=await fixture();
+test('recovering a missing body PDF requires OCR and preserves unconfirmed migration evidence',async()=>{
+  const {mf,db,bucket,legacy}=await fixture();
   try{
+    await db.prepare('UPDATE articles SET discovered_at=?,captured_at=NULL WHERE id=?')
+      .bind('not-a-date',articleId).run();
     const pdf=await(await bucket.get(legacy.keys.pdf)).arrayBuffer();
     await bucket.delete(legacy.keys.pdf);
     const admin=(path,body)=>mf.dispatchFetch('https://feed.test'+path,{
@@ -331,6 +333,8 @@ test('recovering a missing body PDF also requires its OCR before publishing the 
     const first=await admin('/internal/archive-migration',{requestId:'mvp-body-pdf-recover',batchSize:20});
     assert.equal(first.status,202,await first.clone().text());
     assert.equal((await first.json()).run.state,'blocked');
+    const initial=await(await admin('/internal/archive-migration')).json();
+    assert.ok(initial.report.comparison.differences.includes('observed_time_missing'));
     await bucket.put(legacy.keys.pdf,pdf,{httpMetadata:{contentType:'application/pdf'}});
     await bucket.delete(legacy.keys.ocr);
     const waiting=await admin('/internal/archive-migration/repair',{articleId});
@@ -340,6 +344,10 @@ test('recovering a missing body PDF also requires its OCR before publishing the 
     const partialReport=await(await admin('/internal/archive-migration/articles')).json();
     assert.equal(partialReport.articles[0].comparison.actual.originals.find(row=>row.filename==='attachment-1.pdf').state,'fulfilled');
     assert.equal(partialReport.articles[0].comparison.actual.adoptedOcr.length,0);
+    assert.equal((await(await admin('/internal/archive-migration/repair',{articleId})).json()).state,'blocked');
+    const repeated=await(await admin('/internal/archive-migration/articles')).json();
+    assert.deepEqual(repeated.articles[0].differences,partialReport.articles[0].differences,
+      'Retrying the same incomplete repair must not duplicate diagnostic evidence');
     await bucket.put(legacy.keys.ocr,JSON.stringify(legacy.ocrResult));
     const repaired=await admin('/internal/archive-migration/repair',{articleId});
     assert.equal(repaired.status,202,await repaired.clone().text());
@@ -347,6 +355,10 @@ test('recovering a missing body PDF also requires its OCR before publishing the 
     const report=await(await admin('/internal/archive-migration')).json();
     assert.equal(report.report.imported.revisions,1);
     assert.equal(report.report.imported.historyOnlyEvents,1);
+    assert.ok(report.report.comparison.differences.includes('observed_time_missing'),
+      'Repairing the PDF and OCR must not erase unconfirmed original capture time');
+    const finalArticles=await(await admin('/internal/archive-migration/articles')).json();
+    assert.equal(finalArticles.articles[0].differences.filter(item=>item.code==='observed_time_missing').length,1);
     const again=await admin('/internal/archive-migration/repair',{articleId});
     assert.equal((await again.json()).repaired,false);
   }finally{await mf.dispose();}
