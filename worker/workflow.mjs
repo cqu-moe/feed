@@ -1,26 +1,13 @@
 import {WorkflowEntrypoint} from 'cloudflare:workers';
-import sources from './sources.json';
+import {createArchive} from './archive.mjs';
+import {createSources} from './sources.mjs';
 import {discoverPage} from './discovery.mjs';
-import {collectArticle} from './collect.mjs';
 import {cutoffDate,cleanError} from './utils.mjs';
 
-function isGlobalLimitError(message){
-  return /Firecrawl HTTP 403|\b(?:429|402)\b|daily budget reached|\b(?:budget|quota|credit)s?\b/i.test(message);
-}
-
-export async function startDaily(env,nonce='daily'){
-  if(env.CRAWL_ENABLED!=='true')return [];
-  const day=new Date().toISOString().slice(0,10),ids=[];
-  for(const source of sources){
-    const id=`${day}-${source.id}-${nonce}`;
-    try{await env.INGEST.create({id,params:{sourceId:source.id,cutoff:cutoffDate()}});ids.push(id);}
-    catch(error){if(!/already exists/i.test(String(error)))throw error;ids.push(id);}
-  }
-  return ids;
-}
 export class FeedIngest extends WorkflowEntrypoint {
   async run(event,step){
-    const source=sources.find(s=>s.id===event.payload.sourceId);if(!source)throw new Error('Unknown source');
+    const sources=createSources(this.env),archive=createArchive(this.env);
+    const source=sources.find(event.payload.sourceId);if(!source)throw new Error('Unknown source');
     const runId=event.instanceId,cutoff=event.payload.cutoff||cutoffDate();
     await step.do('start',async()=>{
       await this.env.DB.batch([
@@ -48,22 +35,10 @@ export class FeedIngest extends WorkflowEntrypoint {
     });
     for(const article of articles){
       const result=await step.do(`article-${article.id}`,{retries:{limit:0,delay:'10 seconds'},timeout:'8 minutes'},async()=>{
-        // A lease prevents concurrent manual/daily jobs from charging for the same article.
-        const lease=await this.env.DB.prepare("UPDATE articles SET status='collecting',attempts=attempts+1,lease_until=? WHERE id=? AND status IN ('pending','partial','failed') AND attempts<3 RETURNING id,prefix").bind(Date.now()+10*60000,article.id).first();
-        if(!lease)return {skipped:true};
-        try{return await collectArticle(this.env,source,article);}
-        catch(error){
-          const message=cleanError(error);
-          if(isGlobalLimitError(message)){
-            await this.env.DB.prepare("UPDATE articles SET status=CASE WHEN ? IS NULL THEN 'pending' ELSE 'partial' END,attempts=attempts-1,lease_until=0,error=? WHERE id=? AND status='collecting'").bind(lease.prefix,message,article.id).run();
-            return {deferred:true,error:message};
-          }
-          await this.env.DB.prepare("UPDATE articles SET status=CASE WHEN prefix IS NULL THEN 'failed' ELSE 'partial' END,error=? WHERE id=?").bind(message,article.id).run();
-          return {error:message};
-        }
+        return archive.capture(source,article);
       });
       if(result.deferred){errors.push(`${article.id}: ${result.error}`);break;}
-      if(result.error){errors.push(`${article.id}: ${result.error}`);if(isGlobalLimitError(result.error))break;}
+      if(result.error)errors.push(`${article.id}: ${result.error}`);
       else if(!result.skipped){captured++;if(result.status==='partial')errors.push(`${article.id}: archive incomplete`);}
       await step.sleep(`pace-${article.id}`,'2 seconds');
     }

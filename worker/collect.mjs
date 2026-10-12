@@ -9,12 +9,26 @@ import {issueGrant} from './bridge.mjs';
 import {scrape} from './firecrawl.mjs';
 import {put,bounded,fileKind,sha,cleanError} from './utils.mjs';
 
-export async function collectArticle(env,source,article){
+export function createCollector(dependencies={}){
+  const {
+    scrape: scrapeDependency=scrape,
+    fetch: fetchDependency=fetch,
+    enqueueOcr: enqueueOcrDependency=enqueuePdfOcr,
+  }=dependencies;
+  return (env,source,article)=>collectArticle(env,source,article,{
+    scrape:scrapeDependency,
+    fetch:fetchDependency,
+    enqueueOcr:enqueueOcrDependency,
+  });
+}
+
+async function collectArticle(env,source,article,dependencies){
+  const {scrape:scrapeDependency,fetch:fetchDependency,enqueueOcr:enqueueOcrDependency}=dependencies;
   const runId=crypto.randomUUID(),prefix=`articles/${article.id}/${runId}`;
   const grant=await issueGrant(env,source,runId,article.id);
   const bridgeURL=new URL('/internal/bridge',env.BASE_URL);bridgeURL.searchParams.set('grant',grant.token);
   const input={id:article.id,url:article.url,title:article.title.replace(/^[●•·\s]+|[…]+$/g,'').slice(0,18),bridgeURL:bridgeURL.href,bridgeOrigin:bridgeURL.origin,channel:grant.channel,bundle,options:{...options,selfExtractingArchive:false,maxResourceSize:3,maxResourceSizeEnabled:true,networkTimeout:8000,insertMetaCSP:false}};
-  const data=await scrape(env,article.url,{formats:['markdown','rawHtml',{type:'screenshot',fullPage:true}],onlyMainContent:true,actions:[{type:'executeJavascript',script:`var __name=value=>value; (${captchaPage.toString()})(${JSON.stringify(input)})`}]});
+  const data=await scrapeDependency(env,article.url,{formats:['markdown','rawHtml',{type:'screenshot',fullPage:true}],onlyMainContent:true,actions:[{type:'executeJavascript',script:`var __name=value=>value; (${captchaPage.toString()})(${JSON.stringify(input)})`}]});
   let page=data.actions?.javascriptReturns?.[0]?.value;if(typeof page==='string')page=JSON.parse(page);
   if(!page?.bodyRecognized||new URL(page.page.url).origin!==new URL(source.url).origin)throw new Error('Article body not recognized');
   const report={id:article.id,runId,url:article.url,capturedAt:new Date().toISOString(),provider:{statusCode:data.metadata?.statusCode,creditsUsed:data.metadata?.creditsUsed,proxyUsed:data.metadata?.proxyUsed},artifacts:[],errors:[...(page.errors??[])]};
@@ -56,7 +70,7 @@ export async function collectArticle(env,source,article){
     try{
       const target=new URL(data.screenshot);
       if(target.protocol!=='https:')throw new Error('Invalid screenshot URL');
-      const response=await fetch(target,{signal:AbortSignal.timeout(20000)});
+      const response=await fetchDependency(target,{signal:AbortSignal.timeout(20000)});
       if(!response.ok||!response.headers.get('content-type')?.startsWith('image/'))throw new Error('Screenshot unavailable');
       const shot=await put(env,prefix,'original.png',await bounded(response),response.headers.get('content-type'));
       report.artifacts.push(shot);screenshotKey=shot.key;
@@ -83,7 +97,7 @@ export async function collectArticle(env,source,article){
     .bind(report.capturedAt,status,report.errors.length?report.errors.join('; '):null,body,readingExcerpt(body),prefix,hash,candidates.length,snapshot?.key??null,screenshotKey,article.id));
   await env.DB.batch(statements);
   if(env.PDF_OCR_ENABLED==='true'){
-    try{await enqueuePdfOcr(env,article.id,{publish:true});}
+    try{await enqueueOcrDependency(env,article.id,{publish:true});}
     catch(error){console.error(JSON.stringify({event:'pdf_ocr_enqueue_failed',articleId:article.id,error:cleanError(error)}));}
   }
   return {id:article.id,status,attachments:candidates.length,downloaded:completeFiles,creditsUsed:report.provider.creditsUsed};
