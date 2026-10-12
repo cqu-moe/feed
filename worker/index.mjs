@@ -5,6 +5,7 @@ import {bridgeRoute} from './bridge.mjs';
 import {apiRoute} from './api.mjs';
 import {internalRoute} from './internal.mjs';
 import {subscriptionsRoute} from './subscriptions.mjs';
+import {rssRoute} from './rss.mjs';
 import {json,encoder,cleanError} from './utils.mjs';
 import {createArchive} from './archive.mjs';
 import {createSources} from './sources.mjs';
@@ -33,6 +34,7 @@ export default {
     const url=new URL(request.url);
     try{
       if(url.pathname==='/health')return json({ok:true,service:'cqu-feed'});
+      const rss=await rssRoute(request,env);if(rss)return rss;
       const bridge=await bridgeRoute(request,env);if(bridge)return bridge;
       if(url.pathname.startsWith('/internal/')){
         return await internalRoute(request,env);

@@ -1,6 +1,7 @@
 import {json,sha} from './utils.mjs';
 import {sealRssToken,rssUrlForOwner} from './subscription-credentials.mjs';
 import {computeSubscriptionRuntime} from './subscription-runtime.mjs';
+import {canonicalBase,maxFeedItems,privacyHeaders,renderRss,rssFailure} from './rss-output.mjs';
 import {createSources} from './sources.mjs';
 import {createFeedAuthClient} from './feed-auth-client.mjs';
 
@@ -607,10 +608,85 @@ export function createSubscriptions(env,{now=()=>Date.now()}={}){
         sites:sites.map(site=>({id:site.id,name:site.name})),
         sources:sources.map(source=>({id:source.id,siteId:source.siteId,name:source.name})),
         outputChannels:{
-          rss:{enabled:false,reason:'pending_t09'},
+          rss:{enabled:true},
           email:{enabled:false,reason:'pending_t11'},
         },
       };
+    },
+
+    async readRss(token,{ifNoneMatch,head=false}={}){
+      if(typeof token!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(token))return rssFailure('RSS 链接无效',404);
+      const tokenHash=await sha(token);
+      const subscription=await env.DB.prepare(`SELECT id,owner_sub AS ownerSub,name,activated_at AS activatedAt
+        FROM subscriptions WHERE rss_token_hash=? AND deleted_at IS NULL AND rss_revoked_at IS NULL`)
+        .bind(tokenHash).first();
+      if(!subscription)return rssFailure('RSS 链接无效',404);
+
+      const policyResponse=await policyFor(subscription.ownerSub);
+      if(!policyResponse.ok)return rssFailure('认证服务暂时不可用，请稍后重试',503,[['Retry-After','1']]);
+      const policyState={status:'available',policy:policyResponse.policy};
+      const rows=await env.DB.prepare(`SELECT id,owner_sub AS ownerSub,name,requested_enabled AS requestedEnabled,priority,
+        email_mode AS emailMode,activated_at AS activatedAt,created_at AS createdAt,deleted_at AS deletedAt,
+        rss_token_generation AS rssTokenGeneration,rss_token_ciphertext AS rssTokenCiphertext,
+        rss_revoked_at AS rssRevokedAt,rss_revoked_at IS NOT NULL AS rssRevoked,deleted_at IS NOT NULL AS deleted,
+        config_version AS configVersion
+      FROM subscriptions WHERE owner_sub=?`).bind(subscription.ownerSub).all();
+      const runtimes=computeSubscriptionRuntime(rows.results,policyState);
+      if(!runtimes.get(subscription.id)?.selected)return rssFailure('此订阅当前不能输出 RSS',403);
+
+      const targets=await env.DB.prepare(`SELECT source_id AS sourceId
+        FROM subscription_sources WHERE subscription_id=? AND removed_at IS NULL ORDER BY source_id`)
+        .bind(subscription.id).all();
+      // RSS reads only the frozen public projection. It never selects readable
+      // text or object keys, so historical entries stay bounded and file-free.
+      const events=await env.DB.prepare(`SELECT e.id AS eventId,e.kind,e.ready_at AS readyAt,
+          r.id AS revisionId,r.article_id AS articleId,r.title,
+          CASE WHEN m.revision_id=r.id THEN m.summary ELSE r.title END AS summary
+        FROM content_events e
+        JOIN article_revisions r ON r.id=e.revision_id
+        LEFT JOIN article_read_models m ON m.article_id=e.article_id
+        WHERE EXISTS(
+            SELECT 1 FROM event_sources es
+            JOIN subscription_sources st ON st.source_id=es.source_id
+              AND st.subscription_id=? AND st.removed_at IS NULL
+            WHERE es.event_id=e.id AND es.date_precision IN ('day','minute')
+          )
+        ORDER BY e.ready_at DESC,e.id DESC LIMIT ${maxFeedItems}`)
+        .bind(subscription.id).all();
+
+      const identity={
+        v:1,
+        subscription:{id:subscription.id,name:subscription.name,targets:targets.results.map(target=>target.sourceId)},
+        events:events.results.map(event=>[
+          event.eventId,event.kind,event.readyAt,event.revisionId,event.articleId,event.title,event.summary,
+        ]),
+      };
+      const etag=`"${await sha(JSON.stringify(identity))}"`;
+      const lastModified=Math.max(subscription.activatedAt,...events.results.map(event=>event.readyAt));
+      const headers=new Headers(privacyHeaders());
+      headers.set('ETag',etag);
+      headers.set('Last-Modified',new Date(lastModified).toUTCString());
+      if(ifNoneMatch&&ifNoneMatch.split(',').some(value=>value.trim()===etag||value.trim()===`W/${etag}`)){
+        return new Response(null,{status:304,headers});
+      }
+
+      const baseUrl=canonicalBase(env);
+      const xml=renderRss({
+        title:subscription.name,
+        description:'重庆大学通知的私有订阅摘要；正文与附件仍需登录访问。',
+        link:new URL('/subscriptions',baseUrl).href,
+        lastModified,
+        items:events.results.map(event=>({
+          id:event.eventId,
+          kind:event.kind,
+          title:event.title,
+          summary:event.summary,
+          readyAt:event.readyAt,
+          link:new URL(`/articles/${event.articleId}?revision=${event.revisionId}`,baseUrl).href,
+        })),
+      });
+      headers.set('Content-Type','application/rss+xml; charset=utf-8');
+      return new Response(head?null:xml,{headers});
     },
   };
 }

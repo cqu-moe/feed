@@ -14,11 +14,29 @@ export async function subscriptionsFixture({ editingMigration = true, clock } = 
     stdin: { contents: `
       import worker from './worker/index.mjs';
       import {createSubscriptions} from './worker/subscriptions.mjs';
+      import {reconcileRevision} from './worker/archive-reconcile.mjs';
+      const workerErrors=[];
+      console.error=(...args)=>{workerErrors.push(args.map(String));};
       export default {async fetch(request,env,context){
         if(${clock !== undefined}&&new URL(request.url).pathname==='/__test/subscriptions'){
           const {method,actor,args}=await request.json();
           try{return Response.json(await createSubscriptions(env,{now:()=>${clock ?? 0}})[method](actor,...args));}
           catch(error){return Response.json({error:error.message},{status:error.status??503});}
+        }
+        if(new URL(request.url).pathname==='/__test/reconcile'){
+          const {revisionId}=await request.json();
+          return Response.json(await reconcileRevision(env,revisionId));
+        }
+        if(new URL(request.url).pathname==='/__test/errors')return Response.json(workerErrors);
+        if(new URL(request.url).pathname==='/__test/rss-failure'){
+          const {url}=await request.json();
+          return worker.fetch(new Request(url,{method:'GET'}),{...env,BASE_URL:'https://feed.test/#not-canonical'});
+        }
+        if(new URL(request.url).pathname==='/rss'){
+          const originalFetch=globalThis.fetch;
+          globalThis.fetch=async()=>{throw new Error('Unexpected external fetch during RSS')};
+          try{return await worker.fetch(request,env,context);}
+          finally{globalThis.fetch=originalFetch;}
         }
         return worker.fetch(request,env,context);
       }};
@@ -125,7 +143,7 @@ export async function subscriptionsFixture({ editingMigration = true, clock } = 
     revokeAccess() { provider.setAccess(false); },
     async setPolicy(subject, policy) { await post(policyWorker, `${policyOrigin}/state`, { policies: { [subject]: policy } }); },
 	    async setRecipient(subject, recipient) { await post(policyWorker, `${policyOrigin}/state`, { recipients: { [subject]: recipient } }); },
-    async setPolicyService(changes) { await post(policyWorker, `${policyOrigin}/state`, changes); },
+    async setPolicyService(changes) { await post(policyWorker, `${policyOrigin}/state`, changes); return (await policyWorker.fetch(`${policyOrigin}/state`)).json(); },
     async switchAfterPolicyCall(subject, switchTo) { await post(policyWorker, `${policyOrigin}/state`, { switchAfterCalls: 1, switchTo, policies: { [subject]: { access: true, limit: { kind: 'limited', value: 1 } } } }); },
   };
 }
