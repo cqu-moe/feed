@@ -20,6 +20,8 @@ export async function subscriptionsFixture({ editingMigration = true, clock, not
       import {replayMatchOutbox} from './tests/helpers/notification-replay.mjs';
       import {reconcileRevision} from './worker/archive-reconcile.mjs';
       let mailClock=${clock ?? 'Date.now()'};
+      let notificationClock=${clock ?? 'null'};
+      const notificationNow=()=>notificationClock??Date.now();
       const workerErrors=[];
       console.error=(...args)=>{workerErrors.push(args.map(String));};
       export default {async fetch(request,env,context){
@@ -46,8 +48,9 @@ export async function subscriptionsFixture({ editingMigration = true, clock, not
         }
         if(new URL(request.url).pathname==='/__test/notifications'){
           const {method,args}=await request.json();
-          if(method==='replayMatchOutbox')return Response.json(await replayMatchOutbox(env,()=>${clock ?? 'Date.now()'},...args));
-          try{return Response.json(await createNotifications(env,{now:()=>${clock ?? 'Date.now()'}})[method](...args));}
+          if(method==='clock'){notificationClock=args[0];return Response.json({at:notificationClock});}
+          if(method==='replayMatchOutbox')return Response.json(await replayMatchOutbox(env,notificationNow,...args));
+          try{return Response.json(await createNotifications(env,{now:notificationNow})[method](...args));}
           catch(error){return Response.json({error:error.message},{status:error.status??503});}
         }
         if(new URL(request.url).pathname==='/__test/feed-jobs'){
@@ -149,7 +152,7 @@ export async function subscriptionsFixture({ editingMigration = true, clock, not
         script: app.outputFiles[0].text,
         compatibilityDate: '2026-10-11',
         compatibilityFlags: ['nodejs_compat'],
-        bindings: { ...(mailHarness?{MAIL_ENABLED:'true',MAIL_FROM:'Feed <notifications@feed.test>',RESEND_API_KEY:'test-key',RESEND_WEBHOOK_SECRET:'whsec_dGVzdC1zaWduaW5nLWtleQ=='}:{}),...provider.bindings, ADMIN_TOKEN: 'test-admin-token', BASE_URL: feedOrigin, SOURCE_MANAGEMENT_ENABLED: 'true', FEED_AUTH_RPC_CLIENT_ID: 'feed-rpc-client', FEED_AUTH_RPC_CLIENT_SECRET: 'feed-rpc-secret', ...(notificationPageSize === undefined ? {} : { NOTIFICATION_MATCH_PAGE_SIZE: notificationPageSize }) },
+        bindings: { ...(mailHarness?{MAIL_ENABLED:'true',MAIL_FROM:'Feed <notifications@feed.test>',RESEND_API_KEY:'test-key',RESEND_WEBHOOK_SECRET:'whsec_dGVzdC1zaWduaW5nLWtleQ==',...mailHarness.bindings}:{}),...provider.bindings, ADMIN_TOKEN: 'test-admin-token', BASE_URL: feedOrigin, SOURCE_MANAGEMENT_ENABLED: 'true', FEED_AUTH_RPC_CLIENT_ID: 'feed-rpc-client', FEED_AUTH_RPC_CLIENT_SECRET: 'feed-rpc-secret', ...(notificationPageSize === undefined ? {} : { NOTIFICATION_MATCH_PAGE_SIZE: notificationPageSize }) },
         ...(mailHarness?{outboundService:request=>mailHarness.fetch(request)}:{}),
         d1Databases: ['DB'],
         r2Buckets: ['ARCHIVE'],
@@ -168,7 +171,7 @@ export async function subscriptionsFixture({ editingMigration = true, clock, not
   const migrationNames = ['0001_feed.sql', '0002_auth.sql', '0003_collection_lease.sql', '0004_pdf_ocr.sql', '0005_task_runtime.sql', '0006_sources.sql', '0007_archive_versions.sql', '0008_content_events.sql', '0009_subscriptions.sql'];
   if (editingMigration) migrationNames.push('0010_subscription_editing.sql');
   migrationNames.push('0013_notification_matching.sql');
-  if(mailHarness)migrationNames.push('0014_mail_delivery.sql');
+  if(mailHarness)migrationNames.push('0014_mail_delivery.sql','0016_mail_digests.sql');
   for (const name of migrationNames) {
     await applyMigration(db, await readFile(`migrations/${name}`, 'utf8'));
   }
