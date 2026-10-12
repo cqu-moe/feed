@@ -21,6 +21,8 @@
     "MAIL_FROM":"重大通知 <notifications@feed.cqu.moe>",
     "MAX_MAIL_ATTEMPTS":"6",
     "MAIL_PREPARE_LIMIT":"20",
+    "DIGEST_MAX_ITEMS":"20",
+    "DIGEST_MAX_BYTES":"65536",
     "SOURCE_MANAGEMENT_ENABLED":"false",
     "MAX_DISCOVERY_PAGES_PER_RUN":"2",
     "ARCHIVE_VERSIONS_ENABLED":"false",

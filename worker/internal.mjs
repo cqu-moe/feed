@@ -31,6 +31,7 @@ export async function internalRoute(request,env){
     return json({error:'Method not allowed'},405);
   }
   if(url.pathname==='/internal/mail'&&request.method==='GET')return json(await createMail(env).list());
+  if(url.pathname==='/internal/mail/digests/prepare'&&request.method==='POST')return json(await createMail(env).prepareDigests(),202);
   const mailReconcile=/^\/internal\/mail\/([a-f0-9]{24})\/reconcile$/.exec(url.pathname);
   if(mailReconcile&&request.method==='POST'){
     const result=await createMail(env).reconcile(mailReconcile[1]);

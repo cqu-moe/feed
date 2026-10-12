@@ -382,18 +382,26 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
 
   // Mail preparation and first submission use the same date and runtime rules as matching.
   async function assessDelivery(ownerSub,eventId){
+    return (await assessDeliveries(ownerSub,[eventId]))[0];
+  }
+
+  async function assessDeliveries(ownerSub,eventIds){
     const account=await auth.getRecipient(ownerSub);
     const stamp=await env.DB.prepare(`SELECT COALESCE(json_group_array(id||':'||config_version),'[]') AS value
       FROM (SELECT id,config_version FROM subscriptions WHERE owner_sub=? ORDER BY id)`).bind(ownerSub).first();
-    const current=await eventWithSources(eventId);
-    if(!current)return {eligible:false,suppressionReason:'event_missing'};
     const runtimes=await subscriptionRuntimes([ownerSub],new Map([[ownerSub,account]]));
+    const results=[];
+    for(const eventId of eventIds){
+    const current=await eventWithSources(eventId);
+    if(!current){results.push({eligible:false,suppressionReason:'event_missing'});continue;}
     const candidate=(await ownerCandidates(current,[ownerSub],runtimes)).get(ownerSub);
     const recipient=account.ok&&account.data.recipient.status==='verified'?account.data.recipient.email:null;
     const reason=!account.ok?'auth_unavailable':!account.data.policy.access?'access_revoked':!recipient?'email_unverified':candidate.suppressionReason;
-    return {...candidate,suppressionReason:reason,recipient,event:current.event,
+    results.push({...candidate,suppressionReason:reason,recipient,event:current.event,
       configStamp:stamp.value,sourceCount:current.sources.length,
-      corrections:current.sources.reduce((sum,source)=>sum+(source.evidence.correctionGeneration??0),0)};
+      corrections:current.sources.reduce((sum,source)=>sum+(source.evidence.correctionGeneration??0),0)});
+    }
+    return results;
   }
 
   function decide(event,source,row){
@@ -573,7 +581,7 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
   }
 
   return {
-    enqueueEvent,reconcileSourceAssociation,processMatchTask,verifyDate,readDateEvidence,eventStatus,readSubscription,assessDelivery,
+    enqueueEvent,reconcileSourceAssociation,processMatchTask,verifyDate,readDateEvidence,eventStatus,readSubscription,assessDelivery,assessDeliveries,
   };
 }
 
