@@ -122,7 +122,7 @@ async function fixture({bindings={}}={}){
   for(const name of ['0001_feed.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql',
     '0006_sources.sql','0007_archive_versions.sql','0008_content_events.sql','0009_subscriptions.sql',
     '0010_subscription_editing.sql','0011_archive_migration.sql','0013_notification_matching.sql',
-    '0014_mail_delivery.sql','0016_mail_digests.sql','0018_outbox_receipts.sql']){
+    '0014_mail_delivery.sql','0015_history_backfill.sql','0016_mail_digests.sql','0018_outbox_receipts.sql']){
     await applyMigration(db,await readFile(`migrations/${name}`,'utf8'));
   }
   await seed(db);
@@ -362,6 +362,28 @@ test('failed and due deferred recovery requires a confirmed terminal platform in
       assert.deepEqual(await taskRow(db,ids.activeTask),{state:'queued',attemptNo:2});
       assert.equal((await getSends(mf)).FEED_JOBS.length,1);
     }finally{await mf.dispose();}
+  }
+});
+
+test('targeted dispatch and operations replay share the durable discovery admission budget',async()=>{
+  const {mf,db}=await fixture({bindings:{
+    SOURCE_MANAGEMENT_ENABLED:'true',
+    MAX_LIVE_DISCOVERY_TASKS_PER_RUN:'0',
+  }});
+  try{
+    const replay=await adminPost(mf,'/internal/operations/replay',{outboxId:ids.jobOutbox,topic:'feed-jobs'});
+    assert.equal(replay.status,409);
+
+    const recovered=await adminPost(mf,`/internal/operations/tasks/${ids.launchTask}/recover`);
+    assert.equal(recovered.status,202);
+    assert.deepEqual(await recovered.json(),{
+      id:ids.launchTask,state:'queued',recovered:0,workflowStatus:null,
+    });
+    assert.deepEqual((await getSends(mf)).FEED_JOBS??[],[]);
+    assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM discovery_admissions').first()).n,0);
+    assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM outbox_receipts WHERE outbox_id=?').bind(ids.jobOutbox).first()).n,0);
+  }finally{
+    await mf.dispose();
   }
 });
 

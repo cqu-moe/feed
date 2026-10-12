@@ -256,7 +256,7 @@ export async function subscriptionsFixture({ editingMigration = true, clock, not
   migrationNames.push('0018_outbox_receipts.sql');
   migrationNames.push('0013_notification_matching.sql');
   if(mailHarness)migrationNames.push('0014_mail_delivery.sql','0016_mail_digests.sql');
-  if(recheckMigration)migrationNames.push('0017_archive_recheck.sql');
+  if(recheckMigration)migrationNames.push('0015_history_backfill.sql','0017_archive_recheck.sql');
   for (const name of migrationNames) {
     await applyMigration(db, await readFile(`migrations/${name}`, 'utf8'));
   }

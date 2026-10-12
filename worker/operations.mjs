@@ -1,5 +1,6 @@
 import {cleanError} from './utils.mjs';
 import {requireCrawlRuntime} from './task-runtime.mjs';
+import {admitDiscovery} from './backfill-control.mjs';
 
 const idPattern=/^[a-f0-9]{24}$/;
 const topics=['feed-jobs','feed-events','feed-mail'];
@@ -50,6 +51,9 @@ export function createOperations(env,{now=()=>Date.now()}={}){
       const links=await linksFor(payload);
       if(!inScope(payload,links))throw operationsError('Outbox message belongs to a separately owned business flow',409);
       if(payload.type==='start-job')requireCrawlRuntime(env);
+      if(payload.type==='start-job'&&env.SOURCE_MANAGEMENT_ENABLED==='true'
+        &&!await admitDiscovery(env,payload.taskId,payload.attempt,at))
+        throw operationsError('Discovery admission budget is exhausted',409);
       // Claim before sending: a fast consumer may already have processed this message when send resolves.
       const claimed=await env.DB.prepare(`INSERT INTO outbox_receipts(outbox_id,topic,state,attempts,replay_count,last_error,last_replayed_at,created_at,updated_at)
         SELECT id,topic,'queued',0,1,NULL,?,?,? FROM outbox WHERE id=? AND state='sent' AND updated_at<=?

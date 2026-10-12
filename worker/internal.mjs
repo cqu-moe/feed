@@ -125,6 +125,9 @@ export async function internalRoute(request,env){
   if(url.pathname.startsWith('/internal/sources')){
     const sources=createSources(env),detail=/^\/internal\/sources\/([a-zA-Z0-9_-]{1,64})$/.exec(url.pathname);
     const verify=/^\/internal\/sources\/([a-zA-Z0-9_-]{1,64})\/verify$/.exec(url.pathname);
+    const backfill=/^\/internal\/sources\/([a-zA-Z0-9_-]{1,64})\/backfill$/.exec(url.pathname);
+    const backfillPause=/^\/internal\/sources\/([a-zA-Z0-9_-]{1,64})\/backfill\/pause$/.exec(url.pathname);
+    const backfillResume=/^\/internal\/sources\/([a-zA-Z0-9_-]{1,64})\/backfill\/resume$/.exec(url.pathname);
     if(url.pathname==='/internal/sources'&&request.method==='GET')return json({sources:await sources.listSources()});
     if(url.pathname==='/internal/sources'&&request.method==='POST'){
       try{return json(await sources.createSource(await readJson(request)),201);}
@@ -138,6 +141,33 @@ export async function internalRoute(request,env){
     }
     const discoveries=/^\/internal\/sources\/([a-zA-Z0-9_-]{1,64})\/discoveries$/.exec(url.pathname);
     if(discoveries&&request.method==='GET')return json({discoveries:await sources.discoveries(discoveries[1])});
+    if(backfill&&request.method==='POST'){
+      if(env.TASK_RUNTIME_ENABLED!=='true'||env.CRAWL_ENABLED!=='true')return json({error:'Discovery runtime is disabled'},503);
+      try{
+        const result=await sources.submitBackfill(backfill[1],await readJson(request));
+        if(!result)return json({error:'Source not found'},404);
+        await createTaskRuntime(env).dispatchDueOutbox().catch(()=>{});
+        return json(result,202);
+      }catch(error){return validationResponse(error);}
+    }
+    if(backfillPause&&request.method==='POST'){
+      try{
+        const result=await sources.pauseBackfill(backfillPause[1]);
+        return result?json(result):json({error:'Source not found'},404);
+      }catch(error){return validationResponse(error);}
+    }
+    if(backfillResume&&request.method==='POST'){
+      if(env.TASK_RUNTIME_ENABLED!=='true'||env.CRAWL_ENABLED!=='true')return json({error:'Discovery runtime is disabled'},503);
+      try{
+        const commandText=await request.text();
+        const result=await sources.resumeBackfill(backfillResume[1],commandText?JSON.parse(commandText):{});
+        if(!result)return json({error:'Source not found'},404);
+        const runtime=createTaskRuntime(env);
+        await runtime.recover().catch(()=>{});
+        await runtime.dispatchDueOutbox().catch(()=>{});
+        return json(result,202);
+      }catch(error){return validationResponse(error);}
+    }
     if(detail&&request.method==='GET'){
       const source=await sources.readSource(detail[1]);
       return source?json({source}):json({error:'Source not found'},404);

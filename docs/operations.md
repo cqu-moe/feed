@@ -503,6 +503,18 @@ node scripts/compare-ocr.mjs publish mistral-ocr-4-1
 
 `GET /internal/sources/:id/discoveries` 返回该栏目最近 100 条发现证据：首次/最近发现、live/backfill/migrated 分类、日期精度、原站日历日期、准确时间与时区。日级日期不补成零点，未知日期不补成当前日期；明确分钟时间按来源时区转换，夏令时歧义降为日级证据。后续推送仍要经过日期资格与版本完整性检查。
 
+验证并启用后的栏目可用 `POST /internal/sources/:id/backfill` 启动历史补抓，请求带 8–100 字符 `requestId`，可选 1–3650 天 `windowDays`。未提供时优先使用该栏目已保存的天数，再使用 `DEFAULT_BACKFILL_WINDOW_DAYS`（默认 365，范围 1–3650）；管理页面显示服务端默认值，未修改时不覆盖它。运行窗口固定为启动时来源时区的当天及之前 N 个日历日，跨夏令时不会多减一天，也不接收未来日级日期。未知日期保留待核实，历史基线及后来核实的历史内容不补发邮件。
+
+一个 backfill Workflow 只处理一页。游标、通知发现、去重计数、下一页任务、outbox 与页回执同批提交；文章去重存 `backfill_seen_articles`，不将所有文章 ID 复制进后续 payload。`MAX_BACKFILL_PAGES_PER_RUN` 默认 100，上限 1000；到达页数上限且还有后续页时保存游标并进入 `paused`，不会显示完成。可通过 `/backfill/resume` 显式提交 `{ "maxPages": 200 }` 增加本次总页数上限；最大 1000，仍有后续页时需人工检查分页配置。此时游标与 R2 列表原件保留，页面显示人工检查提示，但不留下无法执行的 page 1001 任务或 outbox。游标 JSON 上限 128 KiB，超出进入可见失败并保留原 R2 列表回执，不截断后假报完成。
+
+`MAX_LIVE_DISCOVERY_TASKS_PER_RUN`（默认 20）和 `MAX_BACKFILL_TASKS_PER_RUN`（默认 5）是持久调度准入窗口内两个独立的页任务 attempt 配额，范围 0–100；0 暂停该通道的新准入。`DISCOVERY_ADMISSION_INTERVAL_SEC` 默认 60，范围 60–3600。D1 的 `discovery_admissions` 以 task/attempt 唯一占用配额；管理员启动、分页继续、自动/人工重试和并发 outbox 派发均经过同一限制，重复消息复用原准入。派发历史前先安排到期 live，dispatch 将 live 排在历史前；历史配额不足时原任务/outbox 保持待处理并显示下次准入时间。不得依赖 Queue 的实际完成顺序保证优先级。
+
+五分钟恢复任务会清理过期的 discovery permit：`DISCOVERY_ADMISSION_RETENTION_MS` 默认 7 天，范围 1 小时–30 天。只有超过保留期，且任务已 `succeeded`/`cancelled`，或 permit 所属 attempt 已被任务当前更大的 attempt 取代时才会删除；活跃 attempt 以及仍可能用于人工恢复的 failed/blocked/deferred 同 attempt permit 保留。每次恢复最多清理 100 条，剩余记录由后续轮次继续处理。
+
+`POST /internal/sources/:id/backfill/pause` 暂停，`/resume` 恢复同一运行及当前页。源/站点启用、已验证配置、配置版本、run ID、running 状态均在准入、付费列表读取前及 D1 原子发布时检查；在途暂停/禁用保留 R2 列表，恢复时不重复抓取已保存页面。普通来源错误、429 自动重试达到 `MAX_TASK_ATTEMPTS`、402/余额耗尽将当前 run 显示为 `failed`，停止自动付费重试。修复原因后使用 `/resume` 或页面“重试当前分页”，为同一 task 开启新的有限 attempt 额度；已成功页、首次发现证据与版本保持不变。Workflow 未确认终止前恢复器不创建新实例；attempt 身份上限 1000 后保持人工处理。
+
+禁用来源后修改适配配置会在同一事务中取消旧配置的未完成 backfill task，清空当前 run/cursor 并回到 `idle`；原件、已完成任务和历史关联保留。新配置重新验证并启用后可启动独立新 run，即便重用先前 requestId 也不会重用旧配置任务。
+
 本地验收：真实 Worker 管理及 BFF 阅读入口、Miniflare D1/R2/Queue、外部 Auth 与 Firecrawl Adapter；覆盖异步验证、重复请求、旧配置结果、分页原子恢复、多栏目身份、限流隔离、暂停阅读和日期精度。真实站点样本、云 Queue/Workflow 交接与生产开关验收属于 T17/T18，不能用这些本地结果替代。
 
 ## 正式版邮件（T11）
