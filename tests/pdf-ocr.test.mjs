@@ -24,11 +24,14 @@ before(async()=>{
   const bundle=await build({
     stdin:{
       contents:`
-        import {PdfOcrWorkflow,enqueuePdfOcr,publishPdfText} from './worker/pdf-ocr.mjs';
-        const makeStep=env=>({
+        import {PdfOcrWorkflow,enqueuePdfOcr,publishPdfText,resumePdfOcr} from './worker/pdf-ocr.mjs';
+        import {apiRoute} from './worker/api.mjs';
+        import {textinConfig} from './worker/textin-ocr.mjs';
+        const originalFetch=globalThis.fetch;
+        const makeStep=(env,jobId)=>({
           async do(name,config,fn){
             if(name==='publish'){
-              const job=await env.DB.prepare('SELECT result_key FROM pdf_ocr_jobs WHERE id=?').bind(globalThis.CURRENT_JOB_ID).first();
+              const job=await env.DB.prepare('SELECT result_key FROM pdf_ocr_jobs WHERE id=?').bind(jobId).first();
               globalThis.R2_RESULT_BEFORE_PUBLISH=!!job?.result_key&&!!await env.ARCHIVE.head(job.result_key);
             }
             return (typeof config==='function'?config:fn)();
@@ -46,11 +49,23 @@ before(async()=>{
               globalThis.PDF_OCR_CREATIONS=[];
               globalThis.MISTRAL_CALLS=[];
               globalThis.R2_RESULT_BEFORE_PUBLISH=null;
+              globalThis.STORAGE_FAILED=false;
               globalThis.MISTRAL_RESPONSE=url.searchParams.get('response');
+              globalThis.OCR_MODEL=url.searchParams.get('model')||'mistral-ocr-4-1';
               globalThis.MISTRAL_PDF=new Uint8Array(await request.arrayBuffer());
               globalThis.fetch=async(input,init)=>{
                 const request=new Request(input,init);
-                if(request.url!=='https://api.mistral.ai/v1/ocr')return fetch(request);
+                if(request.url==='https://api.textin.com/api/v1/xparse/parse/sync'){
+                  const form=await request.formData(),config=JSON.parse(form.get('config'));
+                  const pages=config.scope.page_range.split(',').flatMap(part=>{const [first,last]=part.split('-').map(Number);return Array.from({length:(last||first)-first+1},(_,i)=>first+i)});
+                  globalThis.MISTRAL_CALLS.push({url:request.url,config});
+                  if(globalThis.MISTRAL_RESPONSE==='error')throw new Error('provider connection timed out');
+                  if(globalThis.MISTRAL_RESPONSE==='held')await new Promise(resolve=>{globalThis.RELEASE_OCR=resolve});
+                  return Response.json({code:200,data:{schema_version:'1.4.0',success_count:pages.length,metadata:{page_count:2},
+                    pages:pages.map(n=>({page_number:n,status:'Success',element_ids:['text-'+n]})),
+                    elements:pages.map(n=>({element_id:'text-'+n,page_number:n,type:'NarrativeText',text:'扫描通知 资助名单',metadata:{}}))}});
+                }
+                if(request.url!=='https://api.mistral.ai/v1/ocr')return originalFetch(request);
                 globalThis.MISTRAL_CALLS.push({url:request.url,method:request.method,headers:{authorization:request.headers.get('authorization')},body:await request.json()});
                 if(globalThis.MISTRAL_RESPONSE==='error')return Response.json({message:'upstream temporarily unavailable'},{status:500});
                 const pdf=globalThis.MISTRAL_PDF;
@@ -62,13 +77,25 @@ before(async()=>{
               };
               return Response.json({ok:true});
             }
-            if(url.pathname==='/enqueue')return Response.json(await enqueuePdfOcr(env,url.searchParams.get('articleId'),{model:'mistral-ocr-4-1',publish:url.searchParams.get('publish')==='1'}));
+            if(url.pathname==='/enqueue')return Response.json(await enqueuePdfOcr(env,url.searchParams.get('articleId'),{model:globalThis.OCR_MODEL,publish:url.searchParams.get('publish')==='1'}));
             if(url.pathname==='/run'){
               globalThis.CURRENT_JOB_ID=url.searchParams.get('jobId');
-              const workflow=new PdfOcrWorkflow(env);
-              return Response.json(await workflow.run({instanceId:url.searchParams.get('instanceId'),payload:{jobId:url.searchParams.get('jobId')}},makeStep(env)));
+              const archive=env.ARCHIVE;
+              const runEnv=globalThis.MISTRAL_RESPONSE==='write-failure'?{...env,ARCHIVE:{
+                get:key=>archive.get(key),head:key=>archive.head(key),
+                put:async(key,...args)=>{
+                  if(key.endsWith('/ocr-0.json')&&!globalThis.STORAGE_FAILED){globalThis.STORAGE_FAILED=true;throw new Error('R2 temporary write failure')}
+                  return archive.put(key,...args);
+                },
+              }}:env;
+              const workflow=new PdfOcrWorkflow(runEnv);
+              return Response.json(await workflow.run({instanceId:url.searchParams.get('instanceId'),payload:{jobId:url.searchParams.get('jobId')}},makeStep(env,url.searchParams.get('jobId'))));
             }
-            if(url.pathname==='/publish')return Response.json(await publishPdfText(env,url.searchParams.get('articleId'),'mistral-ocr-4-1'));
+            if(url.pathname==='/publish')return Response.json(await publishPdfText(env,url.searchParams.get('articleId'),globalThis.OCR_MODEL));
+            if(url.pathname==='/release'){globalThis.RELEASE_OCR?.();return Response.json({ok:true})}
+            if(url.pathname==='/resume')return Response.json(await resumePdfOcr({...env,PDF_OCR_ENABLED:'true',PDF_OCR_MODEL:globalThis.OCR_MODEL}));
+            if(url.pathname==='/benchmark-config')return Response.json(textinConfig([0]));
+            if(url.pathname.startsWith('/api/'))return apiRoute(request,env);
             if(url.pathname==='/state')return Response.json({calls:globalThis.MISTRAL_CALLS,creations:globalThis.PDF_OCR_CREATIONS,r2ResultBeforePublish:globalThis.R2_RESULT_BEFORE_PUBLISH});
             return new Response('Not found',{status:404});
           }
@@ -89,7 +116,7 @@ before(async()=>{
     script:bundle.outputFiles[0].text,
     compatibilityDate:'2026-10-11',
     compatibilityFlags:['nodejs_compat'],
-    bindings:{MISTRAL_API_KEY:'test-mistral-key',MAX_PDF_OCR_PAGES_PER_DAY:'50',MAX_PDF_OCR_PAGES_PER_MONTH:'1000'},
+    bindings:{TEXTIN_APP_ID:'test-app-id',TEXTIN_SECRET_CODE:'test-secret',MISTRAL_API_KEY:'test-mistral-key',MAX_PDF_OCR_PAGES_PER_DAY:'50',MAX_PDF_OCR_PAGES_PER_MONTH:'1000'},
     d1Databases:['DB'],
     r2Buckets:['ARCHIVE'],
   }));
@@ -129,7 +156,7 @@ test('native-text PDF completes from cache without a paid OCR request',async()=>
   assert.equal((await state(mf)).calls.length,0);
   assert.equal((await jobByAttachment(db,'native-text')).status,'complete');
   assert.equal((await jobByAttachment(db,'native-text')).ocr_pages,0);
-  assert.equal((await article(db,'native-text')).body_text,'原生正文');
+  assert.match((await article(db,'native-text')).body_text,/CQU scholarship notice/);
   assert.deepEqual(await search(db,'原生正文'),['native-text']);
 
   assert.equal((await enqueue(mf,'native-text',true)).jobs[0].cached,true);
@@ -179,7 +206,7 @@ test('image-only PDF uses the Mistral protocol and publishes R2 text before maki
   await enqueue(mf,'same-file',true);
   await runWorkflow(mf,(await jobByAttachment(db,'same-file')).id);
   assert.equal((await state(mf)).calls.length,1);
-  assert.deepEqual(await search(db,'资助名单'),['same-file','scanned']);
+  assert.deepEqual((await search(db,'资助名单')).sort(),['same-file','scanned']);
 });
 
 test('a local global budget limit defers the whole job without consuming its attempt',async()=>{
@@ -215,7 +242,7 @@ test('provider failure never replaces the archived article or original PDF',asyn
   await runWorkflow(mf,(await jobByAttachment(db,'provider-failure')).id);
 
   const failed=await jobByAttachment(db,'provider-failure');
-  assert.equal(failed.status,'failed');
+  assert.equal(failed.status,'needs_review');
   assert.equal(failed.attempts,1);
   assert.match(failed.error,/Mistral OCR HTTP 500/);
   const current=await article(db,'provider-failure');
@@ -228,9 +255,8 @@ test('provider failure never replaces the archived article or original PDF',asyn
   await enqueue(mf,'provider-failure',true);
   await runWorkflow(mf,failed.id);
   await enqueue(mf,'provider-failure',true);
-  assert.equal((await state(mf)).calls.length,2);
-  assert.equal((await state(mf)).creations.length,2);
-  assert.equal((await jobByAttachment(db,'provider-failure')).attempts,2);
+  assert.equal((await state(mf)).calls.length,1);
+  assert.equal((await jobByAttachment(db,'provider-failure')).attempts,1);
 });
 
 test('OCR for a superseded original cannot publish over the current attachment',async()=>{
@@ -268,14 +294,146 @@ function textPdf(){
   ]);
 }
 
-function imagePdf(marker='image'){
-  const content=`q 200 0 0 200 20 20 cm /Im0 Do Q\n% ${marker}`;
+test('TextIn reads only the image-only page of a mixed ordinary attachment, then serves and searches cached text',async()=>{
+  const id='a'.repeat(24),pdf=mixedPdf();
+  await seedArticle({id,objectKey:'original/mixed.pdf',pdf,body:'混合附件通知',role:'attachment'});
+  await configure(mf,pdf,'success','textin-xparse-auto');
+  await enqueue(mf,id,true);
+  const job=await jobByAttachment(db,id);
+  await runWorkflow(mf,job.id);
+  assert.equal((await jobByAttachment(db,id)).status,'complete');
+  const observed=await state(mf);
+  assert.equal(observed.calls.length,1);
+  assert.equal(observed.calls[0].config.scope.page_range,'2');
+  assert.equal(observed.r2ResultBeforePublish,true);
+  const detail=await(await mf.dispatchFetch(`https://feed.test/api/articles/${id}`)).json();
+  assert.equal(detail.article.ocr.model,'textin-xparse-auto');
+  assert.deepEqual(detail.article.ocr.pages.map(p=>[p.page,p.source]),[[1,'native'],[2,'ocr']]);
+  assert.match(detail.article.bodyText,/CQU caption/);
+  assert.match(detail.article.bodyText,/资助名单/);
+  const found=await(await mf.dispatchFetch('https://feed.test/api/articles?q=资助名单')).json();
+  assert.equal(found.articles[0].id,id);
+  const names=await bucket.list({prefix:'derived/pdf/'});
+  assert.equal(names.objects.filter(o=>o.key.endsWith('.raw.json')).length,1);
+  assert.equal(names.objects.filter(o=>o.key.endsWith('.request.json')).length,1);
+
+  await seedArticle({id:'b'.repeat(24),objectKey:'original/duplicate-mixed.pdf',pdf,body:'另一通知',role:'attachment'});
+  await enqueue(mf,'b'.repeat(24),true);
+  await runWorkflow(mf,(await jobByAttachment(db,'b'.repeat(24))).id);
+  assert.equal((await state(mf)).calls.length,1);
+  assert.equal((await jobByAttachment(db,'b'.repeat(24))).attempts,0);
+});
+
+test('native caption plus image skips paid OCR, even when the text layer is short',async()=>{
+  const pdf=imagePdf('caption',true);
+  await seedArticle({id:'caption',objectKey:'original/caption.pdf',pdf,body:'短文字层'});
+  await configure(mf,pdf,'error','textin-xparse-auto');
+  await enqueue(mf,'caption',true);
+  await runWorkflow(mf,(await jobByAttachment(db,'caption')).id);
+  assert.equal((await jobByAttachment(db,'caption')).status,'complete');
+  assert.equal((await state(mf)).calls.length,0);
+  assert.match((await article(db,'caption')).body_text,/CQU caption/);
+});
+
+test('a paid TextIn timeout is not retried by cron or another article with identical bytes',async()=>{
+  const pdf=imagePdf('uncertain');
+  await seedArticle({id:'uncertain',objectKey:'original/uncertain.pdf',pdf,body:'原有正文'});
+  await configure(mf,pdf,'error','textin-xparse-auto');
+  await enqueue(mf,'uncertain',true);
+  await runWorkflow(mf,(await jobByAttachment(db,'uncertain')).id);
+  assert.equal((await jobByAttachment(db,'uncertain')).status,'needs_review');
+  assert.deepEqual(await(await mf.dispatchFetch('https://feed.test/resume')).json(),[]);
+  // Even restoring D1 from an older backup does not erase the R2 attempt receipt.
+  await db.prepare('DELETE FROM pdf_ocr_calls').run();
+  await seedArticle({id:'uncertain-copy',objectKey:'original/uncertain-copy.pdf',pdf,body:'另一通知'});
+  await enqueue(mf,'uncertain-copy',true);
+  await runWorkflow(mf,(await jobByAttachment(db,'uncertain-copy')).id);
+  assert.equal((await state(mf)).calls.length,1);
+  assert.equal((await article(db,'uncertain-copy')).ocr_result_key,null);
+});
+
+test('previously paid TextIn benchmark is promoted to reading without a new request or budget reservation',async()=>{
+  const pdf=imagePdf('benchmark'),hash=sha256(pdf);
+  await seedArticle({id:'benchmark',objectKey:'original/benchmark.pdf',pdf,body:'通知正文'});
+  await configure(mf,pdf,'error','textin-xparse-auto');
+  const config=await(await mf.dispatchFetch('https://feed.test/benchmark-config')).json();
+  await bucket.put(`benchmarks/textin/${hash}/v2/auto/result.json`,JSON.stringify({summary:{sourceHash:hash,success:true},config,payload:{code:200,data:{
+    schema_version:'1.4.0',success_count:1,metadata:{page_count:1},pages:[{page_number:1,status:'Success',element_ids:['one']}],
+    elements:[{element_id:'one',page_number:1,type:'NarrativeText',text:'缓存名单 中文姓名',metadata:{}}],
+  }}}));
+  await enqueue(mf,'benchmark',true);
+  await runWorkflow(mf,(await jobByAttachment(db,'benchmark')).id);
+  assert.equal((await jobByAttachment(db,'benchmark')).status,'complete');
+  assert.equal((await state(mf)).calls.length,0);
+  assert.deepEqual(await search(db,'中文姓名'),['benchmark']);
+  assert.equal((await db.prepare('SELECT COUNT(*) n FROM pdf_ocr_budget').first()).n,0);
+});
+
+test('a storage failure after TextIn responds recovers from raw R2 data without paying twice',async()=>{
+  const pdf=imagePdf('storage-failure');
+  await seedArticle({id:'raw-recovery',objectKey:'original/raw-recovery.pdf',pdf,body:'原有正文'});
+  await configure(mf,pdf,'write-failure','textin-xparse-auto');
+  await enqueue(mf,'raw-recovery',true);
+  const job=await jobByAttachment(db,'raw-recovery');
+  await runWorkflow(mf,job.id);
+  assert.equal((await jobByAttachment(db,'raw-recovery')).status,'needs_review');
+  assert.equal((await article(db,'raw-recovery')).body_text,'原有正文');
+  await enqueue(mf,'raw-recovery',true);
+  await runWorkflow(mf,job.id);
+  assert.equal((await jobByAttachment(db,'raw-recovery')).status,'complete');
+  assert.equal((await state(mf)).calls.length,1);
+  assert.deepEqual(await search(db,'资助名单'),['raw-recovery']);
+});
+
+test('concurrent articles sharing a PDF only issue one TextIn request',async()=>{
+  const pdf=imagePdf('concurrent');
+  for(const id of ['first','second']){
+    await seedArticle({id,objectKey:`original/${id}.pdf`,pdf,body:'通知正文'});
+  }
+  await configure(mf,pdf,'held','textin-xparse-auto');
+  await enqueue(mf,'first',true);await enqueue(mf,'second',true);
+  const first=await jobByAttachment(db,'first'),second=await jobByAttachment(db,'second');
+  const running=runWorkflow(mf,first.id);
+  try{
+    for(let i=0;i<100&&(await state(mf)).calls.length===0;i++)await new Promise(resolve=>setTimeout(resolve,10));
+    assert.equal((await state(mf)).calls.length,1);
+    await runWorkflow(mf,second.id);
+    assert.equal((await jobByAttachment(db,'second')).status,'deferred_busy');
+  }finally{
+    await mf.dispatchFetch('https://feed.test/release');
+    await running;
+  }
+  await runWorkflow(mf,second.id);
+  assert.equal((await jobByAttachment(db,'second')).status,'complete');
+  assert.equal((await state(mf)).calls.length,1);
+});
+
+// Real PDF objects: page one has a short native caption and an image; page two
+// contains only an image. The production unpdf parser decides which to recognize.
+function mixedPdf(){
+  const first='q 200 0 0 200 20 20 cm /Im0 Do Q\nBT /F1 12 Tf 72 120 Td (CQU caption) Tj ET';
+  const second='q 200 0 0 200 20 20 cm /Im0 Do Q';
+  return buildPdf([
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R 7 0 R] /Count 2 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources << /Font << /F1 6 0 R >> /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>',
+    `<< /Length ${first.length} >>\nstream\n${first}\nendstream`,
+    '<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 1 >>\nstream\nP\nendstream',
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources << /XObject << /Im0 5 0 R >> >> /Contents 8 0 R >>',
+    `<< /Length ${second.length} >>\nstream\n${second}\nendstream`,
+  ]);
+}
+
+function imagePdf(marker='image',caption=false){
+  const content=`q 200 0 0 200 20 20 cm /Im0 Do Q\n${caption?'BT /F1 12 Tf 72 120 Td (CQU caption) Tj ET':''}\n% ${marker}`;
   return buildPdf([
     '<< /Type /Catalog /Pages 2 0 R >>',
     '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
-    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources << /Font << /F1 6 0 R >> /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>',
     `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,
     '<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 1 >>\nstream\nP\nendstream',
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
   ]);
 }
 
@@ -293,16 +451,18 @@ function buildPdf(objects){
   return pdf;
 }
 
-async function seedArticle({id,objectKey,pdf,body}){
+async function seedArticle({id,objectKey,pdf,body,role='body-pdf'}){
   await db.prepare("INSERT INTO articles(id,source_id,url,title,published_at,discovered_at,status,body_text,prefix,content_hash) VALUES (?,'test',?,?,'2026-10-01','2026-10-11','complete',?,?,?)")
     .bind(id,`https://example.com/${id}.html`,`${id} 通知`,body,`articles/${id}`,sha256(body)).run();
-  await db.prepare("INSERT INTO attachments(id,article_id,name,original_url,filename,object_key,bytes,content_type,sha256,status,role) VALUES (?,?,?,?,'attachment.pdf',?,?,?,?, 'complete','body-pdf')")
+  await db.prepare("INSERT INTO attachments(id,article_id,name,original_url,filename,object_key,bytes,content_type,sha256,status,role) VALUES (?,?,?,?,'attachment-1.pdf',?,?,?,?, 'complete','body-pdf')")
     .bind(`${id}-file`,id,`${id}.pdf`,`https://example.com/${id}.pdf`,objectKey,pdf.length,'application/pdf',sha256(pdf)).run();
+  await db.prepare('UPDATE attachments SET role=? WHERE article_id=?').bind(role,id).run();
   await bucket.put(objectKey,new TextEncoder().encode(pdf),{httpMetadata:{contentType:'application/pdf'}});
+  await bucket.put(`articles/${id}/body.txt`,body);
 }
 
-async function configure(worker,pdf,response){
-  const result=await worker.dispatchFetch(`https://feed.test/configure?response=${response}`,{method:'POST',body:pdf});
+async function configure(worker,pdf,response,model='mistral-ocr-4-1'){
+  const result=await worker.dispatchFetch(`https://feed.test/configure?response=${response}&model=${model}`,{method:'POST',body:pdf});
   if(!result.ok)throw new Error(await result.text());
   return result;
 }

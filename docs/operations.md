@@ -33,7 +33,7 @@
 | `TASK_RUNTIME_ENABLED` | `false` | T03 单篇任务入口默认关闭；POST 需它与 `CRAWL_ENABLED` 同时为 `true`，状态 GET 不受此开关影响 |
 | `MAX_TASK_ATTEMPTS` | `3` | 自动恢复的 429 等暂态失败最大尝试次数；配置会限制在 1–10 |
 | `PDF_OCR_ENABLED` | `true` | 自动入队与每日补偿；不禁止显式 admin 对比任务 |
-| `PDF_OCR_MODEL` | `mistral-ocr-4-1` | 固定文档 OCR 模型 |
+| `PDF_OCR_MODEL` | `textin-xparse-auto` | 固定文档 OCR 模型 |
 | `MAX_PDF_OCR_PAGES_PER_DAY` | `50` | UTC 每日预留源 PDF 页数 |
 | `MAX_PDF_OCR_PAGES_PER_MONTH` | `1000` | UTC 每月预留源 PDF 页数 |
 
@@ -45,7 +45,8 @@ Workers secrets：
 | --- | --- |
 | `FIRECRAWL_API_KEY` | 已确认生产 Worker 存在同名 Secret；未读取值，真实付费调用有效性待隔离验收。未配置时回退 keyless 入口 |
 | `BRIDGE_SECRET` | 给 Firecrawl 页面签发 5 分钟源站 origin 绑定 HMAC capability |
-| `MISTRAL_API_KEY` | 私有 R2 正文 PDF 的 Mistral OCR；与验证码 Workers AI 分开计费 |
+| `TEXTIN_APP_ID` / `TEXTIN_SECRET_CODE` | 默认 TextIn xParse PDF OCR 凭据 |
+| `MISTRAL_API_KEY` | 可选，仅显式历史对比；默认采集不调用 |
 | `ADMIN_TOKEN` | `/internal/*` 管理 Bearer token |
 | `FEED_AUTH_CLIENT_ID` | auth.cqu.moe 机密 OAuth client ID |
 | `FEED_AUTH_CLIENT_SECRET` | auth.cqu.moe 机密 OAuth client secret |
@@ -54,7 +55,8 @@ Workers secrets：
 配置命令：
 
 ```sh
-pnpm exec wrangler secret put MISTRAL_API_KEY --name cqu-feed
+pnpm exec wrangler secret put TEXTIN_APP_ID --name cqu-feed
+pnpm exec wrangler secret put TEXTIN_SECRET_CODE --name cqu-feed
 pnpm exec wrangler secret put FIRECRAWL_API_KEY --name cqu-feed
 pnpm exec wrangler secret put BRIDGE_SECRET --name cqu-feed
 pnpm exec wrangler secret put ADMIN_TOKEN --name cqu-feed
@@ -206,7 +208,7 @@ PDF-only 缺失原件时保留 blocked 观察，列表明确显示缺项，待�
 
 应用 `0008_content_events.sql` 后，正式版增加 `ARCHIVE_OCR` Workflow、`FEED_EVENTS` Queue 及其 DLQ。采集只保存观察结果与后续 outbox；采集任务成功不代表文章已完整。所有版本统一经 `Archive.reconcileRevision` 检查必需原件与 OCR，确认 R2 对象存在且匹配记录后，在同一 D1 批次提交 ready、内容事件、来源证据、阅读投影、只向前移动的最新完整版本指针和事件 outbox。管理任务详情同时显示版本缺项。
 
-正文 PDF 逐页检查可提取文字；混合 PDF 仅把需识别页发送给 OCR，完整结果仍包含原生文字页。输入文件 hash、处理器版本和选项决定任务与缓存身份。`PDF_OCR_MODEL` 默认 `mistral-ocr-4-1`，`ARCHIVE_OCR_PROCESSOR_VERSION` 默认 `v1`；改变识别规则时显式升级处理器版本。每份 PDF 最多 20 个需 OCR 页，日/月预算按整个输入页数预留。成功响应先保存 R2 派生结果日志，再建立 D1 引用；R2 已保存而 D1 提交失败时，重放复用该日志。
+正文 PDF 逐页检查可提取文字；混合 PDF 仅把需识别页发送给 OCR，完整结果仍包含原生文字页。输入文件 hash、处理器版本和选项决定任务与缓存身份。`PDF_OCR_MODEL` 默认 `textin-xparse-auto`，`ARCHIVE_OCR_PROCESSOR_VERSION` 默认 `v1`；改变识别规则时显式升级处理器版本。每份 PDF 最多 20 个需 OCR 页，日/月预算按整个输入页数预留。请求前写入不可覆盖的 R2 receipt，响应原始字节先于 JSON 解析保存；随后保存派生结果日志并建立 D1 引用。正式版与 MVP 共享 PDF 内容/config/cache-version 身份及租约，重放先复用完整结果或 raw。超时、解析或存储失败后若付费结果不确定，task 停为 blocked/ocr_review_required，禁止自动重付；并发占用为 deferred/ocr_busy。详见 [PDF OCR 实现](pdf-ocr-design.md)。
 
 `POST /internal/articles/:articleId/pdf-ocr` 使用当前处理器配置重建当前阅读投影，`GET` 返回对应 OCR 状态。历史完整版本继续使用发布时冻结的结果；重做不新建源版本或内容事件。多份正文 PDF 的结果按文件保存到聚合投影，版本检查避免并发重做覆盖另一份文件的识别改进。新源版本的投影与旧投影分开，HTML 后续版本不会继承旧 PDF 的 OCR。
 
@@ -354,7 +356,7 @@ CREATE VIRTUAL TABLE article_search USING fts5(
 - 通知标题；
 - 页面正文文本；
 - Firecrawl Markdown 正文；
-- 正文 PDF 的 unpdf 文字层及成功发布的 Mistral 扫描件 OCR 文本。
+- 正文 PDF 的 unpdf 文字层和成功发布的 TextIn OCR；已迁移 MVP 普通 PDF 附件结果也继续可读、可搜索。
 
 不索引：
 
@@ -451,15 +453,15 @@ PDF.js 阅读页为 `/reader/{articleId}/{filename}`，仍先验证 Feed 会话�
 
 ```sh
 node scripts/compare-ocr.mjs status
-node scripts/compare-ocr.mjs results mistral-ocr-4-1
-node scripts/compare-ocr.mjs publish mistral-ocr-4-1
+node scripts/compare-ocr.mjs results textin-xparse-auto
+node scripts/compare-ocr.mjs publish textin-xparse-auto
 ```
 
 已完成结果 publish 只更新阅读与索引，不再收费识别。start 可能发起付费调用，仍受文件缓存和全局页数预算约束。任意其他 article 通过带 ADMIN_TOKEN 的 `/internal/pdf-ocr/<id>` 管理。
 
 查看 D1 `pdf_ocr_jobs` 了解失败和延期；`pdf_ocr_usage` 是按日/月的预留/成功处理页数与估算费用，`pdf_ocr_budget` 是原子配额状态。超时可能已经收费，因此失败不释放预算，不要为恢复任务随意清除 calls/attempts。`PDF_OCR_ENABLED=false` 只停止新自动入队，已启动 Workflow 仍可完成；不清空 key、数据或已发布文字。
 
-当前只对 body-pdf 自动 OCR。最大 12 MiB/100 个源页/20 个 OCR 页，按每次请求完整源页数保守预留预算。每月 1000 页对应默认模型约 $4 基础 OCR 用量，Cloudflare 和整个供应商账号的总账单不受这个应用额度封顶。
+正式版必要 OCR 为正文 PDF；legacy 文字提取支持正文与普通 PDF 附件。仅无文字层且有图像的页调用 TextIn。最大 12 MiB/100 个源页/20 个 OCR 页，按每次请求完整源页数保守预留预算。TextIn 单价以账号计费为准，不沿用历史 Mistral 美元估算；应用额度不封顶 Cloudflare 或整个供应商账号账单。
 
 
 ## 正式版多来源接入（T04，默认关闭）

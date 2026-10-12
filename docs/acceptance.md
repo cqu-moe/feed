@@ -74,3 +74,8 @@ PDF 正文补索引在生产 Worker 内执行，未新增 Firecrawl/OCR 调用�
 - 最终生产版本：`4e51a2f3-dab2-41bf-b674-329a704b975c`。Mistral secret 已由用户配置，只在 Worker 内使用。
 
 本次只实测了一份扫描 PDF，不代表所有中文名单均可准确识别；4.1 仍有姓名错字，阅读界面明确提示以原 PDF 为准。尚未等候次日 Cron；此次真实 OCR Workflow 由管理接口发起，自动入队和每日补偿已部署。
+
+
+## 2026-10-13 TextIn 正式版适配
+
+已恢复签名 MVP `7fb8e2a` 的 TextIn adapter、无文字层扫描页选择、普通附件 legacy 提取与 R2 计费保护；历史 Mistral 验收记录保留，但当前默认为 `textin-xparse-auto`。正式任务与 MVP 共用缓存/receipt，迁移保留已付费结果。此次只运行本地 Worker/D1/R2 外部替身回归与 CI；不据此声称 TextIn 云调用、价格、部署、真实账号或 UI 验收通过。具体 red/green、最终签名和风险见本次 `feed-textin-production-implementation.md` 交付记录。

@@ -10,7 +10,7 @@
 - 使用 Firecrawl 云页面抓取列表和正文，并在原始源站会话中下载附件。
 - 遇到四位数字附件验证码时，通过带时限 HMAC 授权的 Worker 桥接调用 Workers AI OCR，再用源站会话重试下载。
 - 将正文、正文型 PDF 文本、原貌 HTML、截图和附件保存到 R2；通知元数据和索引进 D1。
-- 扫描正文 PDF 自动进入云端 Mistral OCR 4.1 Workflow，按页阅读和搜索，保留原 PDF 对照；[实测与成本](docs/ocr-comparison.md)。
+- 扫描正文 PDF 自动进入 TextIn Workflow，仅无文字层且有图像的页调用 OCR；正式版与 MVP 共享已付费缓存，保留原 PDF 对照；[实现与计费保护](docs/pdf-ocr-design.md)。
 - 提供中文统一阅读、关键词搜索、来源筛选、分页、原始通知链接、附件下载、PDF 在线预览和原貌存档。
 - 所有业务 API、附件、截图和原貌存档都要求 Feed 登录且实时拥有 `feed.access`。
 
@@ -29,7 +29,7 @@ Cloudflare Cron
 
 调度配置为 `0 0 * * *`。Cloudflare Cron 使用 UTC，因此每天 UTC 00:00 运行，即北京时间 08:00。初始补抓窗口是运行时往前 30 天；这不是全量历史导入，更早通知不会被猜测或采集。
 
-搜索使用 D1 SQLite FTS5 `article_search` 的 trigram 分词，索引字段为通知标题和正文文本。少于 3 个字符的查询回退到标题/正文 `LIKE`。正文型 PDF 会用 unpdf 读取文字层，扫描页由 Mistral OCR 4.1 补识别并并入 `body_text`，因此可搜索；普通 Office、压缩包等附件只保存和提供下载，不做通用 Office 文本抽取，也不会并入搜索索引。
+搜索使用 D1 SQLite FTS5 `article_search` 的 trigram 分词，索引字段为通知标题和正文文本。少于 3 个字符的查询回退到标题/正文 `LIKE`。正文型 PDF 会用 unpdf 读取文字层，无文字层扫描页由 TextIn 补识别并并入 `body_text`，因此可搜索；普通 Office、压缩包等附件只保存和提供下载，不做通用 Office 文本抽取，也不会并入搜索索引。
 
 ## 日常使用
 
