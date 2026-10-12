@@ -152,7 +152,7 @@ export function AdminMailPanel({ token }: { token: string }) {
     <div className="feed-source-heading">
       <div>
         <h2>邮件投递</h2>
-        <p>查看及时邮件的准备、受理和接收进度。</p>
+        <p>查看及时邮件与每日摘要的准备、受理和接收进度。</p>
       </div>
       <Button type="button" variant="outline" disabled={loading} onClick={() => setReloadKey(value => value + 1)}>
         <RefreshCw aria-hidden="true" />{loading ? '正在读取…' : '刷新邮件'}
