@@ -140,7 +140,7 @@ async function seed(db){
     db.prepare(`INSERT INTO usage(day,kind,used) VALUES ('2026-10-12','firecrawl',3)`),
     db.prepare(`INSERT INTO usage(day,kind,used) VALUES ('2026-10-12','archive_bytes',268435456)`),
     db.prepare(`INSERT INTO pdf_ocr_usage(period,reserved_pages,processed_pages,estimated_usd)
-      VALUES ('2026-10',5,5,0.25)`),
+      VALUES ('2026-10',5,5,0.25),('2026-10-11',2,2,0.10),('2026-10-12',3,3,0.15)`),
     db.prepare(`INSERT INTO artifact_objects(sha256,r2_key,byte_size,media_type,verified_at)
       VALUES (?,?,1,'application/octet-stream',?)`).bind(hashes.artifact,'objects/test',old),
     db.prepare(`INSERT INTO tasks(id,kind,business_key,source_id,article_id,payload_json,state,due_at,attempt_no,created_at,updated_at,last_error)

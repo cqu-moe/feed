@@ -197,7 +197,7 @@ export function createOperations(env,{now=()=>Date.now()}={}){
           (SELECT COUNT(*) FROM tasks WHERE last_error LIKE '%auth_unavailable%') AS taskAuthUnavailable`).first(),
       env.DB.prepare(`SELECT
           (SELECT COALESCE(SUM(used),0) FROM usage WHERE kind IN ('firecrawl','ocr')) AS paidVendorCalls,
-          (SELECT COALESCE(SUM(processed_pages),0) FROM pdf_ocr_usage) AS paidOcrPages,
+          (SELECT COALESCE(SUM(processed_pages),0) FROM pdf_ocr_usage WHERE length(period)=7) AS paidOcrPages,
           (SELECT COALESCE(day_pages,0) FROM pdf_ocr_budget WHERE id=1) AS ocrPagesToday,
           (SELECT COALESCE(month_pages,0) FROM pdf_ocr_budget WHERE id=1) AS ocrPagesThisMonth`).first(),
       env.DB.prepare(`SELECT COUNT(*) AS referenced FROM (
