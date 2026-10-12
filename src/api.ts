@@ -66,6 +66,7 @@ export type ArticleList = {
 export type Attachment = {
   id: string;
   name: string;
+  filename?: string | null;
   bytes: number | null;
   contentType: string | null;
   status: string;
@@ -99,9 +100,41 @@ export type ArticleDetail = ArticleListItem & {
   ocr?: ArticleOcr;
 };
 
+export type RevisionState = 'assembling' | 'ready' | 'blocked';
+
+export type ArticleRevision = {
+  id: string;
+  articleId: string;
+  revisionNo: number;
+  title: string;
+  state: RevisionState;
+  observedAt: string;
+  readyAt: string | null;
+  changeKind: string;
+  missingCount: number;
+};
+
+export type RevisionRequirement = {
+  slotKey: string;
+  kind: string;
+  required: boolean;
+  state: string;
+  name: string | null;
+  filename: string | null;
+  originalUrl: string | null;
+  errorCode: string | null;
+  fetchedAt: string | null;
+};
+
 export type ArticleDetailResponse = {
   article: ArticleDetail;
   attachments: Attachment[];
+  revision?: ArticleRevision;
+  requirements?: RevisionRequirement[];
+};
+
+export type ArticleRevisionsResponse = {
+  revisions: ArticleRevision[];
 };
 
 export type ApiResult<T> =
@@ -316,6 +349,7 @@ function parseAttachment(value: unknown): Attachment {
   return {
     id: value.id,
     name: value.name,
+    filename: stringOrNull(value.filename),
     bytes: numberOrNull(value.bytes),
     contentType: stringOrNull(value.contentType),
     status: value.status,
@@ -370,8 +404,82 @@ function parseOcr(value: unknown): ArticleOcr {
   };
 }
 
+function parseRevisionState(value: unknown): RevisionState {
+  if (value === 'assembling' || value === 'ready' || value === 'blocked') return value;
+  throw new Error('通知版本状态结构不匹配。');
+}
+
+function parseRevision(value: unknown): ArticleRevision {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== 'string' ||
+    typeof value.articleId !== 'string' ||
+    typeof value.revisionNo !== 'number' ||
+    !Number.isSafeInteger(value.revisionNo) ||
+    value.revisionNo < 1 ||
+    typeof value.title !== 'string' ||
+    typeof value.observedAt !== 'string' ||
+    typeof value.missingCount !== 'number' ||
+    !Number.isSafeInteger(value.missingCount) ||
+    value.missingCount < 0 ||
+    typeof value.changeKind !== 'string'
+  ) {
+    throw new Error('通知版本接口结构不匹配。');
+  }
+  if (Number.isNaN(Date.parse(value.observedAt))) throw new Error('通知版本时间结构不匹配。');
+
+  return {
+    id: value.id,
+    articleId: value.articleId,
+    revisionNo: value.revisionNo,
+    title: value.title,
+    state: parseRevisionState(value.state),
+    observedAt: value.observedAt,
+    readyAt: stringOrNull(value.readyAt),
+    changeKind: value.changeKind,
+    missingCount: value.missingCount,
+  };
+}
+
+function parseRequirement(value: unknown): RevisionRequirement {
+  if (
+    !isRecord(value) ||
+    typeof value.slotKey !== 'string' ||
+    typeof value.kind !== 'string' ||
+    !(value.required === true || value.required === false || value.required === 0 || value.required === 1) ||
+    typeof value.state !== 'string'
+  ) {
+    throw new Error('版本产物清单结构不匹配。');
+  }
+
+  return {
+    slotKey: value.slotKey,
+    kind: value.kind,
+    required: value.required === true || value.required === 1,
+    state: value.state,
+    name: stringOrNull(value.name),
+    filename: stringOrNull(value.filename),
+    originalUrl: stringOrNull(value.originalUrl),
+    errorCode: stringOrNull(value.errorCode) ?? stringOrNull(value.error),
+    fetchedAt: stringOrNull(value.fetchedAt),
+  };
+}
+
+export function parseArticleRevisions(value: unknown): ArticleRevisionsResponse {
+  if (!isRecord(value) || !Array.isArray(value.revisions)) {
+    throw new Error('通知版本时间线结构不匹配。');
+  }
+  return { revisions: value.revisions.map(parseRevision) };
+}
+
 export function parseArticleDetail(value: unknown): ArticleDetailResponse {
-  if (!isRecord(value) || !isRecord(value.article) || !Array.isArray(value.attachments)) {
+  if (
+    !isRecord(value) ||
+    !isRecord(value.article) ||
+    !Array.isArray(value.attachments) ||
+    (value.revision !== undefined && value.revision !== null && !isRecord(value.revision)) ||
+    (value.requirements !== undefined && value.requirements !== null && !Array.isArray(value.requirements))
+  ) {
     throw new Error('通知详情接口结构不匹配。');
   }
   if (typeof value.article.bodyText !== 'string') {
@@ -389,5 +497,12 @@ export function parseArticleDetail(value: unknown): ArticleDetailResponse {
     ...(value.article.ocr === undefined ? {} : { ocr: parseOcr(value.article.ocr) }),
   };
 
-  return { article, attachments: parsedAttachments };
+  return {
+    article,
+    attachments: parsedAttachments,
+    ...(value.revision === undefined || value.revision === null ? {} : { revision: parseRevision(value.revision) }),
+    ...(value.requirements === undefined || value.requirements === null
+      ? {}
+      : { requirements: value.requirements.map(parseRequirement) }),
+  };
 }

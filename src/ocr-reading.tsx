@@ -65,7 +65,15 @@ function statusLabel(ocr: ArticleOcr): string {
   return `识别未完成 · 保留 ${ocr.pages.length} 页已验证结果`;
 }
 
-export function OcrReading({ articleId, ocr }: { articleId: string; ocr: ArticleOcr }) {
+export function OcrReading({
+  articleId,
+  revisionId,
+  ocr,
+}: {
+  articleId: string;
+  revisionId?: string;
+  ocr: ArticleOcr;
+}) {
   return (
     <section className="feed-detail-section feed-ocr-section" aria-labelledby="feed-ocr-title">
       <h2 id="feed-ocr-title">扫描件文字识别</h2>
@@ -82,7 +90,13 @@ export function OcrReading({ articleId, ocr }: { articleId: string; ocr: Article
                 <header className="feed-ocr-page-header">
                   <h3>第 {item.page} 页</h3>
                   <Button asChild variant="outline" size="sm">
-                    <Link to={`/reader/${articleId}/${item.filename}?page=${item.page}`}>
+                    <Link
+                      to={
+                        revisionId
+                          ? `/reader/${articleId}/revisions/${encodeURIComponent(revisionId)}/${item.filename}?page=${item.page}`
+                          : `/reader/${articleId}/${item.filename}?page=${item.page}`
+                      }
+                    >
                       <ExternalLink aria-hidden="true" />
                       打开原 PDF
                     </Link>

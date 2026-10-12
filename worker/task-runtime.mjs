@@ -9,13 +9,16 @@ const replayAfterMs=15*60*1000;
 
 export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,workflow=env.CAPTURE}={}){
   const maxAttempts=boundedInteger(env.MAX_TASK_ATTEMPTS,3,1,10);
+  const articleStatus=env.ARCHIVE_VERSIONS_ENABLED==='true'
+    ?"COALESCE((SELECT CASE WHEN r.state='ready' THEN 'complete' ELSE 'partial' END FROM article_revisions r WHERE r.id=json_extract(a.result_json,'$.revisionId')),ar.status)"
+    :'ar.status';
   const runtime={
     async submitCapture({articleId,requestId}){
       if(!idPattern.test(articleId??''))throw new ValidationError('articleId must be a 24-character lowercase hex id');
       if(!/^[A-Za-z0-9._:-]{8,100}$/.test(requestId??''))throw new ValidationError('requestId must contain 8-100 URI-safe characters');
       const row=await env.DB.prepare('SELECT id,source_id FROM articles WHERE id=?').bind(articleId).first();
       if(!row)throw new ValidationError('Article not found');
-      const source=createSources(env).find(row.source_id);
+      const source=await createSources(env).find(row.source_id);
       if(!source)throw new ValidationError('Article source is not configured');
       const businessKey=`capture:${articleId}:${requestId}`,taskId=(await sha(businessKey)).slice(0,24);
       const timestamp=now(),outboxId=await launchOutboxId(taskId,1);
@@ -148,14 +151,14 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
         t.state,t.due_at AS dueAt,t.attempt_no AS attemptNo,t.last_error AS lastError,
         t.created_at AS createdAt,t.updated_at AS updatedAt,a.workflow_instance_id AS workflowInstanceId,
         a.state AS attemptState,a.started_at AS startedAt,a.handed_off_at AS handedOffAt,a.ended_at AS endedAt,
-        a.error_code AS errorCode,ar.status AS articleStatus,ar.captured_at AS articleCapturedAt
+        a.error_code AS errorCode,${articleStatus} AS articleStatus,ar.captured_at AS articleCapturedAt
         FROM tasks t LEFT JOIN task_attempts a ON a.task_id=t.id AND a.attempt_no=t.attempt_no
         LEFT JOIN articles ar ON ar.id=t.article_id WHERE t.id=?`).bind(taskId).first();
     },
     async list({limit=50}={}){
       const rows=await env.DB.prepare(`SELECT t.id,t.state,t.article_id AS articleId,t.source_id AS sourceId,
         t.last_error AS lastError,t.created_at AS createdAt,t.updated_at AS updatedAt,t.due_at AS dueAt,t.attempt_no AS attemptNo,
-        a.workflow_instance_id AS workflowInstanceId,a.state AS attemptState,ar.title AS articleTitle,ar.status AS articleStatus
+        a.workflow_instance_id AS workflowInstanceId,a.state AS attemptState,ar.title AS articleTitle,${articleStatus} AS articleStatus
         FROM tasks t LEFT JOIN task_attempts a ON a.task_id=t.id AND a.attempt_no=t.attempt_no
         LEFT JOIN articles ar ON ar.id=t.article_id ORDER BY t.created_at DESC,t.id DESC LIMIT ?`)
         .bind(boundedInteger(limit,50,1,100)).all();return rows.results;

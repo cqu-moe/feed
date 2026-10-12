@@ -20,18 +20,28 @@ export async function serveObject(request,env,key,{name,type,download=false}={})
   const object=request.method==='HEAD'?null:await env.ARCHIVE.get(key,range?{range}:undefined);
   return new Response(object?.body??null,{status:range?206:200,headers});
 }
-export async function serveSnapshot(env,article){
+export async function serveSnapshot(env,article,{files:versionFiles=null,fileReferences=[],revisionId=null}={}){
   if(!article.snapshot_key)return json({error:'原貌存档尚未完成'},404);
   const object=await env.ARCHIVE.get(article.snapshot_key);if(!object)return json({error:'原貌存档不存在'},404);
-  const files=await env.DB.prepare("SELECT filename FROM attachments WHERE article_id=? AND filename LIKE '%.pdf' AND object_key IS NOT NULL").bind(article.id).all();
-  const pdfs=new Set(files.results.map(f=>f.filename));
+  const files=versionFiles??(await env.DB.prepare("SELECT filename FROM attachments WHERE article_id=? AND object_key IS NOT NULL").bind(article.id).all()).results.map(row=>row.filename);
+  const pdfs=new Set(files.filter(file=>file?.endsWith('.pdf')));
   const rewriter=new HTMLRewriter();
   for(const selector of ['script','base','meta','object','embed','applet','link[rel="preload"]','link[rel="prefetch"]'])rewriter.on(selector,{element(e){e.remove();}});
   rewriter
     .on('form',{element(e){e.removeAndKeepContent();}})
     .on('*',{element(e){for(const [key]of [...e.attributes])if(/^on/i.test(key)||['srcdoc','ping','autofocus','formaction'].includes(key))e.removeAttribute(key);}})
-    .on('iframe',{element(e){const file=e.getAttribute('data-feed-pdf');if(!pdfs.has(file)){e.remove();return;}e.removeAttribute('sandbox');e.setAttribute('src',`/reader/${article.id}/${file}`);e.setAttribute('title','已存档的 PDF');}})
-    .on('a',{element(e){const href=e.getAttribute('href')??'';if(/^\s*(javascript|data|vbscript):/i.test(href))e.removeAttribute('href');e.setAttribute('rel','noopener noreferrer');}});
+    .on('iframe',{element(e){const file=e.getAttribute('data-feed-pdf');if(!pdfs.has(file)){e.remove();return;}e.removeAttribute('sandbox');e.setAttribute('src',revisionId?`/reader/${article.id}/revisions/${revisionId}/${file}`:`/reader/${article.id}/${file}`);e.setAttribute('title','已存档的 PDF');}})
+    .on('a',{element(e){
+      const href=e.getAttribute('href')??'';
+      if(/^\s*(javascript|data|vbscript):/i.test(href))e.removeAttribute('href');
+      else if(revisionId){
+        const match=new RegExp(`^/api/files/${article.id}/([^?#]+)(?:[?#]|$)`).exec(href);
+        const original=fileReferences.find(row=>row.originalUrl===href.replace(/&amp;/g,'&'));
+        const filename=match&&files.includes(match[1])?match[1]:original?.filename;
+        if(filename)e.setAttribute('href',`/api/articles/${article.id}/revisions/${revisionId}/files/${filename}?download=1`);
+      }
+      e.setAttribute('rel','noopener noreferrer');
+    }});
   return rewriter.transform(new Response(object.body,{headers:{
     'Content-Type':'text/html; charset=utf-8','Cache-Control':'private, no-store','Referrer-Policy':'no-referrer','X-Content-Type-Options':'nosniff',
     // Only our authenticated, self-hosted PDF.js route is embedded. Source

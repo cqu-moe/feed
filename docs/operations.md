@@ -172,6 +172,31 @@ Firecrawl 429 保存为 `rate_limited` deferred，默认最多 3 次 attempt；4
 
 本地测试使用真实 Miniflare D1/R2/Queue、真实业务采集代码、Firecrawl 外部替身和可控 Workflow 执行适配器。Miniflare Queue broker 是内存态，本地投递和恢复通过不能证明 Cloudflare 队列留存、DLQ、实际 Workflow 持久步骤或生产账号额度行为；这些属于后续隔离云验收。
 
+## 4A. T05 不可变版本读写开关
+
+T05 使用两个默认关闭的独立开关，便于采集写入与阅读切换分批上线：
+
+| 变量 | 默认 | 作用 |
+| --- | --- | --- |
+| `ARCHIVE_VERSIONS_ENABLED` | `false` | capture task 保存不可变版本、产物清单和物理对象引用，保留旧 MVP 字段与原件 |
+| `ARCHIVE_READS_ENABLED` | `false` | 通知详情与文件读取改走最新 ready 版本；关闭后继续使用旧 MVP 读字段 |
+
+版本 API 均要求 Feed 会话与 `feed.access`：
+
+| 方法与路径 | 作用 |
+| --- | --- |
+| `GET /api/articles/:articleId/revisions` | 返回按版本号倒序的观察时间线 |
+| `GET /api/articles/:articleId/revisions/:revisionId` | 返回指定版本详情、产物清单和该版本附件 |
+| `GET /api/articles/:articleId/revisions/:revisionId/files/:filename` | 读取该版本原始附件字节，支持 `HEAD` 与 `Range` |
+| `GET /api/articles/:articleId/revisions/:revisionId/snapshot` | 读取绑定该版本的原貌存档 |
+| `GET /api/articles/:articleId/revisions/:revisionId/screenshot` | 读取该版本可选截图 |
+
+阅读端 `/api/articles/:articleId` 只选择最新 ready 版本。`assembling` 或 `blocked` 版本可查看观察时间、状态和缺项原因，但正文为空、附件没有链接，不能顶替已有完整阅读。版本编号在采集租约下预留，失败重试可能形成编号空隙；A→B→A 是三次独立观察，第三次可复用 A 的物理对象。同名附件内容变化时，两个版本继续保留各自原始字节。
+
+历史原貌中的附件链接和 PDF iframe 均改写为上述 revision-bound 路由；阅读器页面为 `/reader/:articleId/revisions/:revisionId/:filename`。原貌 CSP 仍禁止源站脚本、表单提交和未知 frame。T05 本地 Miniflare 测试覆盖 A→B→A、同名附件字节变化、同任务重放、缺项版本保留旧阅读、PDF-only 正文原件不可用时的 blocked 观察、R2 成功后 D1 失败重试、过期 fence、历史原貌改写和未登录拒绝。真实云端与账号验收仍留在 T17。
+
+PDF-only 缺失原件时保留 blocked 观察，列表明确显示缺项，待确认完整后才开放阅读。文件抓取时间按实际下载记录保存；未记录的时间保持未知，不用其他文件的时间冒充。历史、缺项、过期采集和 R2/D1 恢复用例已通过本地验收。T06 仍负责正文 OCR、最终完整判定和统一内容事件，不能把 T05 的 `assembling`/`blocked` 过渡语义当成最终发布链路。
+
 ## 5. 构建与部署
 
 日常部署通过 push 到 main 触发 Cloudflare Git Connector；GitHub Actions 只运行检查。构建命令、部署命令和环境配置见 [ci-cd.md](ci-cd.md)。Cloudflare 执行 `pnpm run ci` 后，再执行 `pnpm deploy:ci`。

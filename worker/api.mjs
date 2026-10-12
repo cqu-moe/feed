@@ -1,10 +1,12 @@
 import {json} from './utils.mjs';
 import {createSources} from './sources.mjs';
 import {serveObject,serveSnapshot} from './storage.mjs';
+import {archiveRoute} from './archive-api.mjs';
 const columns=`a.id,a.title,a.source_id AS sourceId,s.name AS sourceName,a.url,a.published_at AS publishedAt,a.captured_at AS capturedAt,a.status,a.attachment_count AS attachmentCount,a.excerpt`;
 export async function apiRoute(request,env){
   const url=new URL(request.url),path=url.pathname,configuredSources=createSources(env).all();
   if(!['GET','HEAD'].includes(request.method))return json({error:'Method not allowed'},405);
+  const archived=await archiveRoute(request,env);if(archived)return archived;
   if(path==='/api/sources'){
     const rows=await env.DB.prepare('SELECT s.*, (SELECT COUNT(*) FROM articles a WHERE a.source_id=s.id) AS articleCount FROM sources s').all();
     return json({sources:configuredSources.map(s=>{const row=rows.results.find(r=>r.id===s.id);return {id:s.id,name:s.name,url:s.url,lastRunAt:row?.last_run_at??null,articleCount:row?.articleCount??0,error:row?.error??null};})});
