@@ -67,6 +67,7 @@ async function fixture(){
   const db=await mf.getD1Database('DB');
   await applyMigration(db,await readFile('migrations/0001_feed.sql','utf8'));
   await applyMigration(db,await readFile('migrations/0003_collection_lease.sql','utf8'));
+  await applyMigration(db,await readFile('migrations/0005_task_runtime.sql','utf8'));
   return {mf,db};
 }
 

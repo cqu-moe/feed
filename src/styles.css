@@ -1,6 +1,13 @@
 @import 'tailwindcss' source(none);
 @source './';
 
+.feed-admin-content { display: grid; gap: var(--space-5); padding-block: var(--space-6); }
+.feed-admin-form { display: grid; gap: var(--space-3); }
+.feed-admin-form > button { justify-self: start; }
+.feed-admin-note, .feed-admin-id { color: var(--muted-foreground); font-size: var(--text-sm); overflow-wrap: anywhere; }
+.feed-admin-detail { display: grid; gap: var(--space-4); }
+.feed-admin-detail dd { overflow-wrap: anywhere; }
+
 body {
   margin: 0;
   background: var(--background);

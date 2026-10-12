@@ -558,7 +558,8 @@ export function SourcesPage() {
 
   return (
     <>
-      <PageHeader title="采集状态" description="查看每个通知栏目最近一次云端采集和归档结果。" />
+      <PageHeader title="采集状态" description="查看每个通知栏目最近一次云端采集和归档结果。"
+        actions={<Button asChild variant="outline"><Link to="/admin/tasks">管理员入口</Link></Button>} />
       {state.kind === 'loading' && (
         <PageState state="loading" title="正在加载采集状态" description="正在读取各栏目最近运行结果。" />
       )}

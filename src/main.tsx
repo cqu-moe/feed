@@ -27,6 +27,7 @@ import { House, RefreshCw } from 'lucide-react';
 import { parseSession, requestJson, type Session } from './api';
 import { AccessDeniedState, LoginRequiredState, LogoutButton, safeNext } from './components';
 import { AccessPage, ArticleDetailPage, ArticlesPage, LoginPage, SourcesPage } from './pages';
+import { AdminTasksPage } from './admin-tasks';
 import '@cqu-moe/theme/styles.css';
 import '@cqu-moe/ui/styles.css';
 import './styles.css';
@@ -159,6 +160,7 @@ function NotFound() {
 }
 
 const router = createBrowserRouter([
+  { path: '/admin/tasks', element: <AdminTasksPage />, errorElement: <RouteError /> },
   {
     path: '/reader/:id/:filename',
     loader: loadSession,

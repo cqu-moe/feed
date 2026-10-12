@@ -15,15 +15,19 @@ export function createCollector(dependencies={}){
     fetch: fetchDependency=fetch,
     enqueueOcr: enqueueOcrDependency=enqueuePdfOcr,
   }=dependencies;
-  return (env,source,article)=>collectArticle(env,source,article,{
+  return (env,source,article,captureContext)=>collectArticle(env,source,article,{
     scrape:scrapeDependency,
     fetch:fetchDependency,
     enqueueOcr:enqueueOcrDependency,
-  });
+  },captureContext);
 }
 
-async function collectArticle(env,source,article,dependencies){
+async function collectArticle(env,source,article,dependencies,captureContext){
   const {scrape:scrapeDependency,fetch:fetchDependency,enqueueOcr:enqueueOcrDependency}=dependencies;
+  const {fence,taskId=null,attemptNo=null}=captureContext??{};
+  if(!Number.isSafeInteger(fence))throw new Error('Capture lease is required');
+  const commitGuard=`EXISTS(SELECT 1 FROM articles WHERE id=? AND capture_fence=? AND status='collecting' AND lease_until>?)
+    AND (? IS NULL OR EXISTS(SELECT 1 FROM tasks WHERE id=? AND attempt_no=? AND state='running'))`;
   const runId=crypto.randomUUID(),prefix=`articles/${article.id}/${runId}`;
   const grant=await issueGrant(env,source,runId,article.id);
   const bridgeURL=new URL('/internal/bridge',env.BASE_URL);bridgeURL.searchParams.set('grant',grant.token);
@@ -31,7 +35,7 @@ async function collectArticle(env,source,article,dependencies){
   const data=await scrapeDependency(env,article.url,{formats:['markdown','rawHtml',{type:'screenshot',fullPage:true}],onlyMainContent:true,actions:[{type:'executeJavascript',script:`var __name=value=>value; (${captchaPage.toString()})(${JSON.stringify(input)})`}]});
   let page=data.actions?.javascriptReturns?.[0]?.value;if(typeof page==='string')page=JSON.parse(page);
   if(!page?.bodyRecognized||new URL(page.page.url).origin!==new URL(source.url).origin)throw new Error('Article body not recognized');
-  const report={id:article.id,runId,url:article.url,capturedAt:new Date().toISOString(),provider:{statusCode:data.metadata?.statusCode,creditsUsed:data.metadata?.creditsUsed,proxyUsed:data.metadata?.proxyUsed},artifacts:[],errors:[...(page.errors??[])]};
+  const report={id:article.id,runId,url:article.url,captureFence:fence,capturedAt:new Date().toISOString(),provider:{statusCode:data.metadata?.statusCode,creditsUsed:data.metadata?.creditsUsed,proxyUsed:data.metadata?.proxyUsed},artifacts:[],errors:[...(page.errors??[])]};
   const stored=new Map();
   for(const item of page.artifacts??[]){
     if(!/^(attachment-\d+\.(pdf|docx?|xlsx?|pptx?|zip|rar|7z|bin)|snapshot\.html|offline\.html)$/.test(item.name))throw new Error('Unexpected artifact');
@@ -77,14 +81,12 @@ async function collectArticle(env,source,article,dependencies){
     }catch(error){report.errors.push(cleanError(error));}
   }
   const candidates=page.attachmentCandidates??[],downloaded=new Map((page.downloads??[]).map(row=>[row.url,row]));
-  const statements=[];let completeFiles=0;
+  const attachmentRows=[];let completeFiles=0;
   for(const [index,item] of candidates.entries()){
     const row=downloaded.get(item.url),saved=stored.get(row?.saved?.name),ok=!!saved&&row?.originalFile;
     if(ok)completeFiles++;
     const id=`${article.id}-${index+1}`;
-    statements.push(env.DB.prepare(`INSERT INTO attachments(id,article_id,name,original_url,filename,object_key,bytes,content_type,sha256,status,error,role)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(article_id,original_url) DO UPDATE SET name=excluded.name,filename=COALESCE(excluded.filename,attachments.filename),object_key=COALESCE(excluded.object_key,attachments.object_key),bytes=CASE WHEN excluded.object_key IS NULL THEN attachments.bytes ELSE excluded.bytes END,content_type=COALESCE(excluded.content_type,attachments.content_type),sha256=COALESCE(excluded.sha256,attachments.sha256),status=excluded.status,error=excluded.error,role=excluded.role`)
-      .bind(id,article.id,item.name,item.url,saved?.name??null,saved?.key??null,saved?.bytes??0,saved?.contentType??null,saved?.sha256??null,ok?'complete':'failed',ok?null:row?.error??'Attachment limit reached',item.role));
+    attachmentRows.push([id,article.id,item.name,item.url,saved?.name??null,saved?.key??null,saved?.bytes??0,saved?.contentType??null,saved?.sha256??null,ok?'complete':'failed',ok?null:row?.error??'Attachment limit reached',item.role]);
   }
   if(completeFiles<candidates.length)report.errors.push(`${completeFiles}/${candidates.length} attachments saved`);
   const snapshot=stored.get('offline.html');if(!snapshot)report.errors.push('Snapshot missing');
@@ -93,12 +95,25 @@ async function collectArticle(env,source,article,dependencies){
   report.status=status;report.attachmentCount=candidates.length;report.downloadedCount=completeFiles;
   report.downloads=(page.downloads??[]).map(({attempts,...row})=>({...row,attemptCount:attempts?.length??0}));
   report.artifacts.push(await put(env,prefix,'manifest.json',JSON.stringify(report,null,2),'application/json'));
-  statements.push(env.DB.prepare(`UPDATE articles SET captured_at=?,status=?,error=?,body_text=?,excerpt=?,prefix=?,content_hash=?,attachment_count=?,snapshot_key=?,screenshot_key=?,ocr_result_key=NULL,ocr_model=NULL,ocr_updated_at=NULL WHERE id=?`)
-    .bind(report.capturedAt,status,report.errors.length?report.errors.join('; '):null,body,readingExcerpt(body),prefix,hash,candidates.length,snapshot?.key??null,screenshotKey,article.id));
-  await env.DB.batch(statements);
+  const result={id:article.id,status,attachments:candidates.length,downloaded:completeFiles,creditsUsed:report.provider.creditsUsed};
+  // One eligibility cutoff for the entire atomic batch, after all R2 writes. A later
+  // claimant changes the fence; the clock cannot expire between individual writes.
+  const guardArgs=[article.id,fence,Date.now(),taskId,taskId,attemptNo];
+  const statements=attachmentRows.map(row=>env.DB.prepare(`INSERT INTO attachments(id,article_id,name,original_url,filename,object_key,bytes,content_type,sha256,status,error,role)
+    SELECT ?,?,?,?,?,?,?,?,?,?,?,? WHERE ${commitGuard} ON CONFLICT(article_id,original_url) DO UPDATE SET name=excluded.name,filename=COALESCE(excluded.filename,attachments.filename),object_key=COALESCE(excluded.object_key,attachments.object_key),bytes=CASE WHEN excluded.object_key IS NULL THEN attachments.bytes ELSE excluded.bytes END,content_type=COALESCE(excluded.content_type,attachments.content_type),sha256=COALESCE(excluded.sha256,attachments.sha256),status=excluded.status,error=excluded.error,role=excluded.role`)
+    .bind(...row,...guardArgs));
+  if(taskId){
+    statements.push(env.DB.prepare(`UPDATE task_attempts SET result_json=? WHERE task_id=? AND attempt_no=?
+      AND result_json IS NULL AND ${commitGuard}`).bind(JSON.stringify(result),taskId,attemptNo,...guardArgs));
+  }
+  statements.push(env.DB.prepare(`UPDATE articles SET captured_at=?,status=?,error=?,body_text=?,excerpt=?,prefix=?,content_hash=?,attachment_count=?,snapshot_key=?,screenshot_key=?,ocr_result_key=NULL,ocr_model=NULL,ocr_updated_at=NULL,lease_until=0
+    WHERE id=? AND ${commitGuard} RETURNING id`)
+    .bind(report.capturedAt,status,report.errors.length?report.errors.join('; '):null,body,readingExcerpt(body),prefix,hash,candidates.length,snapshot?.key??null,screenshotKey,article.id,...guardArgs));
+  const committed=await env.DB.batch(statements);
+  if(!committed.at(-1).results?.length)throw new Error('Capture fence expired before archive commit');
   if(env.PDF_OCR_ENABLED==='true'){
     try{await enqueueOcrDependency(env,article.id,{publish:true});}
     catch(error){console.error(JSON.stringify({event:'pdf_ocr_enqueue_failed',articleId:article.id,error:cleanError(error)}));}
   }
-  return {id:article.id,status,attachments:candidates.length,downloaded:completeFiles,creditsUsed:report.provider.creditsUsed};
+  return result;
 }

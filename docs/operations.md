@@ -15,7 +15,9 @@
 | Workers AI | binding `AI` |
 | Auth | service binding `AUTH`，服务 `cqu-moe-auth` |
 | Workflow | binding `INGEST`，class `FeedIngest`；binding `PDF_OCR`，class `PdfOcrWorkflow` |
-| Cron | `0 0 * * *`，UTC 00:00 / 北京时间 08:00 |
+| Workflow | binding `CAPTURE`，class `CaptureWorkflow`，执行单篇采集任务 |
+| Queue | producer binding `FEED_JOBS`，队列 `feed-jobs`；consumer 指向 `feed-jobs-dlq` |
+| Cron | `0 0 * * *` 为每日采集；`*/5 * * * *` 在 runtime 开启时恢复任务/outbox |
 
 非敏感变量：
 
@@ -27,6 +29,8 @@
 | `MAX_OCR_PER_DAY` | `100` | D1 全局硬额度，按自然日计数 |
 | `MAX_ARTICLES_PER_RUN` | `40` | 每个来源 Workflow 每次运行最多处理的通知数 |
 | `CRAWL_ENABLED` | `true` | 设为非 `true` 禁止每日和手动启动采集 |
+| `TASK_RUNTIME_ENABLED` | `false` | T03 单篇任务入口默认关闭；POST 需它与 `CRAWL_ENABLED` 同时为 `true`，状态 GET 不受此开关影响 |
+| `MAX_TASK_ATTEMPTS` | `3` | 自动恢复的 429 等暂态失败最大尝试次数；配置会限制在 1–10 |
 | `PDF_OCR_ENABLED` | `true` | 自动入队与每日补偿；不禁止显式 admin 对比任务 |
 | `PDF_OCR_MODEL` | `mistral-ocr-4-1` | 固定文档 OCR 模型 |
 | `MAX_PDF_OCR_PAGES_PER_DAY` | `50` | UTC 每日预留源 PDF 页数 |
@@ -113,6 +117,7 @@ https://<feed-origin>/auth/callback
 - `0002_auth.sql`：删除未使用原型表，创建 OAuth login transaction 和 BFF session 表。
 - `0003_collection_lease.sql`：给通知增加采集 lease，避免手动和每日任务重复扣外部额度。
 - `0004_pdf_ocr.sql`：文档 OCR jobs、calls、原子预算、usage 和阅读派生字段。
+- `0005_task_runtime.sql`：任务、attempt 账本、outbox、文章 capture fence，以及后续 T04/T06 使用的任务 kind 和三个 topic 枚举。
 
 远程迁移：
 
@@ -130,7 +135,44 @@ pnpm exec wrangler d1 migrations apply cqu-feed-mvp --local
 
 `pnpm deploy:ci` 和 `pnpm deploy` 都会先应用远程迁移，再部署 Worker。部署失败时先查看迁移和部署各自的日志；已成功应用的 D1 迁移不会随 Worker 回滚。
 
-## 4. 构建与部署
+## 4. T03 单篇采集任务运行时
+
+T03 使用 `tasks`、`task_attempts` 和 `outbox` 保存单篇采集意图、每次 Workflow 交接和启动消息。Queue payload 只包含 `v/type/outboxId/taskId/attempt`；来源与文章 URL 始终从 D1 权威上下文读取，不接受消息或管理请求中的任意 URL。
+
+上线前置条件：
+
+1. 先在目标 D1 应用 `0005_task_runtime.sql`，确认 `tasks/task_attempts/outbox` 和 `articles.capture_fence` 存在。
+2. 显式创建 `feed-jobs` 与 `feed-jobs-dlq`，不要复用或改名历史 `rss-*` 资源。
+3. 确认 Worker 具有 `FEED_JOBS` producer/consumer 与 `CAPTURE` Workflow binding。
+4. 显式把 `TASK_RUNTIME_ENABLED` 与 `CRAWL_ENABLED` 配置为 `true` 后再部署。默认 `TASK_RUNTIME_ENABLED=false`，保证既有 MVP 行为不受新管理提交入口影响。
+
+管理接口均要求 `Authorization: Bearer <ADMIN_TOKEN>`，与阅读端 `feed.access` 会话独立：
+
+| 方法与路径 | 作用 |
+| --- | --- |
+| `POST /internal/capture-tasks` | 提交 `{articleId,requestId}`；同一 requestId 幂等返回同一 taskId |
+| `GET /internal/capture-tasks` | 查看最近任务列表 |
+| `GET /internal/capture-tasks/:taskId` | 查看任务、当前 attempt 与文章状态 |
+| `POST /internal/capture-tasks/recover` | 手动执行与定时恢复相同的 outbox/attempt 恢复规则 |
+
+浏览器管理入口为 `/admin/tasks`，也可从「采集状态」进入。凭据只在当前页面内存中持有；退出或离开页面后重新输入，不写 URL、localStorage 或日志。提交结果不明时，重试复用原 requestId；明确成功后再次提交代表新的采集意图。
+
+任务状态含义：
+
+- `queued`：任务和启动 outbox 已持久化，等待 Queue。
+- `starting`/`running`：指定 Workflow instance 已接手或采集步骤已开始。
+- `succeeded`：这次采集已结束并保存结果；文章可能仍为 partial，不能据此认定版本已完整或允许推送。
+- `deferred`：429、采集占用等暂态原因等待恢复。
+- `blocked`：402/预算耗尽、尝试上限或启动投递耗尽，需要人工处理外部条件。
+- `failed`：采集或 Workflow 业务失败。
+
+恢复规则由每 5 分钟 cron 和手动 recover 共用：数据库已提交但 Queue 暂不可用时，outbox 保留并在到期后重发；Queue 已接收但 sent 收据未提交时允许重复发送，消费者按持久任务身份幂等。create 结果未知或记账失败时使用同一 `task-<taskId>-a<attempt>` 实例 ID 查询，不创建随机新实例。只有确认旧实例 terminal 后，到期 deferred 才递增 attempt 并原子写入新 outbox。
+
+Firecrawl 429 保存为 `rate_limited` deferred，默认最多 3 次 attempt；402、预算或额度耗尽保存为 `quota_exhausted` blocked，不按分钟级自动重试。`Archive.capture` 抢占失败返回 skipped 时任务只能延期，不能记成功；这可能表示其他有效采集持有 lease。R2 临时产物允许留下，attachment、article 更新和 task attempt receipt 必须由同一 fence、attempt 和提交时间守卫下的 D1 原子批发布；旧 attempt 或过期 fence 不能污染权威数据。
+
+本地测试使用真实 Miniflare D1/R2/Queue、真实业务采集代码、Firecrawl 外部替身和可控 Workflow 执行适配器。Miniflare Queue broker 是内存态，本地投递和恢复通过不能证明 Cloudflare 队列留存、DLQ、实际 Workflow 持久步骤或生产账号额度行为；这些属于后续隔离云验收。
+
+## 5. 构建与部署
 
 日常部署通过 push 到 main 触发 Cloudflare Git Connector；GitHub Actions 只运行检查。构建命令、部署命令和环境配置见 [ci-cd.md](ci-cd.md)。Cloudflare 执行 `pnpm run ci` 后，再执行 `pnpm deploy:ci`。
 
@@ -160,7 +202,7 @@ node scripts/manage.mjs auth-check
 
 不要把真实 token 替换进文档或提交记录。真实账号登录、搜索和存档验证见 `acceptance.md`。权益撤销通过隔离集成测试验证，不会为测试撤销生产账号权益。
 
-## 5. 采集 Workflow
+## 6. 采集 Workflow
 
 Cron 每天采集的 5 个来源来自 `worker/sources.json`：
 
@@ -216,7 +258,7 @@ articles/{articleId}/{runId}/
 
 R2 桶不公共开放。所有读取都由 Worker 查 D1 后代理，响应为 `private, no-store`，附件支持 `Range`、`HEAD`、ETag/If-Range 和 416。
 
-## 6. 搜索与索引
+## 7. 搜索与索引
 
 D1 FTS5 表：
 
@@ -248,7 +290,7 @@ CREATE VIRTUAL TABLE article_search USING fts5(
 
 因此“附件已保存”不代表“附件全文可搜索”。如果正文型 PDF 转换失败，文章会保留原 PDF 和错误信息，状态为 partial，正文搜索不包含该 PDF 文本。
 
-## 7. 管理命令
+## 8. 管理命令
 
 现有脚本：
 
@@ -269,12 +311,13 @@ node scripts/manage.mjs auth-check
 - `status`：最近 20 个 run、按来源/状态聚合的文章数、最近 20 条每日用量。
 - `run`：手动创建 5 个来源 Workflow；仍受 `CRAWL_ENABLED`、lease、attempts 和全局额度限制。
 - `auth-check`：验证 OAuth client 与 Auth introspection 通路。
+- `capture-tasks`：T03 管理 HTTP 入口见上一节；单篇恢复使用同一个 `recover` 接口，不重跑整站。
 
 优先通过 `FEED_ADMIN_TOKEN` 环境变量传值。未设置该变量时，脚本会尝试读取 `.private/production-secrets.json`；不要把该文件提交、打包或输出到日志。
 
 首次补抓快照记录在 `acceptance.md`。后续运行以 `/internal/status` 和 D1/R2 读回为准。`complete` 仅表示已发现候选的存档完整，不承诺发现站点所有历史栏目或为扫描文件完成 OCR。
 
-## 8. 额度、成本与失效行为
+## 9. 额度、成本与失效行为
 
 | 边界 | 当前值 | 失效行为 |
 | --- | --- | --- |
@@ -296,7 +339,7 @@ node scripts/manage.mjs auth-check
 
 Workers AI、R2 PUT、R2 存储、D1 行数和 Workers CPU 都会产生费用或免费额度消耗。D1 的 Firecrawl/OCR/上传额度不约束快照、正文、截图、manifest 和小附件写入，也不约束用户读取流量。扩大站点、历史窗口或放开附件前必须重新估算并调整这些上限。
 
-## 9. 安全模型
+## 10. 安全模型
 
 - SPA HTML 使用 CSP 限制脚本、连接、frame、object、base 和 form，主题初始化脚本以 SHA-256 hash 允许。
 - 所有 `/api/*` 内容出口先经过 Feed BFF session 和 Auth introspection。
@@ -309,7 +352,7 @@ Workers AI、R2 PUT、R2 存储、D1 行数和 Workers CPU 都会产生费用或
 - 快照内附件链接改写为 Feed 受保护下载路由，并移除源站 `onclick`/`target`。
 - Worker 日志会清理 URL 和 Bearer token，并截断错误文本。
 
-## 10. 验证与派生文本维护
+## 11. 验证与派生文本维护
 
 验收记录见 [acceptance.md](acceptance.md)，区分本地测试、真实账号业务验证和云端对象完整性。
 
@@ -326,7 +369,7 @@ node scripts/clean-reading.mjs --remote --apply
 
 PDF.js 阅读页为 `/reader/{articleId}/{filename}`，仍先验证 Feed 会话，再从受保护文件路由读取 R2。React-PDF/PDF.js 版本严格配对；构建脚本 `copy-pdf-assets.mjs` 复制 CMaps、字体、WASM 和许可证到静态资源，不依赖 CDN。阅读器单独懒加载；只有该页面的 CSP 允许同源 frame-ancestors 和 wasm-unsafe-eval，脚本字符串 eval 仍禁用。
 
-## 11. 文档 OCR 运维
+## 12. 文档 OCR 运维
 
 对已归档样片执行：
 
