@@ -522,3 +522,11 @@ node scripts/compare-ocr.mjs publish mistral-ocr-4-1
 摘要发送复用 T11 的不可变快照、原子 delivery 占用、退信检查、结果不明对账及有界恢复。服务关闭时不准备新摘要。管理员在邮件状态列表看到类型“每日摘要”，用户在订阅活动中查看相同投递事实。
 
 以上是本地实现和配置说明。真实 Queue、供应商与指定邮箱的完整验收仍在 T17；正式开启按 T18 上线方案审批。
+
+### 已存档通知的分级复查
+
+`GET /internal/rechecks` 返回就绪、到期和复查任务计数；`POST /internal/rechecks` 可提交一次有界调度（`limit` 默认20，范围1–100）。五分钟 Cron 复用同一调度器；新增任务必须同时开启 `CRAWL_ENABLED`、`TASK_RUNTIME_ENABLED` 和 `ARCHIVE_VERSIONS_ENABLED`。暂停不删除已有存档和已发生的任务事实。
+
+默认按冻结的源站发布日期区分30天内近期通知与旧通知，日期不可用才回退观察时间；近期每7天、旧通知每30天复查。三个秒级参数分别为 `RECHECK_RECENT_AFTER_SEC`、`RECHECK_RECENT_INTERVAL_SEC`、`RECHECK_OLD_INTERVAL_SEC`。这些默认值不是已批准的生产容量或费用参数，上线前仍需按实测预算确认。
+
+共享通知优先选原来源，否则选按ID排序的有效关联来源，要求站点、栏目、验证状态、文章origin和路径均相容。任务与outbox提交时再次校验来源配置版本和启用状态；只有对应任务已持久化才推进文章的下次复查时间。`0017_archive_recheck.sql` 的独立扫描游标记录批次位置，扫到末尾后循环；路径已不相容的旧通知保持到期，但不会长期阻挡后面的有效记录。游标与任务在同一D1批次提交，故障重试继续使用相同业务身份。

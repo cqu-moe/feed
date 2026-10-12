@@ -78,6 +78,7 @@ async function fixture({
   leaseUntil=0,
   runtimeEnabled=true,
   crawlEnabled=true,
+  recheckRuntime=false,
 }={}){
   const bundle=await build({
     stdin:{
@@ -277,6 +278,7 @@ async function fixture({
       CRAWL_ENABLED:String(crawlEnabled),
       PDF_OCR_ENABLED:'false',
       TASK_RUNTIME_ENABLED:String(runtimeEnabled),
+      ...(recheckRuntime?{ARCHIVE_VERSIONS_ENABLED:'true'}:{}),
     },
     d1Databases:['DB'],
     r2Buckets:['ARCHIVE'],
@@ -284,7 +286,9 @@ async function fixture({
     queueConsumers:{'feed-jobs':{maxBatchSize:1,maxRetries:3,deadLetterQueue:'feed-jobs-dlq'}},
   }));
   const db=await mf.getD1Database('DB'),bucket=await mf.getR2Bucket('ARCHIVE');
-  for(const name of ['0001_feed.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0018_outbox_receipts.sql']){
+  for(const name of ['0001_feed.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql',
+    ...(recheckRuntime?['0007_archive_versions.sql','0008_content_events.sql','0017_archive_recheck.sql']:[]),
+    '0018_outbox_receipts.sql']){
     await applyMigration(db,await readFile(`migrations/${name}`,'utf8'));
   }
   await db.prepare("INSERT INTO sources(id,name,url) VALUES ('jwc','教务处','https://jwc.cqu.edu.cn/')").run();
@@ -829,6 +833,50 @@ test('provider Retry-After beyond the local backoff cap remains the earliest ret
     assert.equal((await task(db,created.task.id)).attemptNo,1);
     assert.equal((await scrapes(mf)).calls.length,1);
   }finally{await mf.dispose();}
+});
+
+test('a scheduled recheck launches the existing CaptureWorkflow and records an immutable replay',async()=>{
+  const {mf,db}=await fixture({recheckRuntime:true});
+  try{
+    const create=await mf.dispatchFetch('https://feed.test/internal/capture-tasks',{
+      method:'POST',
+      headers:{Authorization:'Bearer test-admin-token','Content-Type':'application/json'},
+      body:JSON.stringify({articleId,requestId:'initial-before-recheck'}),
+    });
+    if(create.status!==202)assert.fail(await create.text());
+    const created=await create.json();
+    await waitFor(async()=>assert.equal((await task(db,created.task.id)).state,'succeeded'));
+    const revision=await db.prepare('SELECT id,raw_fingerprint FROM article_revisions WHERE capture_task_id=?')
+      .bind(created.task.id).first();
+    assert.ok(revision);
+    await db.batch([
+      db.prepare(`UPDATE article_revisions SET state='ready',ready_at=? WHERE id=? AND state='assembling'`)
+        .bind(Date.now(),revision.id),
+      db.prepare(`UPDATE articles SET latest_ready_revision_id=?,latest_observed_revision_id=?,next_recheck_at=0 WHERE id=?`)
+        .bind(revision.id,revision.id,articleId),
+    ]);
+
+    const scheduled=await mf.dispatchFetch('https://feed.test/internal/rechecks',{
+      method:'POST',
+      headers:{Authorization:'Bearer test-admin-token','Content-Type':'application/json'},
+      body:JSON.stringify({limit:1}),
+    });
+    if(scheduled.status!==202)assert.fail(await scheduled.text());
+    const recheck=await scheduled.json();
+    assert.equal(recheck.scheduled.length,1);
+    await waitFor(async()=>assert.equal((await task(db,recheck.scheduled[0])).state,'succeeded'));
+    const runtimeTask=await db.prepare(`SELECT kind,business_key FROM tasks WHERE id=?`).bind(recheck.scheduled[0]).first();
+    assert.equal(runtimeTask.kind,'recheck');
+    assert.match(runtimeTask.business_key,new RegExp(`recheck:${articleId}:0$`));
+    const attempt=await db.prepare(`SELECT workflow_instance_id,state,result_json FROM task_attempts WHERE task_id=?`)
+      .bind(recheck.scheduled[0]).first();
+    assert.equal(attempt.workflow_instance_id,`task-${recheck.scheduled[0]}-a1`);
+    assert.equal(attempt.state,'succeeded');
+    assert.equal(JSON.parse(attempt.result_json).outcome,'unchanged');
+    assert.equal((await scrapes(mf)).calls.length,2);
+  }finally{
+    await mf.dispose();
+  }
 });
 
 async function task(db,id){

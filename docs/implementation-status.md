@@ -26,11 +26,12 @@
 | T16 / #17 | 本地验收完成 | 实现 `5cb75fc`、证据保留修复 `c83852b`，集成 `e345f94`；与 T09 合并的 86 项测试/build/design/Worker dry-run 通过，独立增量审查通过。覆盖不可变导入、OCR 身份/页数、缺项恢复、逐项比对、中文搜索、权限和切读回滚；未运行生产迁移 |
 | T11 / #12 | 本地验收完成 | 签名实现 `0e16f70`，签名集成 `e0e1a06`；119 项测试/build/design/Worker dry-run 通过，独立聚焦22/22、竞态回归2/2通过。不可变邮件、Resend Adapter、签名回执、结果不明对账、退信提交屏障及有界恢复已验收；用户/管理页面双主题响应式已验收 |
 | T12 / #13 | 本地验收完成 | `06e1594`，独立复审 PASS 后签名合并 `35abb3f`；127 tests/build/design/dry-run 通过，实际 Worker 摘要及双主题移动端 UI 验收通过 |
-| T13–T15、T17–T18 | 实现或等待依赖 | T13–T15 已实现，正在独立审查与修复；未声称云端或生产验收完成 |
+| T13 / #14 | 本地验收完成 | 签名候选 `82e0cdc`，独立复审 PASS 后签名合并 `c34a600`；134 tests/build/design/dry-run 通过，独立 6 项回归及 7 项游标、并发与控制探针通过。全部存档分级复查、暂停与配置屏障、共享栏目及有界扫描公平性已验收 |
+| T14–T15、T17–T18 | 实现或等待依赖 | T14–T15 已实现，正在独立审查与修复；未声称云端或生产验收完成 |
 
 ## 会话中的规格调整
 
-已确认的远端检查：[Feed CI](https://github.com/cqu-moe/feed/actions/runs/38246894256) 对应 T09/T16 记录提交 `fb2d1f5`；[Auth CI](https://github.com/cqu-moe/auth/actions/runs/38204211719) 对应 `f66e2dd`。T10 远端检查 [Feed CI](https://github.com/cqu-moe/feed/actions/runs/38256233596) 对应 `90b0002` 已成功；T11 的远端检查须按新提交单独确认；以上均不代表生产部署。
+已确认的远端检查：[Feed CI](https://github.com/cqu-moe/feed/actions/runs/38246894256) 对应 T09/T16 记录提交 `fb2d1f5`；[Auth CI](https://github.com/cqu-moe/auth/actions/runs/38204211719) 对应 `f66e2dd`。T10 [Feed CI](https://github.com/cqu-moe/feed/actions/runs/38256233596) 对应 `90b0002`、T11 [Feed CI](https://github.com/cqu-moe/feed/actions/runs/38264557197) 对应 `f72773f`、T12 [Feed CI](https://github.com/cqu-moe/feed/actions/runs/38270907608) 对应 `260f803` 均已成功；T13 的远端检查须按新提交单独确认。以上均不代表生产部署。
 
 - 2026-10-12：用户确认私有 RSS 链接可以持续展示。订阅所有者登录后可随时查看和复制；以加密保存凭证支持取回，保留 hash 校验及独立轮换/撤销。此决定替换旧的一次性展示约定，已同步 T07/T08 规格。
 
