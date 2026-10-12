@@ -95,6 +95,31 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
     return {tasks:committed.filter((_,index)=>index%2===0).reduce((total,result)=>total+(result.meta?.changes??0),0),messages};
   }
 
+  async function reconcileSourceAssociation(input){
+    const rows=await env.DB.prepare(`SELECT e.id,COALESCE((SELECT MAX(generation) FROM event_source_corrections
+        WHERE event_id=e.id AND source_id=?),0) AS generation
+      FROM content_events e WHERE e.article_id=? AND e.id>? ORDER BY e.id LIMIT 51`)
+      .bind(input.sourceId,input.articleId,input.afterEventId).all();
+    const page=rows.results.slice(0,50),statements=[];
+    for(const event of page){
+      statements.push(env.DB.prepare(`INSERT INTO event_sources(event_id,source_id,article_source_first_seen_at,
+          discovery_class,published_at,published_day,date_precision,source_timezone)
+        SELECT ?,source_id,first_seen_at,discovery_class,published_at,published_day,date_precision,source_timezone
+        FROM article_sources WHERE article_id=? AND source_id=?
+        ON CONFLICT(event_id,source_id) DO NOTHING`).bind(event.id,input.articleId,input.sourceId));
+      const matching=await matchTaskStatements({eventId:event.id,sourceId:input.sourceId,generation:event.generation});
+      statements.push(...matching.statements);
+    }
+    if(rows.results.length>50){
+      const continuation=await articleSourceAssociationStatements(env,{
+        ...input,afterEventId:page.at(-1).id,timestamp:timestamp(),
+      });
+      statements.push(...continuation.statements);
+    }
+    if(statements.length)await env.DB.batch(statements);
+    return {associated:page.length,hasNext:rows.results.length>50};
+  }
+
   async function verifyDate(eventId,command){
     if(!idPattern.test(eventId??''))throw validationError('Invalid content event id',400);
     if(!command||typeof command!=='object'||Array.isArray(command))throw validationError('Invalid date verification command',400);
@@ -203,7 +228,7 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
     const context=JSON.parse(task.payload_json);
     if(context.eventId!==input.eventId||context.sourceId!==input.sourceId||context.generation!==input.generation)
       throw validationError('Match message does not match its task',409);
-    const before=checkpoint(task),pageSize=boundedInteger(env.NOTIFICATION_MATCH_PAGE_SIZE,50,1,100);
+    const before=checkpoint(task),pageSize=boundedInteger(env.NOTIFICATION_MATCH_PAGE_SIZE,50,1,50);
     if(before.page!==input.page)return {state:'superseded',page:before.page,hasNext:before.hasNext};
     const current=await eventWithSources(input.eventId);
     if(!current)throw validationError('Content event not found',404);
@@ -215,8 +240,10 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
     }
     const taskGate=`EXISTS(SELECT 1 FROM tasks current WHERE current.id=? AND current.kind='match-event'
       AND current.state='queued' AND current.checkpoint_json IS ?)
-      AND COALESCE((SELECT MAX(generation) FROM event_source_corrections WHERE event_id=? AND source_id=?),0)=?`;
-    const taskArgs=[task.id,task.checkpoint_json,input.eventId,input.sourceId,input.generation];
+      AND COALESCE((SELECT MAX(generation) FROM event_source_corrections WHERE event_id=? AND source_id=?),0)=?
+      AND (SELECT COUNT(*) FROM event_source_corrections WHERE event_id=?)=?`;
+    const taskArgs=[task.id,task.checkpoint_json,input.eventId,input.sourceId,input.generation,input.eventId,
+      current.sources.reduce((sum,item)=>sum+(item.evidence.correctionGeneration??0),0)];
 
     const targets=await env.DB.prepare(`SELECT t.id AS target_id,t.effective_from,s.id AS subscription_id,
         s.owner_sub,s.name,s.requested_enabled,s.priority,s.email_mode,s.created_at,s.deleted_at
@@ -230,20 +257,15 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
       const at=timestamp(),checkpointJson=JSON.stringify({...before,page:before.page,hasNext:false});
       await env.DB.batch([
         env.DB.prepare(`UPDATE tasks SET state='succeeded',checkpoint_json=?,updated_at=?
-          WHERE id=? AND ${taskGate}`)
-          .bind(checkpointJson,at,task.id,...taskArgs),
+          WHERE id=? AND state='queued' AND checkpoint_json IS ?`)
+          .bind(checkpointJson,at,task.id,task.checkpoint_json),
       ]);
       await cancelSupersededMatch(task.id,input);
       return {state:'succeeded',page:before.page,hasNext:false};
     }
 
     const runtimes=await subscriptionRuntimes(page.map(row=>row.owner_sub));
-    const decisions=page.map(row=>{
-      const result=decide(current.event,source.evidence,row);
-      const runtime=runtimes.get(row.subscription_id);
-      const suppressionReason=runtime?.emailStatus==='active'?null:runtime?.emailStatus??'auth_unavailable';
-      return {...result,suppressionReason,mode:result.eligible&&suppressionReason?'daily_digest':result.mode};
-    });
+    const decisions=page.map(row=>decide(current.event,source.evidence,row));
     const hasNext=targets.results.length>pageSize;
     const page_number=before.page+1;
     const next={lastTargetId:page.at(-1).target_id,page:page_number,hasNext};
@@ -258,27 +280,27 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
           eligibility_kind=excluded.eligibility_kind,reason=excluded.reason,matched_at=excluded.matched_at`)
         .bind(input.eventId,row.subscription_id,row.target_id,row.owner_sub,decision.kind,decision.reason,at,...taskArgs));
     }
-    const owners=new Map();
-    for(const [index,row] of page.entries()){
-      const decision=decisions[index];
-      if(!decision.eligible)continue;
-      const previous=owners.get(row.owner_sub);
-      if(!previous||(previous.suppressionReason&&!decision.suppressionReason)
-        ||(!decision.suppressionReason&&decision.mode==='immediate'))owners.set(row.owner_sub,decision);
-    }
+    const owners=await ownerCandidates(current,[...new Set(page.map(row=>row.owner_sub))],runtimes);
     for(const [ownerSub,candidate] of owners){
+      if(!candidate.eligible){
+        statements.push(env.DB.prepare(`UPDATE user_deliveries SET suppression_reason=?,updated_at=?
+          WHERE owner_sub=? AND event_id=? AND state='pending' AND ${taskGate}`)
+          .bind(candidate.suppressionReason,at,ownerSub,input.eventId,...taskArgs));
+        continue;
+      }
       const deliveryId=(await sha(`delivery:${ownerSub}:${input.eventId}`)).slice(0,24);
-      statements.push(env.DB.prepare(`INSERT INTO user_deliveries(id,owner_sub,event_id,state,delivery_kind,available_at,suppression_reason,created_at,updated_at)
-        SELECT ?,?,?,'pending',?,?,?,?,? WHERE ${taskGate}
+      statements.push(env.DB.prepare(`INSERT INTO user_deliveries(id,owner_sub,event_id,state,delivery_kind,available_at,suppression_reason,backlog_at,created_at,updated_at)
+        SELECT ?,?,?,'pending',?,?,?,?,?,? WHERE ${taskGate}
         ON CONFLICT(owner_sub,event_id) DO UPDATE SET
-          delivery_kind=CASE WHEN user_deliveries.state='pending' AND excluded.suppression_reason IS NULL
-            THEN CASE WHEN user_deliveries.suppression_reason IS NULL AND user_deliveries.delivery_kind='immediate'
-              THEN 'immediate' ELSE excluded.delivery_kind END
+          delivery_kind=CASE WHEN user_deliveries.state='pending'
+            THEN CASE WHEN COALESCE(user_deliveries.backlog_at,excluded.backlog_at) IS NOT NULL
+              THEN 'daily_digest' ELSE excluded.delivery_kind END
             ELSE user_deliveries.delivery_kind END,
-          suppression_reason=CASE WHEN user_deliveries.state='pending' AND excluded.suppression_reason IS NULL
-            THEN NULL ELSE user_deliveries.suppression_reason END,
+          suppression_reason=CASE WHEN user_deliveries.state='pending' THEN excluded.suppression_reason ELSE user_deliveries.suppression_reason END,
+          backlog_at=COALESCE(user_deliveries.backlog_at,excluded.backlog_at),
           updated_at=excluded.updated_at`)
-        .bind(deliveryId,ownerSub,input.eventId,candidate.mode,current.event.readyAt,candidate.suppressionReason,at,at,...taskArgs));
+        .bind(deliveryId,ownerSub,input.eventId,candidate.mode,current.event.readyAt,candidate.suppressionReason,
+          candidate.suppressionReason?at:null,at,at,...taskArgs));
     }
     if(hasNext){
       const continuation=await matchTaskStatements({eventId:input.eventId,sourceId:input.sourceId,
@@ -296,9 +318,37 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
     const committed=await env.DB.batch(statements);
     if(!committed.at(-1).meta?.changes){
       await cancelSupersededMatch(task.id,input);
+      const latest=await env.DB.prepare('SELECT state,checkpoint_json FROM tasks WHERE id=?').bind(task.id).first();
+      if(latest.state==='queued'&&latest.checkpoint_json===task.checkpoint_json)
+        throw validationError('Source evidence changed during matching; retry',409);
       return {state:'superseded',page:before.page,hasNext:before.hasNext};
     }
     return {state:hasNext?'queued':'succeeded',page:page_number,hasNext};
+  }
+
+  async function ownerCandidates(current,owners,runtimes){
+    const rows=await env.DB.prepare(`SELECT s.owner_sub,s.id AS subscription_id,s.email_mode,t.effective_from,t.source_id
+      FROM subscriptions s JOIN subscription_sources t ON t.subscription_id=s.id AND t.removed_at IS NULL
+      JOIN event_sources es ON es.source_id=t.source_id AND es.event_id=?
+      WHERE s.deleted_at IS NULL AND s.owner_sub IN (${owners.map(()=>'?').join(',')})`)
+      .bind(current.event.id,...owners).all();
+    const result=new Map(owners.map(owner=>[owner,{eligible:false,suppressionReason:'no_eligible_match'}]));
+    const sources=new Map(current.sources.map(source=>[source.source_id,source.evidence]));
+    for(const row of rows.results){
+      if(!sources.has(row.source_id))throw validationError('Source association changed during matching; retry',409);
+      const decision=decide(current.event,sources.get(row.source_id),row);
+      const previous=result.get(row.owner_sub);
+      if(!decision.eligible){
+        if(!previous.eligible&&decision.kind==='pending')previous.suppressionReason='date_unverified';
+        continue;
+      }
+      const runtime=runtimes.get(row.subscription_id);
+      const suppressionReason=runtime?.emailStatus==='active'?null:runtime?.emailStatus??'auth_unavailable';
+      const candidate={...decision,suppressionReason,mode:suppressionReason?'daily_digest':decision.mode};
+      if(!previous.eligible||(previous.suppressionReason&&!suppressionReason)
+        ||(!suppressionReason&&candidate.mode==='immediate'))result.set(row.owner_sub,candidate);
+    }
+    return result;
   }
 
   async function cancelSupersededMatch(taskId,input){
@@ -465,7 +515,8 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
         available_at AS availableAt,suppression_reason AS suppressionReason,created_at AS createdAt,updated_at AS updatedAt
       FROM user_deliveries WHERE event_id=? ORDER BY owner_sub`).bind(eventId).all();
     const tasks=await env.DB.prepare(`SELECT id,state,checkpoint_json AS checkpoint,payload_json AS payload,created_at AS createdAt,updated_at AS updatedAt
-      FROM tasks WHERE kind='match-event' AND article_id=? ORDER BY created_at,id`).bind(event.articleId).all();
+      FROM tasks WHERE kind='match-event' AND article_id=? AND json_extract(payload_json,'$.eventId')=?
+      ORDER BY created_at,id`).bind(event.articleId,eventId).all();
     const corrections=await env.DB.prepare(`SELECT event_id AS eventId,source_id AS sourceId,generation,
         evidence_object_hash AS evidenceObjectHash,verified_by AS verifiedBy,verified_at AS verifiedAt
       FROM event_source_corrections WHERE event_id=? ORDER BY source_id,generation`).bind(eventId).all();
@@ -500,52 +551,22 @@ export function createNotifications(env,{now=()=>Date.now()}={}){
   }
 
   return {
-    enqueueEvent,processMatchTask,verifyDate,readDateEvidence,eventStatus,readSubscription,
+    enqueueEvent,reconcileSourceAssociation,processMatchTask,verifyDate,readDateEvidence,eventStatus,readSubscription,
   };
 }
 
-export async function articleSourceAssociationStatements(env,{articleId,sourceId,timestamp,source:providedSource}){
-  if(!idPattern.test(articleId??'')||!/^[A-Za-z0-9_-]{1,64}$/.test(sourceId??'')
-    ||!Number.isSafeInteger(timestamp))return {statements:[],events:0};
-  let source=providedSource;
-  if(!source)source=await env.DB.prepare(`SELECT first_seen_at,last_seen_at,discovery_class,
-      published_at,published_day,date_precision,source_timezone
-    FROM article_sources WHERE article_id=? AND source_id=?`).bind(articleId,sourceId).first();
-  if(!source)return {statements:[],events:0};
-  const events=await env.DB.prepare(`SELECT id,article_id,(
-      SELECT MAX(generation) FROM event_source_corrections c
-      WHERE c.event_id=e.id AND c.source_id=?
-    ) AS generation
-    FROM content_events e WHERE article_id=?`).bind(sourceId,articleId).all();
-  const statements=[];
-  for(const event of events.results){
-    const generation=event.generation??0;
-    statements.push(env.DB.prepare(`INSERT INTO event_sources(event_id,source_id,article_source_first_seen_at,
-        discovery_class,published_at,published_day,date_precision,source_timezone)
-      SELECT ?,?,?,?,?,?,?,?
-      WHERE EXISTS(SELECT 1 FROM article_sources WHERE article_id=? AND source_id=?)
-        AND EXISTS(SELECT 1 FROM content_events WHERE id=?)
-      ON CONFLICT(event_id,source_id) DO NOTHING`)
-      .bind(event.id,sourceId,source.first_seen_at,source.discovery_class,source.published_at,
-        source.published_day,source.date_precision,source.source_timezone,articleId,sourceId,event.id));
-    const businessKey=`match:${event.id}:${sourceId}:g${generation}`;
-    const taskId=(await sha(businessKey)).slice(0,24);
-    const dedupeKey=`match-source:${taskId}:p0`;
-    const outboxId=(await sha(`outbox:${dedupeKey}`)).slice(0,24);
-    const message={v:1,type:'match-source',outboxId,taskId,eventId:event.id,sourceId,generation,page:0};
-    statements.push(env.DB.prepare(`INSERT INTO tasks(id,kind,business_key,source_id,article_id,payload_json,state,priority,due_at,attempt_no,created_at,updated_at)
-      SELECT ?,'match-event',?,?,?,?,'queued',70,?,1,?,?
-      WHERE EXISTS(SELECT 1 FROM event_sources WHERE event_id=? AND source_id=?)
-      ON CONFLICT(business_key) DO NOTHING`)
-      .bind(taskId,businessKey,sourceId,event.article_id,JSON.stringify({eventId:event.id,sourceId,generation}),
-        timestamp,timestamp,timestamp,event.id,sourceId));
-    statements.push(env.DB.prepare(`INSERT INTO outbox(id,topic,dedupe_key,payload_json,available_at,created_at,updated_at)
-      SELECT ?,'feed-events',?,?,?,?,?
-      WHERE EXISTS(SELECT 1 FROM tasks WHERE id=? AND state IN ('queued','running'))
-      ON CONFLICT(topic,dedupe_key) DO NOTHING`)
-      .bind(outboxId,dedupeKey,JSON.stringify(message),timestamp,timestamp,timestamp,taskId));
-  }
-  return {statements,events:events.results.length};
+export async function articleSourceAssociationStatements(env,{articleId,sourceId,timestamp,discoveryTaskId,afterEventId='',taskGuard={sql:'1',args:[]}}){
+  if(!idPattern.test(articleId??'')||!idPattern.test(discoveryTaskId??'')
+    ||!/^[A-Za-z0-9_-]{1,64}$/.test(sourceId??'')||!Number.isSafeInteger(timestamp)
+    ||afterEventId!==''&&!idPattern.test(afterEventId))throw validationError('Invalid source association handoff',400);
+  const dedupeKey=`association:${articleId}:${sourceId}:${discoveryTaskId}:${afterEventId}`;
+  const outboxId=(await sha(`outbox:${dedupeKey}`)).slice(0,24);
+  const message={v:1,type:'source-associated',outboxId,articleId,sourceId,discoveryTaskId,afterEventId};
+  return {statements:[env.DB.prepare(`INSERT INTO outbox(id,topic,dedupe_key,payload_json,available_at,created_at,updated_at)
+    SELECT ?,'feed-events',?,?,?,?,? WHERE ${taskGuard.sql}
+      AND EXISTS(SELECT 1 FROM article_sources WHERE article_id=? AND source_id=?)
+    ON CONFLICT(topic,dedupe_key) DO NOTHING`)
+    .bind(outboxId,dedupeKey,JSON.stringify(message),timestamp,timestamp,timestamp,...taskGuard.args,articleId,sourceId)]};
 }
 
 function parseCorrectedDates(value){

@@ -716,6 +716,10 @@ export async function subscriptionsRoute(request,env,state){
   if(request.method==='GET'&&detail){
     const subscription=await createNotifications(env).readSubscription(detail[1],state.user.id);
     if(!subscription||subscription.ownerSub!==state.user.id)return json({error:'订阅不存在'},404);
+    if(!state.entitled||subscription.effectiveStatus==='access_revoked'){
+      subscription.effectiveStatus='access_revoked';
+      subscription.notificationMatches=[];
+    }
     return json({subscription});
   }
   const create=request.method==='POST'&&url.pathname==='/api/subscriptions';

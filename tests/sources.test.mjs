@@ -82,7 +82,7 @@ const firecrawlPlugin={
   },
 };
 
-async function fixture({versioned=false,notifications=false}={}){
+async function fixture({versioned=false,notifications=false,discoveryPages=2}={}){
   const bundle=await build({
     stdin:{
       contents:`
@@ -96,7 +96,6 @@ async function fixture({versioned=false,notifications=false}={}){
 
         globalThis.SOURCES_WORKFLOW_CALLS=[];
         globalThis.SOURCES_WORKFLOW_MODE='run';
-        globalThis.SOURCES_ACTIVE_WORKFLOWS=[];
         const step={async do(_name,_options,fn){return (typeof _options==='function'?_options:fn)();},async sleep(){}};
         const instances=new Map();
         let clockOffset=0;
@@ -118,7 +117,6 @@ async function fixture({versioned=false,notifications=false}={}){
             const Workflow=task?.kind==='discover'?DiscoveryWorkflow:CaptureWorkflow;
             const execution=new Workflow(globalThis.SOURCES_ENV).run({instanceId:id,payload:params},step);
             instances.set(id,{status:'running',error:null,execution});
-            globalThis.SOURCES_ACTIVE_WORKFLOWS.push(execution);
             execution.then(()=>{instances.get(id).status='complete';})
               .catch(error=>{instances.get(id).status='errored';instances.get(id).error=error;});
             return instance(id);
@@ -131,9 +129,20 @@ async function fixture({versioned=false,notifications=false}={}){
         function prepareEnv(rawEnv){
           const actualQueue=rawEnv.FEED_JOBS;
           const database=rawEnv.DB;
-          const env={...rawEnv,DB:{prepare:sql=>database.prepare(sql),async batch(statements){
+          const statementInfo=new WeakMap();
+          const wrap=(statement,sql,args=[])=>{
+            const wrapped={bind(...values){return wrap(statement.bind(...values),sql,values);},
+              first(...values){return statement.first(...values);},all(...values){return statement.all(...values);},
+              run(...values){return statement.run(...values);}};
+            statementInfo.set(wrapped,{statement,sql,args});return wrapped;
+          };
+          const env={...rawEnv,DB:{prepare:sql=>wrap(database.prepare(sql),sql),async batch(statements){
+            const entries=statements.map(statement=>statementInfo.get(statement));
+            const association=entries.find(entry=>entry.sql.includes('INSERT INTO article_sources'));
+            const kind=entries.some(entry=>entry.sql.includes('INSERT INTO content_events'))?'ready':association?'association':null;
+            if(kind)await rawEnv.TEST_COMMIT_GATE.fetch('https://gate.test/?kind='+kind+'&sourceId='+(association?.args[1]??''));
             if(globalThis.SOURCES_FAIL_BEFORE_BATCH){globalThis.SOURCES_FAIL_BEFORE_BATCH=false;throw new Error('Injected D1 unavailable before commit');}
-            const result=await database.batch(statements);
+            const result=await database.batch(entries.map(entry=>entry.statement));
             if(globalThis.SOURCES_FAIL_BATCH){globalThis.SOURCES_FAIL_BATCH=false;throw new Error('Injected lost D1 commit response');}
             return result;
           }},CAPTURE:workflow,DISCOVERY:workflow,FEED_JOBS:{
@@ -163,6 +172,14 @@ async function fixture({versioned=false,notifications=false}={}){
             }
             if(url.pathname==='/fixture/scrapes')return Response.json({calls:globalThis.SOURCES_SCRAPES});
             if(url.pathname==='/fixture/workflows')return Response.json({calls:globalThis.SOURCES_WORKFLOW_CALLS});
+            if(url.pathname==='/fixture/replay-associations'){
+              const {sourceId}=await request.json();
+              const rows=await env.DB.prepare("SELECT payload_json FROM outbox WHERE topic='feed-events' AND json_extract(payload_json,'$.type')='source-associated' AND json_extract(payload_json,'$.sourceId')=?").bind(sourceId).all();
+              const messages=rows.results.map(row=>({body:JSON.parse(row.payload_json),acked:false,
+                ack(){this.acked=true;},retry(){}}));
+              await handleFeedJobs({messages},env,{now:runtimeNow});
+              return Response.json(messages.map(message=>({acked:message.acked})));
+            }
             if(url.pathname==='/fixture/grant'){
               const source=await env.DB.prepare('SELECT * FROM sources WHERE id=?').bind(url.searchParams.get('sourceId')).first();
               if(!source)return Response.json({error:'missing source'},404);
@@ -183,7 +200,10 @@ async function fixture({versioned=false,notifications=false}={}){
           async queue(batch,rawEnv){
             const env=prepareEnv(rawEnv);
             await handleFeedJobs(batch,env,{workflow,now:runtimeNow});
-            await Promise.allSettled(globalThis.SOURCES_ACTIVE_WORKFLOWS.splice(0));
+            const started=batch.messages.filter(message=>message.body.type==='start-job')
+              .map(message=>instances.get('task-'+message.body.taskId+'-a'+message.body.attempt)?.execution)
+              .filter(Boolean);
+            await Promise.allSettled(started);
           },
         }
       `,
@@ -195,6 +215,7 @@ async function fixture({versioned=false,notifications=false}={}){
   });
   const provider=oauthProvider();
   const gate={url:null,held:false,release:null};
+  const commits={ready:{},association:{}};
   const policyScript=`
     import {WorkerEntrypoint} from 'cloudflare:workers';
     export class AuthService extends WorkerEntrypoint{
@@ -215,7 +236,12 @@ async function fixture({versioned=false,notifications=false}={}){
     }
     export default{async fetch(){return new Response('Not found',{status:404});}};
   `;
-  const feedServiceBindings={AUTH:request=>provider.fetch(request),TEST_GATE:request=>{
+  const feedServiceBindings={AUTH:request=>provider.fetch(request),TEST_COMMIT_GATE:request=>{
+    const url=new URL(request.url),hold=commits[url.searchParams.get('kind')];
+    if(!hold?.hold||hold.sourceId&&hold.sourceId!==url.searchParams.get('sourceId'))return new Response('ready');
+    hold.hold=false;hold.held=true;
+    return new Promise(resolve=>{hold.release=()=>{hold.held=false;resolve(new Response('ready'));};});
+  },TEST_GATE:request=>{
     if(new URL(request.url).searchParams.get('url')!==gate.url)return new Response('ready');
     gate.held=true;
     return new Promise(resolve=>{gate.release=()=>{gate.url=null;gate.held=false;resolve(new Response('ready'));};});
@@ -227,10 +253,10 @@ async function fixture({versioned=false,notifications=false}={}){
     serviceBindings:feedServiceBindings,
     bindings:{...provider.bindings,ADMIN_TOKEN:'test-admin-token',BASE_URL:'https://feed.test',BRIDGE_SECRET:'test-bridge-secret',
       FEED_AUTH_RPC_CLIENT_ID:'feed-rpc-client',FEED_AUTH_RPC_CLIENT_SECRET:'feed-rpc-secret',
-      ARCHIVE_VERSIONS_ENABLED:String(versioned),ARCHIVE_READS_ENABLED:String(versioned),SOURCE_MANAGEMENT_ENABLED:'true',CRAWL_ENABLED:'true',TASK_RUNTIME_ENABLED:'true',PDF_OCR_ENABLED:'false',MAX_DISCOVERY_PAGES_PER_RUN:'2'},
+      ARCHIVE_VERSIONS_ENABLED:String(versioned),ARCHIVE_READS_ENABLED:String(versioned),SOURCE_MANAGEMENT_ENABLED:'true',CRAWL_ENABLED:'true',TASK_RUNTIME_ENABLED:'true',PDF_OCR_ENABLED:'false',MAX_DISCOVERY_PAGES_PER_RUN:String(discoveryPages)},
     d1Databases:['DB'],r2Buckets:['ARCHIVE'],
     queueProducers:{FEED_JOBS:{queueName:'feed-jobs'},FEED_EVENTS:{queueName:'feed-events'}},
-    queueConsumers:{'feed-jobs':{maxBatchSize:1,maxRetries:3,deadLetterQueue:'feed-jobs-dlq'},'feed-events':{maxBatchSize:1,maxRetries:3,deadLetterQueue:'feed-events-dlq'}},
+    queueConsumers:{'feed-jobs':{maxBatchSize:1,maxConcurrency:10,maxRetries:3,deadLetterQueue:'feed-jobs-dlq'},'feed-events':{maxBatchSize:1,maxConcurrency:10,maxRetries:3,deadLetterQueue:'feed-events-dlq'}},
   }];
   if(notifications)workers.push({
     name:'policy',modules:true,script:policyScript,compatibilityDate:'2026-10-11',
@@ -247,7 +273,11 @@ async function fixture({versioned=false,notifications=false}={}){
   for(const name of ['0010_subscription_editing.sql','0013_notification_matching.sql']){
     await applyMigration(db,await readFile(`migrations/${name}`,'utf8'));
   }
-  return {mf,db,provider,gate,read:async path=>mf.dispatchFetch('https://feed.test'+path,{headers:{Cookie:await login(mf,provider)}})};
+  return {mf,db,provider,gate,commitGate(kind,{arm,release,sourceId}={}){
+    if(arm)Object.assign(commits[kind],{hold:true,held:false,sourceId});
+    if(release)commits[kind].release?.();
+    return {held:commits[kind].held===true};
+  },read:async path=>mf.dispatchFetch('https://feed.test'+path,{headers:{Cookie:await login(mf,provider)}})};
 }
 
 test('admin verifies a saved source asynchronously before enabling it; duplicate requests reuse the task',async()=>{
@@ -320,7 +350,7 @@ test('two discovered columns share one notification and capture while all finite
     await waitFor(async()=>{
       const tasks=(await request(mf,'/internal/capture-tasks')).data.tasks;
       assert.equal(tasks.filter(task=>task.kind==='discover').length,6);
-      assert.ok(tasks.every(task=>task.state==='succeeded'),JSON.stringify(tasks));
+      assert.ok(tasks.filter(task=>['discover','capture'].includes(task.kind)).every(task=>task.state==='succeeded'),JSON.stringify(tasks));
       assert.equal(tasks.filter(task=>task.kind==='capture').length,1);
     });
     await waitFor(async()=>{
@@ -393,6 +423,49 @@ test('a later column association fans out an already ready shared event',async()
     assert.equal(after.sources.find(source=>source.sourceId===second).datePrecision,'minute');
     assert.equal(after.delivery.kind,'immediate');
   }finally{await mf.dispose();}
+});
+
+test('concurrent readiness and discovery retain the new column in either commit order',async()=>{
+  for(const firstCommit of ['ready','association']){
+    const {mf,provider,commitGate:gate}=await fixture({versioned:true,notifications:true,discoveryPages:1});
+    try{
+      const site=await request(mf,'/internal/sites',{method:'POST',body:{name:'并发关联',origin:'https://a.test'}});
+      const first=await createVerifiedSource(mf,site.data.site.id,'https://a.test/list-a.htm');
+      await gate('ready',{arm:true});
+      await request(mf,'/internal/sources/schedule',{method:'POST'});
+      await waitFor(async()=>assert.equal((await gate('ready')).held,true));
+      const second=await createVerifiedSource(mf,site.data.site.id,'https://a.test/list-b.htm');
+      const cookie=await login(mf,provider);
+      const subscription=await userRequest(mf,cookie,'/api/subscriptions',{
+        method:'POST',body:{requestId:'racing-column-subscription',name:'并发栏目',sourceIds:[second],emailMode:'off'},
+      });
+      assert.equal(subscription.status,201,JSON.stringify(subscription));
+      await gate('association',{arm:true,sourceId:second});
+      await request(mf,'/internal/sources/schedule',{method:'POST'});
+      await waitFor(async()=>assert.equal((await gate('association')).held,true));
+      await gate(firstCommit,{release:true});
+      if(firstCommit==='ready')await waitFor(async()=>assert.equal((await request(mf,'/internal/notification-events')).data.events.length,1));
+      else await waitFor(async()=>{
+        assert.equal((await request(mf,`/internal/sources/${second}/discoveries`)).data.discoveries.length,1);
+        const receipts=await(await mf.dispatchFetch('https://feed.test/fixture/replay-associations',{
+          method:'POST',body:JSON.stringify({sourceId:second}),
+        })).json();
+        assert.ok(receipts.length>0&&receipts.every(receipt=>receipt.acked),'source handoff must finish before ready commits');
+      });
+      await gate(firstCommit==='ready'?'association':'ready',{release:true});
+      await waitFor(async()=>{
+        // Run the same persisted handoff/recovery entry point a scheduled worker uses.
+        await mf.dispatchFetch('https://feed.test/fixture/recover');
+        const events=(await request(mf,'/internal/notification-events')).data.events;
+        assert.equal(events.length,1);
+        const details=(await request(mf,`/internal/notification-events/${events[0].id}`)).data;
+        assert.deepEqual(details.sources.map(source=>source.sourceId).sort(),[first,second].sort(),firstCommit);
+        assert.equal(details.matches.filter(match=>match.subscriptionId===subscription.data.subscription.id).length,1,firstCommit);
+      });
+    }finally{
+      await gate('ready',{release:true});await gate('association',{release:true});await mf.dispose();
+    }
+  }
 });
 
 test('rate limiting defers only the failing source and pausing a source stops scheduling without hiding its saved notices',async()=>{
@@ -538,8 +611,8 @@ async function verify(mf,id,requestId){
   assert.equal(submitted.status,202,JSON.stringify(submitted));
   await waitFor(async()=>{
     const source=(await request(mf,`/internal/sources/${id}`)).data.source;
-    assert.equal(source.validationState,'verified',JSON.stringify(source));
     const task=(await request(mf,`/internal/capture-tasks/${submitted.data.task.id}`)).data.task;
+    assert.equal(source.validationState,'verified',JSON.stringify({source,task}));
     assert.equal(task.state,'succeeded');
   });
   return submitted.data;

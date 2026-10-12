@@ -90,9 +90,9 @@ WHERE EXISTS (SELECT 1 FROM subscriptions WHERE id = :id AND owner_sub = :owner)
 | --- | --- | --- |
 | `content_events` | `id, revision_id, article_id, kind, observed_at, ready_at, history_only, payload_hash` | 每个需要对外呈现的版本最多一个事件，`revision_id` 唯一；索引 `(ready_at,id)`；`kind=initial/update` |
 | `event_sources` | `event_id, source_id, article_source_first_seen_at, discovery_class, published_at?, published_day?, date_precision, source_timezone` | PK `(event_id,source_id)`；来源证据冻结；索引 `(source_id,event_id)` |
-| `event_source_corrections` | `id, event_id, source_id, generation, evidence_object_hash, corrected_dates_json, verified_by, verified_at` | 唯一 `(event_id,source_id,generation)`；只追加日期核实证据，当前判定选择最大 generation |
+| `event_source_corrections` | `id, event_id, source_id, generation, request_id, command_hash, evidence_object_hash, corrected_dates_json, verified_by, verified_at` | 唯一 `(event_id,source_id,generation)` 和 `(event_id,source_id,request_id)`；同请求同内容重放，改内容冲突；只追加核实证据，当前判定选择最大 generation |
 | `notification_matches` | `event_id, subscription_id, target_id, owner_sub, eligibility_kind, matched_at` | 唯一 `(event_id,subscription_id,target_id)`；索引 `(owner_sub,event_id)`；保留命中解释，不复制内容 |
-| `user_deliveries` | `id, owner_sub, event_id, state, available_at, claimed_message_id?, suppression_reason?` | 唯一 `(owner_sub,event_id)`；索引 `(state,available_at,owner_sub)` |
+| `user_deliveries` | `id, owner_sub, event_id, state, delivery_kind, available_at, claimed_message_id?, suppression_reason?, backlog_at?` | 唯一 `(owner_sub,event_id)`；索引 `(state,available_at,owner_sub)`；`backlog_at` 保留暂停积压事实，恢复/重匹配不改回即时提醒 |
 | `mail_messages` | `id, owner_sub, kind, window_end?, generation, state, recipient_snapshot?, payload_object_hash?, payload_hash?, idempotency_key, provider_id?, submitted_at?, accepted_at?, delivered_at?, next_attempt_at?, last_error?` | `idempotency_key` 唯一；每日摘要基础批次唯一 `(owner_sub,window_end,generation)`；`provider_id` 非空时唯一 |
 | `mail_items` | `message_id, delivery_id` | PK `(message_id,delivery_id)`；已提交/结果不明的 delivery 不得被另一 message 占用；历史取消消息可保留同一 delivery 的旧关联 |
 | `mail_webhook_receipts` | `provider, provider_event_id, message_id?, payload_object_hash, received_at, processed_at?` | PK `(provider,provider_event_id)`；验签后持久化再返回成功；处理可重试 |
@@ -115,6 +115,8 @@ WHERE EXISTS (SELECT 1 FROM subscriptions WHERE id = :id AND owner_sub = :owner)
 日期核实是对来源证据的有审计修正，不能直接改旧冻结记录：保存核实任务、`event_source_corrections` 及证据对象，读取时采用最新核实结果，并触发同一事件重新匹配；不另造一个事件。首次日期确认为历史时仍不发新增邮件。
 
 匹配使用来源索引和主键游标分批进行，每批插入 match、`INSERT … ON CONFLICT DO NOTHING` 创建 delivery、更新游标在同一 batch。用户有多个命中时合并为一个 delivery；当前有效命中中有 immediate 就优先及时，否则 daily_digest，全部 off 则不进入发送候选。RSS 直接从事件和当前栏目关系查询历史，不为每次阅读器拉取制造 match 行。
+
+分页保存各目标解释，同时按本页用户的全部当前来源/目标计算共享候选，避免分页顺序误判积压。日期撤回或资格消失会暂停既有 pending 候选；其他已核实且合格的来源仍可保留其资格。已有邮件占用或受理事实不被重匹配覆盖。
 
 所有发送入口共享 `user_deliveries` 占用。先条件更新 `pending → claimed`，写固定 message/items，再提交外部请求；失败的竞争者不能把相同 delivery 加到自己的邮件。关联插入需验证 `claimed_message_id` 正是自己，不能忽略 CAS 失败。
 

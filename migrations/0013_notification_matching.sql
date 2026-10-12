@@ -44,6 +44,7 @@ CREATE TABLE user_deliveries(
   available_at INTEGER NOT NULL,
   claimed_message_id TEXT,
   suppression_reason TEXT,
+  backlog_at INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   UNIQUE(owner_sub,event_id)

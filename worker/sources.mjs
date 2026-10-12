@@ -281,13 +281,7 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
             guardSql:'kind=? AND '+activeTask.sql,guardArgs:['capture',...activeTask.args]}),
         );
         const association=await articleSourceAssociationStatements(env,{
-          articleId:aid,sourceId:source.id,timestamp:at,
-          source:{
-            first_seen_at:result.observedAt,last_seen_at:result.observedAt,discovery_class:'live',
-            published_at:row.precision==='minute'?row.publishedAt:null,
-            published_day:row.precision==='unknown'?null:row.publishedDay,
-            date_precision:row.precision,source_timezone:source.timezone,
-          },
+          articleId:aid,sourceId:source.id,timestamp:at,discoveryTaskId:taskId,taskGuard:activeTask,
         });
         statements.push(...association.statements);
       }

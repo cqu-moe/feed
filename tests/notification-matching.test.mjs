@@ -160,6 +160,14 @@ test('date verification records auditable evidence and rematches the same event'
     assert.equal(evidence.body.eventId, eventId);
     assert.equal(evidence.body.verifiedBy, 'feed-admin');
     assert.equal(evidence.body.evidence.method, 'source-page');
+    const withdrawal=await notificationInvoke(mf,'verifyDate',eventId,{
+      ...verification,requestId:'withdraw-verified-date',datePrecision:'unknown',publishedAt:null,
+    });
+    assert.equal(withdrawal.status,200,JSON.stringify(withdrawal));
+    await notificationInvoke(mf,'replayMatchOutbox',10);
+    const withdrawn=await adminRequest(mf,`/internal/notification-events/${eventId}`,undefined,{method:'GET'});
+    assert.equal(withdrawn.body.delivery.suppressionReason,'date_unverified');
+    assert.equal(withdrawn.body.matches[0].eligibilityKind,'pending');
   } finally {
     await mf.dispose();
   }
@@ -293,8 +301,61 @@ test('eligible notifications survive Auth failures, quota pauses and unverified 
       if(blockedBy==='paused')assert.equal((await editEnabled(true)).status,200);
       const restored=await subscriptionCall(mf,`/api/subscriptions/${subscription.id}`,{cookie});
       assert.equal(restored.body.subscription.notificationMatches[0].status,'pending_daily_digest',JSON.stringify(restored));
+      const verification=await notificationInvoke(mf,'verifyDate',eventId,{
+        requestId:'rematch-recovered-backlog',sourceId:'jwc',verifiedBy:'feed-admin',
+        datePrecision:'day',publishedDay:'2026-10-12',evidence:{method:'source-page'},
+      });
+      assert.equal(verification.status,200,JSON.stringify(verification));
+      await notificationInvoke(mf,'replayMatchOutbox',100);
+      const rematched=await adminRequest(mf,`/internal/notification-events/${eventId}`,undefined,{method:'GET'});
+      assert.equal(rematched.body.delivery.kind,'daily_digest',`${blockedBy}: ${JSON.stringify(rematched)}`);
     }finally{await mf.dispose();}
   }
+});
+
+test('current eligible reasons across sources select one candidate independently of match-page order',async()=>{
+  const {mf,login}=await subscriptionsFixture({clock:now,notificationPageSize:1});
+  try{
+    const cookie=await login('multi-source-owner'),subscriptions=[];
+    for(const [sourceId,emailMode] of [['jwc','immediate'],['news','daily_digest']]){
+      const created=await subscriptionsInvoke(mf,'change',{id:'multi-source-owner'},{
+        requestId:`multi-source-${sourceId}`,name:sourceId,sourceIds:[sourceId],emailMode,
+      });
+      assert.equal(created.status,200,JSON.stringify(created));subscriptions.push(created.body.subscription);
+    }
+    const eventId=await seedReadyEvent(mf,{
+      id:'bbbbbbbbbbbbbbbbbbbb0030',sourceId:'jwc',additionalSourceIds:['news'],firstSeenAt:now+30_000,
+      observedAt:now+30_000,readyAt:now+120_000,publishedDay:'2026-10-12',datePrecision:'day',
+    });
+    const enqueued=await notificationInvoke(mf,'enqueueEvent',eventId);
+    for(const message of enqueued.body.messages.toReversed())assert.deepEqual((await feedJobsInvoke(mf,message)).body.messages,[{acked:true,retried:false}]);
+    const read=async()=>(await adminRequest(mf,`/internal/notification-events/${eventId}`,undefined,{method:'GET'})).body;
+    const initial=await read();
+    assert.equal(initial.deliveries.length,1);assert.equal(initial.delivery.kind,'immediate');
+    const correct=async(sourceId,precision)=>{
+      const verified=await notificationInvoke(mf,'verifyDate',eventId,{
+        requestId:`multi-source-${sourceId}-${precision}`,sourceId,verifiedBy:'feed-admin',datePrecision:precision,
+        ...(precision==='day'?{publishedDay:'2026-10-12'}:{}),evidence:{method:'source-page'},
+      });
+      assert.equal(verified.status,200,JSON.stringify(verified));
+      for(let page=0;page<3;page++){
+        const result=await notificationInvoke(mf,'replayMatchOutbox',100);
+        assert.equal(result.status,200,JSON.stringify(result));if(!result.body.pendingPages)break;
+      }
+    };
+    await correct('jwc','unknown');
+    const otherSource=await read();
+    assert.equal(otherSource.delivery.id,initial.delivery.id);
+    assert.equal(otherSource.delivery.kind,'daily_digest');assert.equal(otherSource.delivery.suppressionReason,null);
+    const unknownView=await subscriptionCall(mf,`/api/subscriptions/${subscriptions[0].id}`,{cookie});
+    assert.equal(unknownView.body.subscription.notificationMatches[0].status,'waiting_date_verification');
+    await correct('news','unknown');
+    assert.equal((await read()).delivery.suppressionReason,'date_unverified');
+    await correct('jwc','day');
+    const restored=await read();
+    assert.equal(restored.deliveries.length,1);assert.equal(restored.delivery.id,initial.delivery.id);
+    assert.equal(restored.delivery.kind,'immediate');assert.equal(restored.delivery.suppressionReason,null);
+  }finally{await mf.dispose();}
 });
 
 test('the Worker queue consumes match-source messages through the public task runtime', async () => {

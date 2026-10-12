@@ -53,14 +53,18 @@ type StartJob = {
   taskId: string; attempt: number;
 };
 type ContentMessage =
-  | { v: 1; type: "check-ready"; outboxId: string; revisionId: string; generation: number }
-  | { v: 1; type: "match-event"; outboxId: string; taskId: string };
+  | { v: 1; type: "check-ready"; outboxId: string; revisionId: string; generation?: number; sourceTaskId?: string }
+  | { v: 1; type: "event-ready"; outboxId: string; eventId: string; revisionId: string }
+  | { v: 1; type: "source-associated"; outboxId: string; articleId: string; sourceId: string; discoveryTaskId: string; afterEventId: string }
+  | { v: 1; type: "match-source"; outboxId: string; taskId: string; eventId: string; sourceId: string; generation: number; page: number };
 type SendMail = {
   v: 1; type: "send-mail"; outboxId: string; messageId: string;
 };
 ```
 
 消费者严格验证类型、版本和字段大小，再从 D1 读取权威内容；未知 schema 进入死信/诊断，不能猜测执行。任务 payload 由生产方保存，不能因为消息写了某个 URL 就直接访问。
+
+栏目关联提交在原发现任务的 attempt 条件下写入 `source-associated` outbox；消费者从已保存的 `article_sources` 分页补齐事件来源与匹配任务。版本就绪事务也读取提交时的来源关联，覆盖两个事务任意先后顺序。不得用下一次抓取的日期/首次发现时间覆盖已有证据。
 
 | 身份 | 建议组成 | 何时变更 |
 | --- | --- | --- |

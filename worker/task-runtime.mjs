@@ -186,7 +186,7 @@ export async function handleFeedJobs(batch,env,dependencies={}){
   const runtime=createTaskRuntime(env,dependencies);
   for(const message of batch.messages){
     try{
-      if(message.body?.type==='check-ready'||message.body?.type==='event-ready'||message.body?.type==='match-source')
+      if(['check-ready','event-ready','match-source','source-associated'].includes(message.body?.type))
         await handleFeedEvent(env,message,dependencies);
       else await runtime.startJob(message.body);
       message.ack();
@@ -209,6 +209,7 @@ async function handleFeedEvent(env,message,dependencies={}){
     return result;
   }
   if(payload.type==='match-source')return createNotifications(env,{now:dependencies.now}).processMatchTask(payload);
+  if(payload.type==='source-associated')return createNotifications(env,{now:dependencies.now}).reconcileSourceAssociation(payload);
   const event=await env.DB.prepare('SELECT id,revision_id FROM content_events WHERE id=?').bind(payload.eventId).first();
   if(!event||event.revision_id!==payload.revisionId)throw new SchemaError('Content event is missing');
   const result=await createNotifications(env,{now:dependencies.now}).enqueueEvent(payload.eventId);
@@ -233,6 +234,13 @@ function parseFeedEventMessage(payload){
     return {v:1,type:payload.type,outboxId:payload.outboxId,taskId:payload.taskId,eventId:payload.eventId,
       sourceId:payload.sourceId,generation:payload.generation,page:payload.page};
   }
+  if(payload.type==='source-associated'){
+    if(!idPattern.test(payload.articleId??'')||!idPattern.test(payload.discoveryTaskId??'')
+      ||!/^[A-Za-z0-9_-]{1,64}$/.test(payload.sourceId??'')
+      ||payload.afterEventId!==''&&!idPattern.test(payload.afterEventId??''))throw new SchemaError('Invalid source association');
+    return {v:1,type:payload.type,outboxId:payload.outboxId,articleId:payload.articleId,
+      sourceId:payload.sourceId,discoveryTaskId:payload.discoveryTaskId,afterEventId:payload.afterEventId};
+  }
   throw new SchemaError('Invalid feed event type');
 }
 function feedEventDedupeKey(payload){
@@ -240,6 +248,8 @@ function feedEventDedupeKey(payload){
     ? `ready:${payload.revisionId}:${payload.generation??`task:${payload.sourceTaskId}`}`
   : payload.type==='match-source'
     ? `match-source:${payload.taskId}:p${payload.page}`
+  : payload.type==='source-associated'
+    ? `association:${payload.articleId}:${payload.sourceId}:${payload.discoveryTaskId}:${payload.afterEventId}`
     : `event:${payload.eventId}`;
 }
 

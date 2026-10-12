@@ -84,6 +84,13 @@ export async function reconcileRevision(env,revisionId){
           source.published_day,source.date_precision,source.source_timezone,eventId,revisionId,revision.article_id,
           revision.requirement_generation));
     }
+    // A discovery can commit after revisionSources() was read. Include its saved
+    // evidence at this transaction boundary; discovery's outbox covers the reverse order.
+    statements.push(env.DB.prepare(`INSERT INTO event_sources(event_id,source_id,article_source_first_seen_at,
+        discovery_class,published_at,published_day,date_precision,source_timezone)
+      SELECT ?,s.source_id,s.first_seen_at,s.discovery_class,s.published_at,s.published_day,s.date_precision,s.source_timezone
+      FROM article_sources s WHERE s.article_id=? AND EXISTS(SELECT 1 FROM content_events WHERE id=? AND revision_id=?)
+      ON CONFLICT(event_id,source_id) DO NOTHING`).bind(eventId,revision.article_id,eventId,revisionId));
     statements.push(env.DB.prepare(`INSERT INTO outbox(id,topic,dedupe_key,payload_json,available_at,created_at,updated_at)
       SELECT ?,'feed-events',?,?,?,?,?
       WHERE EXISTS(SELECT 1 FROM content_events e JOIN article_revisions current ON current.id=e.revision_id
