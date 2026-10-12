@@ -68,7 +68,7 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
       if(message.attempt<task.attempt_no)return {state:task.state,acked:'stale-attempt'};
       if(message.attempt!==task.attempt_no)throw new SchemaError('Future task attempt');
       if(!activeStates.includes(task.state))return {state:task.state,acked:'terminal'};
-      if(!['capture','discover','ocr'].includes(task.kind))throw new SchemaError('Unsupported workflow kind');
+      if(!['capture','recheck','discover','ocr'].includes(task.kind))throw new SchemaError('Unsupported workflow kind');
       const instanceId=workflowInstanceId(task.id,message.attempt),timestamp=now();
       const workflowBinding=selectWorkflow(env,{workflow,workflows},task.kind);
       await env.DB.batch([
@@ -260,7 +260,9 @@ function feedEventDedupeKey(payload){
 }
 
 export async function finishCaptureTask(env,taskId,attemptNo,result,now=()=>Date.now()){
-  return finishTask(env,'capture',taskId,attemptNo,result,now);
+  const task=await env.DB.prepare('SELECT kind FROM tasks WHERE id=?').bind(taskId).first();
+  if(!task)return finishTask(env,'capture',taskId,attemptNo,result,now);
+  return finishTask(env,task.kind==='recheck'?'recheck':'capture',taskId,attemptNo,result,now);
 }
 
 export async function finishDiscoveryTask(env,taskId,attemptNo,result,now=()=>Date.now()){
@@ -294,7 +296,8 @@ async function finishTask(env,kind,taskId,attemptNo,result,now=()=>Date.now()){
 }
 
 export async function failCaptureTask(env,taskId,attemptNo,error,now=()=>Date.now()){
-  return failTask(env,'capture',taskId,attemptNo,error,now);
+  const task=await env.DB.prepare('SELECT kind FROM tasks WHERE id=?').bind(taskId).first();
+  return failTask(env,task?.kind==='recheck'?'recheck':'capture',taskId,attemptNo,error,now);
 }
 
 export async function failDiscoveryTask(env,taskId,attemptNo,error,now=()=>Date.now()){

@@ -11,6 +11,7 @@ import {json,encoder,cleanError} from './utils.mjs';
 import {createArchive} from './archive.mjs';
 import {createSources} from './sources.mjs';
 import {createTaskRuntime,handleFeedJobs} from './task-runtime.mjs';
+import {createArchiveRecheck} from './archive-recheck.mjs';
 export {FeedIngest} from './workflow.mjs';
 export {PdfOcrWorkflow} from './pdf-ocr.mjs';
 export {CaptureWorkflow} from './capture-workflow.mjs';
@@ -26,7 +27,9 @@ export default {
       if(env.TASK_RUNTIME_ENABLED!=='true')jobs.push(sources.scheduleDaily());
     }
     if(controller.cron==='*/5 * * * *'&&env.TASK_RUNTIME_ENABLED==='true'){
-      jobs.push(sources.scheduleDue(),createTaskRuntime(env).recover());
+      jobs.push(sources.scheduleDue());
+      if(env.ARCHIVE_VERSIONS_ENABLED==='true')jobs.push(createArchiveRecheck(env).scheduleDue());
+      jobs.push(createTaskRuntime(env).recover());
     }
     if(controller.cron==='*/5 * * * *'&&(env.MAIL_ENABLED==='true'||env.RESEND_WEBHOOK_SECRET)){
       jobs.push(createMail(env).recover().then(()=>createTaskRuntime(env).dispatchDueOutbox()));

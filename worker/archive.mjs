@@ -24,14 +24,15 @@ export function createArchive(env,{
       const task=await env.DB.prepare(`SELECT t.payload_json,t.source_id AS task_source_id,a.id,a.source_id,a.title,a.url,a.published_at,ta.result_json
         FROM tasks t JOIN articles a ON a.id=t.article_id
         JOIN task_attempts ta ON ta.task_id=t.id AND ta.attempt_no=t.attempt_no
-        WHERE t.id=? AND t.kind='capture' AND t.attempt_no=? AND t.state='running'`)
+        WHERE t.id=? AND t.kind IN ('capture','recheck') AND t.attempt_no=? AND t.state='running'`)
         .bind(taskId,attemptNo).first();
       if(!task)return {superseded:true};
       if(task.result_json)return JSON.parse(task.result_json);
       const taskPayload=JSON.parse(task.payload_json),source=taskPayload.source??await createSources(env).find(task.source_id);
       if(!source||source.id!==(task.task_source_id??task.source_id)||new URL(source.url).origin!==new URL(task.url).origin
         ||!new RegExp(source.articlePattern).test(new URL(task.url).pathname))throw new Error('Capture source context is invalid');
-      return this.capture(source,task,{taskId,attemptNo,captureIntent:taskPayload.captureIntent??(taskPayload.discovery?'live':'live')});
+      const captureIntent=taskPayload.captureIntent??(taskPayload.recheck?'recheck':'live');
+      return this.capture(source,task,{taskId,attemptNo,captureIntent});
     },
     async capture(source,article,{taskId=null,attemptNo=null,captureIntent='live'}={}){
       const timestamp=Date.now();
