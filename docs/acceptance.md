@@ -79,3 +79,7 @@ PDF 正文补索引在生产 Worker 内执行，未新增 Firecrawl/OCR 调用�
 ## 2026-10-13 TextIn 正式版适配
 
 已恢复签名 MVP `7fb8e2a` 的 TextIn adapter、无文字层扫描页选择、普通附件 legacy 提取与 R2 计费保护；历史 Mistral 验收记录保留，但当前默认为 `textin-xparse-auto`。正式任务与 MVP 共用缓存/receipt，迁移保留已付费结果。此次只运行本地 Worker/D1/R2 外部替身回归与 CI；不据此声称 TextIn 云调用、价格、部署、真实账号或 UI 验收通过。具体 red/green、最终签名和风险见本次 `feed-textin-production-implementation.md` 交付记录。
+
+## 正式版隔离验收入口
+
+2026-10-13 的合成多源、TextIn、不可变版本、Auth权益、私有RSS及Resend真实证据见 [acceptance-production.md](acceptance-production.md)。该记录独立于以上历史MVP验收；T17与生产灰度T18仍有明确未完成门槛。

@@ -1,0 +1,95 @@
+# 正式版隔离验收（T17）
+
+日期：2026-10-13，Asia/Shanghai。此页记录真实隔离环境；历史 MVP 证据见 [acceptance.md](acceptance.md)。T17 尚未完成，T18 生产灰度尚未授权或执行。
+
+## 范围与资源
+
+样本全部由隔离源 Worker 生成：1 个站点、2 个栏目、3 篇通知。五个真实学校来源与站点均暂停。没有将生产学生名单或既有 OCR 样本导出、导入隔离环境，也没有修改生产 D1/R2。
+
+| 资源 | 隔离标识 |
+| --- | --- |
+| Feed | `cqu-feed-t17-20261013` |
+| Auth | `cqu-moe-auth-t17-20261013` |
+| 合成来源 | `cqu-feed-source-t17-20261013` |
+| Feed D1 | `cqu-feed-mvp-t17-20261013` / `bdafe3e0-f639-4280-ac82-b85fb3fc407b` |
+| Auth D1 | `65ce73c3-fdf3-43ee-8049-644d1f242b7f` |
+| R2 | `cqu-feed-archive-t17-20261013` |
+| Queue | `feed-{jobs,events,mail}-t17-20261013`，分别有 DLQ |
+| Workflow | `cqu-feed-{ingest,pdf-ocr,capture,discovery,archive-ocr}-t17-20261013` |
+
+收件人仅用户指定的 `uu@401.moe`；发件人为 `重大通知 <notifications@feed.cqu.moe>`，Resend 已验证该域。OCR 使用 TextIn。邮箱通过实际验证码验证，之后正常 OAuth 登录 Feed；降额和邮箱状态演练使用隔离 Auth 的正常管理员接口。
+
+## 已通过的真实业务
+
+| 验收 | 实际结果 |
+| --- | --- |
+| 多栏目采集 | 两栏目验证成功；相同 URL 共用通知，后来发现的栏目关联原通知；新 URL 独立存档。 |
+| 历史补抓 | 第二栏目补抓365天（2025-10-13至2026-10-13），1列表页、2篇历史通知；不发历史邮件。 |
+| 迁移 | 合成 MVP 基线迁移2文章、4附件、2完整版本，差异0；复用已有 TextIn 结果，无重新 OCR。 |
+| 完整性发布 | 附件变更时实际观察到新版本 assembling/missing1，旧版本仍可读；新正文 PDF OCR 完成后才发布新版本。 |
+| 版本保留 | 共用通知先后保存A、B、A2、附件变更、排版变更5版；各版独立详情200，10份附件下载 hash 全部符合对应原件。 |
+| 无实质变更 | 迁移后的历史通知原文不变复查、共用通知仅排版变化均为 presentation_only；不产生新的更新事件。 |
+| RSS | 两个即时订阅分别5条，第一栏目每日订阅1条；实质更新独立条目、固定版本链接。主人可持续查看链接；轮换后旧链接404、新链接200。 |
+| 即时邮件 | 正文B、A2各1封；同一用户多个订阅命中仍共用1次投递。真实收件箱确认2封，均只到指定地址。 |
+| 额度 | 第4个订阅创建403；Auth额度3降1保留全部3份配置、暂停超额RSS/邮件；用户排序改变保留集合；恢复3后全部运行。 |
+| 未验证邮箱 | 临时 emailVerified=false：配置保留、RSS仍200、界面显示暂停邮件；MAIL_ENABLED=true时真实准备入口prepared0，待发附件更新保留为email_unverified摘要积压；恢复已验证状态后全部active。 |
+| Auth不可用 | 实际移除隔离 Feed 的 AUTH_FEED_RPC 绑定；配置可见但auth_unavailable，3个RSS带缓存条件均503；恢复绑定后均200。此为真实绑定不可用演练，不称为Auth服务宕机。 |
+| Workflow恢复 | 首次来源验证因Cloudflare要求retries.delay而失败；修复后正常恢复同一task的第2次attempt成功。失败发生在供应商调用前。 |
+| 邮件结果不明 | 单次故障wrapper实际调用Resend，受理后保存R2收据并丢弃响应；立即submission_unknown，真实签名webhook推进同一邮件delivered，attempts1；正常对账仍delivered，没有重发。 |
+| 读取回滚 | 临时关闭ARCHIVE_READS，旧版详情/OCR/附件仍200；重新开启后恢复版本读取。没有倒退D1或删除历史事实。 |
+| 阅读 | 真实会话中文搜索、原貌快照、PDF阅读器canvas和文件hash检查通过；匿名PDF401。 |
+
+新通知首次发现至完整就绪为 **38.840秒**（单个live样本）。此次手动推进outbox，完整就绪后约208.6秒完成订阅匹配；不是稳定吞吐或生产时延承诺。02:54诊断没有未处理任务、缺项、邮件结果不明或失败收据；每日摘要候选仍待20:00，不能把这称为全部邮件已清空。
+
+## 用量和费用边界
+
+用户批准隔离验收总费用上限人民币50元。未购买套餐、充值、修改付款方式或处理账户欠费。
+
+| 服务 | 验收实测 | 证据边界 |
+| --- | --- | --- |
+| Firecrawl | 15调用；账户credits 1000→985 | 官方credit-usage只读接口与Feed usage一致；消耗已有额度。 |
+| TextIn | 3次单页识别；有效套餐余量1992→1989 | 官方package查询与每日/月预留3页一致；finance余额/待支付均0，预付费。日/月是同一消耗的两个统计维度。 |
+| Resend | Auth验证码1封、Feed更新2封 | Feed更新有provider delivered与真实收件证据；20:00摘要尚未发送。 |
+| Cloudflare | 2业务Worker、1合成源、2 D1、1 R2、6 Queue、5 Feed Workflow | 临时邮件故障Worker已删除并回读404；已核对Analytics增量与账户累计用量，见下表；不是最终账单。 |
+
+官方查询口径：[Firecrawl credit-usage](https://github.com/firecrawl/firecrawl-docs/blob/main/api-reference/v2-openapi.json)、[TextIn套餐余量](https://www.textin.com/document/open_api_package)、[TextIn余额](https://www.textin.com/document/open_api_balance)。已有套餐计数不等同于单价；没有伪造人民币账单。此前账户欠费弹窗金额不归因于本次验收。
+
+Cloudflare只读Analytics快照于02:40–02:52取得；账户累计从2026-10-01T00:00Z起算，隔离用量从2026-10-12T00:00Z起算。数据有采集延迟，今晚摘要后再增量核对。
+
+| 计量项 | T17隔离实测 | 本月账户累计（含其他应用） |
+| --- | --- | --- |
+| Worker请求 | Feed356、Auth226、合成源73，均无已上报错误；已删除故障Worker数据不可用，不能计作0 | 57,042请求，CPU1,227,839.076毫秒 |
+| D1读/写行 | 97,097 / 2,947 | 4,293,916 / 105,262 |
+| R2操作 | Class A203、Class B449 | Class A1,095、Class B10,924 |
+| R2存储 | 最新17:50Z样本136对象、payload3,077,035字节；该读数滞后于后续版本 | 各桶峰值payload+metadata合计约5.342GB；这是保守峰值合计，不是GB-month账单 |
+| Queue计费操作 | jobs48、events81、mail6，共135；DLQ未返回操作数据 | 1,005 |
+| Workflow | 22次启动、75个step.do、CPU4,380毫秒；包含已留证的1次失败 | 2,348个step.do、CPU39,015毫秒；allStepCount3,363不是计费step.do数 |
+
+已查请求、CPU、行数、Queue操作、R2操作/存储及Workflow步骤均低于现有公开包含额度。未新增套餐，以上维度当前没有显示越过包含额度；不据此保证整月增量费用为0，也不把Workflow storageRate当作已结算GB-month。[Workers定价](https://developers.cloudflare.com/workers/platform/pricing/)、[D1定价](https://developers.cloudflare.com/d1/platform/pricing/)、[R2定价](https://developers.cloudflare.com/r2/pricing/)、[Queues定价](https://developers.cloudflare.com/queues/platform/pricing/)、[Workflows定价](https://developers.cloudflare.com/workflows/reference/pricing/)。
+
+隔离抓取上限16次/UTC日，正文OCR5页/UTC日、20页/月；任务尝试3次，启动交接2次，任务退避60–600秒，邮件最多3次。近期复查600秒、旧通知900秒仅为短时演练值，不能直接用于全量生产。暂停抓取后不会继续进行周期性付费采集。Firecrawl/TextIn临时Key可撤销；Resend需完成摘要验收后撤销。
+
+## 云端发现并修复的问题
+
+- `59411ce`：Cloudflare Workflow即使retries.limit=0仍要求delay；本地契约回归后实际失败任务恢复成功，CI38284714405成功。
+- `2f90874`：订阅输出状态仍有T11占位；改为实际邮件开关及正确UI，CI38286784239成功。
+- `9631c7b`：MVP迁移正文含PDF阅读文本，新抓取的指纹需按迁移基线比较；保持不可变旧指纹，真实不变复查已证明无误报。该提交CI38289297817有1项既有异步测试失败，不标为CI通过。
+- `2874147`：晚到栏目测试错误地要求指定的dispatch调用必须抢到消息。真实Workflow可以先派发；调整为等待前序匹配、提前设置提交屏障，再观察用户可见匹配结果。重复派发复现红灯后修复绿灯，业务断言保留。
+- `785739a`：OCR运维指标将日/月processed_pages相加，导致实际3页显示6页；修改为累计月统计，既有诊断测试以双维度数据复现红灯后通过。供应商没有重复扣费。
+- `021fe31`：读取PDF原件中断时兼容指纹漏了MVP占位文本，会把未变通知判为实质更新；在已批准的Archive故障注入边界复现红灯，补齐失败路径后12项迁移回归通过，真实正文修改负控仍为substantive。未为此追加付费抓取或OCR。
+
+源码 `785739aff056952faa6fb56e6adb468f6c13a7f8` 的197项测试与[远端CI38292016688](https://github.com/cqu-moe/feed/actions/runs/38292016688)成功，实际运维API和界面均显示OCR3页。最后PDF读取失败修复的源码为 `021fe3124894b2e7f11fc5358b56bfddc9d4efdb`：本地198项测试、构建、设计检查和Worker dry-run通过；[对应CI38293926243](https://github.com/cqu-moe/feed/actions/runs/38293926243)成功。最终隔离部署 `6436672c-0c52-4666-8cf9-db110e23fd35` 已健康200，诊断确认没有新增付费抓取/OCR。原始失败CI与红灯日志保留，不用后续成功覆盖历史证据。
+
+## 尚未完成
+
+- 2026-10-13北京时间20:00的真实定时摘要及收件核对。目前实际摘要准备入口prepared0，符合未到窗口；有1条新通知候选和1条邮箱恢复积压，预期合并一封且不重复之前已送达版本。
+- 最新修复尚未取得独立子代理复核（子代理额度耗尽，不能把Main检查称为独立复核）。
+- 今晚摘要后补齐增量用量。Cloudflare当前计量已核对，最终美元账单尚未出；不需要等整月出账才推进验收，但不能捏造最终金额。
+- 两栏目、三通知、一个账号的演练不证明大规模吞吐；容量、生产预算与正式默认额度仍待确定。
+- T18生产备份/迁移比对、正式凭据、灰度范围、预算及上线授权。详见 [production-rollout.md](production-rollout.md)。
+
+T17 [#18](https://github.com/cqu-moe/feed/issues/18) 与 T18 [#19](https://github.com/cqu-moe/feed/issues/19) 保持打开。原始收据位于集成worktree的Git忽略目录 `.private/t17-receipts/`；私有RSS、凭据和会话不进入Git或Issue。
+
+## 等待20:00的运行状态
+
+上述最终隔离部署启用正常每5分钟邮件恢复Cron，MAIL开启；CRAWL、TASK_RUNTIME、PDF_OCR均关闭。Cloudflare负责在真实20:00窗口准备和发送摘要；不是在本机改时钟触发。02:44回读仍只有此前2封已送达邮件。已创建本会话20:10自动跟进提醒 `feed-key`，核对真实收件、更新证据、关闭隔离Cron/邮件，并在Resend临时Key用完后提醒撤销；完成后暂停该提醒。
