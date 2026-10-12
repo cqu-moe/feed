@@ -243,6 +243,32 @@ test('admin verifies a saved source asynchronously before enabling it; duplicate
   }finally{await mf.dispose();}
 });
 
+test('sites sharing an origin keep separate identities and retries do not rename an existing site',async()=>{
+  const {mf}=await fixture();
+  try{
+    const command={name:'教务公告站',origin:'https://a.test',requestId:'site-create-intent-one'};
+    const first=await request(mf,'/internal/sites',{method:'POST',body:command});
+    const replay=await request(mf,'/internal/sites',{method:'POST',body:command});
+    assert.equal(replay.status,201);
+    assert.equal(replay.data.site.id,first.data.site.id);
+    const second=await request(mf,'/internal/sites',{method:'POST',body:{name:'竞赛事务站',origin:'https://a.test',requestId:'site-create-intent-two'}});
+    assert.equal(second.status,201);
+    assert.notEqual(second.data.site.id,first.data.site.id);
+    const firstSource=await request(mf,'/internal/sources',{method:'POST',body:sourceCommand(first.data.site.id,'https://a.test/list.htm')});
+    const secondSource=await request(mf,'/internal/sources',{method:'POST',body:sourceCommand(second.data.site.id,'https://a.test/list.htm')});
+    assert.equal(firstSource.status,201);assert.equal(secondSource.status,201);
+    assert.notEqual(firstSource.data.source.id,secondSource.data.source.id);
+    const conflict=await request(mf,'/internal/sites',{method:'POST',body:{...command,name:'冲突名称'}});
+    assert.equal(conflict.status,409);
+    await request(mf,`/internal/sites/${first.data.site.id}`,{method:'PATCH',body:{name:'管理员改名'}});
+    const replayAfterEdit=await request(mf,'/internal/sites',{method:'POST',body:command});
+    assert.equal(replayAfterEdit.status,201);
+    assert.equal(replayAfterEdit.data.site.name,'管理员改名');
+    const sites=(await request(mf,'/internal/sites')).data.sites.filter(site=>site.origin==='https://a.test');
+    assert.deepEqual(sites.map(site=>site.name).sort(),['管理员改名','竞赛事务站'].sort());
+  }finally{await mf.dispose();}
+});
+
 test('two discovered columns share one notification and capture while all finite pages finish and both filters find it',async()=>{
   const {mf,read,provider}=await fixture({versioned:true});
   try{
@@ -429,6 +455,7 @@ async function verify(mf,id,requestId){
   return submitted.data;
 }
 async function request(mf,path,{method='GET',body}={}){
+  if(path==='/internal/sites'&&method==='POST')body={requestId:crypto.randomUUID(),...body};
   const response=await mf.dispatchFetch('https://feed.test'+path,{
     method,headers:{Authorization:'Bearer test-admin-token','Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),
   });

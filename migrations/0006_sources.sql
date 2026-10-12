@@ -3,11 +3,13 @@ PRAGMA foreign_keys=ON;
 CREATE TABLE sites(
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
-  origin TEXT NOT NULL UNIQUE,
+  origin TEXT NOT NULL,
+  create_command_hash TEXT,
   enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
+CREATE INDEX sites_origin ON sites(origin,id);
 
 ALTER TABLE sources ADD COLUMN site_id TEXT REFERENCES sites(id);
 ALTER TABLE sources ADD COLUMN list_url TEXT;

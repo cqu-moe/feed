@@ -43,13 +43,18 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
         updatedAt:row.updated_at,
       }));
     },
-    async createSite({name,origin}){
+    async createSite({name,origin,requestId}){
+      if(!/^[A-Za-z0-9._:-]{8,100}$/.test(requestId??''))throw validationError('requestId must contain 8-100 URI-safe characters');
       const parsed=parseOrigin(origin),title=requiredText(name,'name',80);
-      const id=(await sha(`site:${parsed.href}`)).slice(0,24),at=timestamp();
-      const row=await env.DB.prepare(`INSERT INTO sites(id,name,origin,enabled,created_at,updated_at)
-        VALUES (?,?,?,1,?,?) ON CONFLICT(origin) DO UPDATE SET name=excluded.name,updated_at=excluded.updated_at
-        RETURNING id`).bind(id,title,parsed.origin,at,at).first();
-      return {site:await this.site(row.id)};
+      const id=(await sha(`site-create:${requestId}`)).slice(0,24),at=timestamp();
+      const commandHash=await sha(JSON.stringify({name:title,origin:parsed.origin}));
+      await env.DB.prepare(`INSERT INTO sites(id,name,origin,create_command_hash,enabled,created_at,updated_at)
+        VALUES (?,?,?,?,1,?,?) ON CONFLICT(id) DO NOTHING`).bind(id,title,parsed.origin,commandHash,at,at).run();
+      const row=await env.DB.prepare('SELECT create_command_hash FROM sites WHERE id=?').bind(id).first();
+      if(row?.create_command_hash!==commandHash){
+        const error=validationError('This requestId was used for a different site creation command');error.status=409;throw error;
+      }
+      return {site:await this.site(id)};
     },
     async site(id){
       if(!/^[a-f0-9]{24}$/.test(id??''))return null;
@@ -80,7 +85,7 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
     },
     async createSource(command){
       const input=await parseSourceCommand(env,command,{forCreate:true});
-      const id=(await sha(`source:${input.listUrl.href}`)).slice(0,24),at=timestamp();
+      const id=(await sha(`source:${input.siteId}:${input.listUrl.href}`)).slice(0,24),at=timestamp();
       await env.DB.prepare(`INSERT INTO sources(id,site_id,name,url,list_url,adapter_key,config_json,config_version,
         enabled,refresh_interval_sec,next_discovery_at,baseline_cutoff_at,source_timezone,validation_state,created_at,updated_at)
         VALUES (?,?,?,?,?,?,?,1,0,?,0,?,?,'draft',?,?) ON CONFLICT(id) DO NOTHING`)

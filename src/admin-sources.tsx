@@ -389,6 +389,7 @@ export function AdminSourcesPage() {
   const [notice, setNotice] = useState('');
   const [validationStatus, setValidationStatus] = useState('');
   const verificationIntent = useRef<{ sourceId: string; configVersion: number; requestId: string } | null>(null);
+  const siteCreationIntent = useRef<{ name: string; origin: string; requestId: string } | null>(null);
 
   const selectedSource = sources.find(source => source.id === selectedSourceId) ?? null;
   const selectedOriginal = selectedSource ? sourceForm(selectedSource) : null;
@@ -506,6 +507,7 @@ export function AdminSourcesPage() {
 
   function disconnect() {
     verificationIntent.current = null;
+    siteCreationIntent.current = null;
     setValidationStatus('');
     setToken('');
     setCredential('');
@@ -536,13 +538,17 @@ export function AdminSourcesPage() {
         name: requiredText(siteForm.name, '站点名称', 80),
         origin: siteOrigin(siteForm.origin).href,
       };
+      if (siteCreationIntent.current?.name !== payload.name || siteCreationIntent.current.origin !== payload.origin) {
+        siteCreationIntent.current = { ...payload, requestId: crypto.randomUUID() };
+      }
       const site = await adminJson('/internal/sites', token, parseSiteResponse, {
         method: 'POST',
-        body: JSON.stringify(payload),
+        body: JSON.stringify(siteCreationIntent.current),
       });
-      await loadLists(token);
-      setCreateDraft(form => ({ ...form, siteId: form.siteId || site.id }));
+      siteCreationIntent.current = null;
       setSiteForm(emptySiteForm());
+      setSites(prior => [...prior.filter(item => item.id !== site.id), site]);
+      setCreateDraft(form => ({ ...form, siteId: form.siteId || site.id }));
       setNotice(`站点已保存：${site.name}。现在可以创建它的栏目。`);
     });
   }
