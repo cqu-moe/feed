@@ -16,3 +16,17 @@
 采集不能依赖本机浏览器。不得提交 `.private/`、`.dev.vars`、OAuth 凭据或会话数据。R2 原始产物保留，派生文本可重建；不要把验证码 HTML 当成功附件。
 
 修改后执行 `pnpm test`、`pnpm build`、`pnpm check:design`、`git diff --check`。UI 修改另外验证真实登录、中文搜索、PDF/下载、双主题与响应式；编译通过不等于业务验收。部署前先应用 D1 迁移；部署与真实账号验证分开记录。
+
+## Agent skills
+
+### Issue tracker
+
+任务与发布的规格使用 `cqu-moe/feed` GitHub Issues。见 `docs/agents/issue-tracker.md`。
+
+### Triage labels
+
+采用五个默认 triage 标签。见 `docs/agents/triage-labels.md`。
+
+### Domain docs
+
+使用 single-context 布局：根目录 `GLOSSARY.md` 与按需创建的 `docs/adr/`。见 `docs/agents/domain.md`。
