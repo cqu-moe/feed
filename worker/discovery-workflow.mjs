@@ -21,7 +21,7 @@ export class DiscoveryWorkflow extends WorkflowEntrypoint{
         return result[0].results.length>0;
       });
       if(!claimed)return {superseded:true};
-      const result=await step.do('discover-page',{retries:{limit:0},timeout:'5 minutes'},
+      const result=await step.do('discover-page',{retries:{limit:0,delay:'5 seconds'},timeout:'5 minutes'},
         ()=>createSources(this.env).discover(taskId,attempt));
       await step.do('finish',()=>finishDiscoveryTask(this.env,taskId,attempt,result));
       await step.do('dispatch-followups',()=>createTaskRuntime(this.env).dispatchDueOutbox());

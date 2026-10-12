@@ -104,6 +104,7 @@ async function fixture({versioned=false,notifications=false,discoveryPages=2,env
         import {CaptureWorkflow} from './worker/capture-workflow.mjs';
         import {DiscoveryWorkflow} from './worker/discovery-workflow.mjs';
         import {issueGrant} from './worker/bridge.mjs';
+        import {workflowStep as step} from './tests/helpers/workflow-step.mjs';
 
         const nativeNow=Date.now;
         let fixedNow=null;
@@ -111,7 +112,6 @@ async function fixture({versioned=false,notifications=false,discoveryPages=2,env
         globalThis.SOURCES_WORKFLOW_CALLS=[];
         globalThis.SOURCES_SENT=[];
         globalThis.SOURCES_WORKFLOW_MODE='run';
-        const step={async do(_name,_options,fn){return (typeof _options==='function'?_options:fn)();},async sleep(){}};
         const instances=new Map();
         let clockOffset=0;
         const runtimeNow=()=>Date.now()+clockOffset;

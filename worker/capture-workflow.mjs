@@ -20,7 +20,7 @@ export class CaptureWorkflow extends WorkflowEntrypoint{
         ]);return result[0].results.length>0;
       });
       if(!claimed)return {superseded:true};
-      const result=await step.do('capture',{retries:{limit:0},timeout:'10 minutes'},()=>createArchive(this.env).captureTask(taskId,attempt));
+      const result=await step.do('capture',{retries:{limit:0,delay:'10 seconds'},timeout:'10 minutes'},()=>createArchive(this.env).captureTask(taskId,attempt));
       await step.do('finish',()=>finishCaptureTask(this.env,taskId,attempt,result));
       // OCR tasks and check-ready messages are committed with capture; dispatch them
       // after the durable task receipt so a Queue outage cannot lose the handoff.

@@ -87,6 +87,7 @@ async function fixture({
         import {apiRoute} from './worker/api.mjs';
         import {createTaskRuntime,handleFeedJobs} from './worker/task-runtime.mjs';
         import {CaptureWorkflow} from './worker/capture-workflow.mjs';
+        import {workflowStep as step} from './tests/helpers/workflow-step.mjs';
 
         globalThis.TASK_RUNTIME_QUEUE_BODIES=[];
         globalThis.TASK_RUNTIME_WORKFLOW_CALLS=[];
@@ -97,7 +98,6 @@ async function fixture({
         globalThis.TASK_RUNTIME_PLATFORM_STATUS='business';
         globalThis.TASK_RUNTIME_WORKFLOW_MODE='run';
         globalThis.TASK_RUNTIME_ACTIVE_WORKFLOWS=[];
-        const step={async do(_name,_options,fn){return (typeof _options==='function'?_options:fn)();},async sleep(){}};
         const instances=new Map();
         const instance=id=>{
           if(!instances.has(id))throw new Error('Workflow instance not found');
