@@ -1,6 +1,7 @@
 import {sha} from './utils.mjs';
 import {createNotifications} from './notifications.mjs';
 import {createResendProvider} from './mail-provider-resend.mjs';
+import {createDigestCompiler} from './mail-digest.mjs';
 
 const idPattern=/^[a-f0-9]{24}$/;
 const minute=60_000;
@@ -14,6 +15,7 @@ export function createMail(env,{now=()=>Date.now(),provider=createResendProvider
   const enabled=()=>env.MAIL_ENABLED==='true';
   const limit=Math.max(1,Math.min(50,Number(env.MAIL_PREPARE_LIMIT)||20));
   const maxAttempts=Math.max(1,Math.min(10,Number(env.MAX_MAIL_ATTEMPTS)||6));
+  const prepareDigests=createDigestCompiler(env,{now,assess:assessMany,savePrivate,gate});
 
   async function list(){
     const rows=await env.DB.prepare(`SELECT id,owner_sub AS ownerSub,kind,state,provider_id AS providerId,
@@ -25,18 +27,28 @@ export function createMail(env,{now=()=>Date.now(),provider=createResendProvider
   }
 
   function gate(assessment){
+    const assessments=Array.isArray(assessment)?assessment:[assessment];
+    const first=assessments[0];
     return {sql:`(SELECT COALESCE(json_group_array(id||':'||config_version),'[]') FROM
       (SELECT id,config_version FROM subscriptions WHERE owner_sub=? ORDER BY id))=?
-      AND (SELECT COUNT(*) FROM event_sources WHERE event_id=?)=?
-      AND (SELECT COUNT(*) FROM event_source_corrections WHERE event_id=?)=?`,
-    args:[assessment.ownerSub,assessment.configStamp,assessment.event.id,assessment.sourceCount,assessment.event.id,assessment.corrections]};
+      AND NOT EXISTS(SELECT 1 FROM json_each(?) evidence WHERE
+        (SELECT COUNT(*) FROM event_sources WHERE event_id=json_extract(evidence.value,'$.id'))<>json_extract(evidence.value,'$.sources')
+        OR (SELECT COUNT(*) FROM event_source_corrections WHERE event_id=json_extract(evidence.value,'$.id'))<>json_extract(evidence.value,'$.corrections'))`,
+    args:[first.ownerSub,first.configStamp,JSON.stringify(assessments.map(item=>({id:item.event.id,sources:item.sourceCount,corrections:item.corrections})))]};
   }
 
   async function assess(delivery){
-    const result=await notifications.assessDelivery(delivery.owner_sub,delivery.event_id);
-    const suppression=result.recipient?await env.DB.prepare('SELECT reason FROM mail_suppressions WHERE recipient_hash=?')
-      .bind(await sha(result.recipient.trim().toLowerCase())).first():null;
-    return {...result,ownerSub:delivery.owner_sub,suppressionReason:suppression?`email_${suppression.reason}`:result.suppressionReason};
+    return (await assessMany([delivery]))[0];
+  }
+
+  async function assessMany(deliveries){
+    if(!deliveries.length)return [];
+    const results=await notifications.assessDeliveries(deliveries[0].owner_sub,deliveries.map(item=>item.event_id));
+    const recipient=results.find(item=>item.recipient)?.recipient;
+    const suppression=recipient?await env.DB.prepare('SELECT reason FROM mail_suppressions WHERE recipient_hash=?')
+      .bind(await sha(recipient.trim().toLowerCase())).first():null;
+    return results.map((result,index)=>({...result,ownerSub:deliveries[index].owner_sub,
+      suppressionReason:suppression?`email_${suppression.reason}`:result.suppressionReason}));
   }
 
   async function hold(delivery,assessment){
@@ -49,8 +61,12 @@ export function createMail(env,{now=()=>Date.now(),provider=createResendProvider
 
   async function preparePending(){
     if(!enabled())return {disabled:true,prepared:0};
-    const rows=await env.DB.prepare(`SELECT * FROM user_deliveries WHERE state='pending'
-      AND delivery_kind='immediate' AND available_at<=? ORDER BY available_at,id LIMIT ?`).bind(now(),limit).all();
+    const rows=await env.DB.prepare(`SELECT d.* FROM user_deliveries d WHERE d.state='pending' AND d.available_at<=?
+      AND (d.delivery_kind='immediate' OR (d.backlog_at IS NULL AND EXISTS(
+        SELECT 1 FROM notification_matches m JOIN subscriptions s ON s.id=m.subscription_id
+        WHERE m.owner_sub=d.owner_sub AND m.event_id=d.event_id AND s.deleted_at IS NULL
+          AND s.requested_enabled=1 AND s.email_mode='immediate')))
+      ORDER BY d.available_at,d.id LIMIT ?`).bind(now(),limit).all();
     let prepared=0;
     for(const delivery of rows.results){
       const assessment=await assess(delivery);
@@ -76,7 +92,7 @@ export function createMail(env,{now=()=>Date.now(),provider=createResendProvider
       const checked=gate(assessment),key=`feed-mail/${id}`,outboxId=(await sha(`mail:${id}:0`)).slice(0,24);
       const message={v:1,type:'send-mail',outboxId,messageId:id};
       const result=await env.DB.batch([
-        env.DB.prepare(`UPDATE user_deliveries SET state='claimed',claimed_message_id=?,suppression_reason=NULL,updated_at=?
+        env.DB.prepare(`UPDATE user_deliveries SET state='claimed',delivery_kind='immediate',claimed_message_id=?,suppression_reason=NULL,updated_at=?
           WHERE id=? AND state='pending' AND backlog_at IS NULL AND ${checked.sql}
           AND NOT EXISTS(SELECT 1 FROM mail_suppressions WHERE recipient_hash=?)`)
           .bind(id,at,delivery.id,...checked.args,recipientHash),
@@ -127,16 +143,17 @@ export function createMail(env,{now=()=>Date.now(),provider=createResendProvider
       return {id,state:'deferred'};
     }
     const payload=await readPrivate(message.payload_key,message.payload_hash);
+    const deliveries=(await env.DB.prepare(`SELECT d.* FROM user_deliveries d JOIN mail_items i ON i.delivery_id=d.id
+      WHERE i.message_id=? ORDER BY i.ordinal`).bind(id).all()).results;
+    if(!deliveries.length)throw new Error('mail_claim_missing');
     if(message.submitted_at!==null){
       if(message.next_attempt_at===null)return {id,state:message.state};
       const expired=at-message.submitted_at>=23.5*3600_000;
       const exhausted=message.attempts>=maxAttempts;
       let reason=expired||exhausted?'reconciliation_required':null;
       if(!reason){
-        const delivery=await env.DB.prepare(`SELECT d.* FROM user_deliveries d JOIN mail_items i ON i.delivery_id=d.id
-          WHERE i.message_id=?`).bind(id).first();
-        const current=await assess(delivery);
-        if(!current.eligible||current.suppressionReason||current.recipient!==payload.to)
+        const current=await assessMany(deliveries);
+        if(current.some(item=>!item.eligible||item.suppressionReason||item.recipient!==payload.to))
           reason='reconciliation_required';
       }
       if(reason){
@@ -152,10 +169,10 @@ export function createMail(env,{now=()=>Date.now(),provider=createResendProvider
     }
     let checked=null;
     if(message.submitted_at===null){
-      const delivery=await env.DB.prepare(`SELECT d.* FROM user_deliveries d JOIN mail_items i ON i.delivery_id=d.id
-        WHERE i.message_id=?`).bind(id).first();
-      if(!delivery)throw new Error('mail_claim_missing');
-      const assessment=await assess(delivery);
+      const assessments=await assessMany(deliveries);
+      const invalid=assessments.findIndex((item,index)=>!item.eligible||item.suppressionReason||item.recipient!==payload.to
+        ||(item.mode!==message.kind&&!(message.kind==='daily_digest'&&deliveries[index].backlog_at!==null)));
+      const assessment=assessments[Math.max(0,invalid)];
       if(assessment.suppressionReason==='auth_unavailable'){
         await env.DB.prepare(`UPDATE mail_messages SET state='deferred',last_error='auth_unavailable',next_attempt_at=?,updated_at=?
           WHERE id=? AND submitted_at IS NULL AND (lease_until IS NULL OR lease_until<=?)`)
@@ -163,9 +180,9 @@ export function createMail(env,{now=()=>Date.now(),provider=createResendProvider
         return {id,state:'deferred'};
       }
       const recovered=message.last_error==='auth_unavailable';
-      if(recovered||!assessment.eligible||assessment.suppressionReason||assessment.mode!==message.kind||assessment.recipient!==payload.to){
+      if(recovered||invalid>=0){
         const reason=assessment.suppressionReason??(recovered?'recovered_backlog':!assessment.eligible?'no_eligible_match':assessment.recipient!==payload.to?'recipient_changed':'mode_changed');
-        const backlog=Boolean(assessment.eligible&&(assessment.suppressionReason||recovered));
+        const backlog=Boolean(assessments.some(item=>item.eligible)&&(assessment.suppressionReason||recovered));
         await env.DB.batch([
           env.DB.prepare(`UPDATE mail_messages SET state='cancelled',last_error=?,next_attempt_at=NULL,updated_at=?
             WHERE id=? AND submitted_at IS NULL AND (lease_until IS NULL OR lease_until<=?)`).bind(reason,at,id,at),
@@ -177,7 +194,7 @@ export function createMail(env,{now=()=>Date.now(),provider=createResendProvider
         ]);
         return {id,state:'cancelled'};
       }
-      checked=gate(assessment);
+      checked=gate(assessments);
     }
     // Start the lease after potentially slow R2/Auth reads, and fence the state we assessed.
     at=now();
@@ -244,6 +261,7 @@ export function createMail(env,{now=()=>Date.now(),provider=createResendProvider
     }
     if(!enabled())return {disabled:true,receipts:receipts.results.length};
     const prepared=await preparePending();
+    const digests=await prepareDigests();
     const rows=await env.DB.prepare(`SELECT id,attempts FROM mail_messages WHERE state IN ('prepared','deferred','submitting','submission_unknown')
       AND next_attempt_at<=? AND (lease_until IS NULL OR lease_until<=?)
       ORDER BY updated_at,id LIMIT ?`).bind(now(),now(),limit).all();
@@ -271,7 +289,7 @@ export function createMail(env,{now=()=>Date.now(),provider=createResendProvider
         WHERE outbox.attempts<?`)
         .bind(outboxId,`send-mail:${row.id}:${row.attempts}`,JSON.stringify({v:1,type:'send-mail',outboxId,messageId:row.id}),at,at,at,row.id,row.attempts,at,at,maxAttempts).run();
     }
-    return {...prepared,recovered:rows.results.length};
+    return {...prepared,digests:digests.prepared,recovered:rows.results.length};
   }
 
   async function receiveWebhook(request){
@@ -344,7 +362,7 @@ export function createMail(env,{now=()=>Date.now(),provider=createResendProvider
       .bind(message.id,at,id));
     await env.DB.batch(statements);
   }
-  return {preparePending,deliver,recover,list,receiveWebhook,reconcile};
+  return {preparePending,prepareDigests,deliver,recover,list,receiveWebhook,reconcile};
 }
 
 export async function handleMailMessage(body,env,dependencies){

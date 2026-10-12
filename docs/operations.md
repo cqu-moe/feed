@@ -486,4 +486,12 @@ node scripts/compare-ocr.mjs publish mistral-ocr-4-1
 
 管理员 `GET /internal/mail` 查看安全状态；`POST /internal/mail/prepare` 与 `/internal/mail/recover` 复用生产准备/恢复规则。`POST /internal/mail/:id/reconcile` 仅查询已经确认的 provider ID，不发送新邮件；未知 provider ID 不能靠猜测恢复。受理表示服务商接受，delivered 表示收件服务器接受，均不等于读者已阅读。退信/投诉独立抑制邮箱，不关闭订阅或 RSS。
 
+### 每日摘要
+
+迁移 `0016_mail_digests.sql` 必须在启用邮件前应用。原有每5分钟恢复任务同时推进摘要：窗口固定为北京时间每日20:00，错过该时刻可以恢复最近到期窗口及之前未完成的窗口。空窗口不创建邮件；晚完成的 OCR、匹配及 Auth 暂时不可用导致的 pending 在后续合格批次进入摘要。暂停期间形成的积压继续合并摘要，用户将普通待发摘要改为及时模式时会转入及时通路。
+
+`DIGEST_MAX_ITEMS` 默认20，范围1–50；`DIGEST_MAX_BYTES` 默认65536，范围8192–262144，按最终快照的 UTF-8 JSON 大小计。超过任一阈值使用窗口内稳定批号分批；每轮每用户最多准备一批，剩余候选保留持久游标。此为保守应用阈值，远小于 [Resend 当前40MB总邮件上限](https://resend.com/docs/api-reference/emails/send-email)；摘要不发送附件。仅管理员可调用 `POST /internal/mail/digests/prepare` 手动推进同一规则；它不会绕过20:00窗口。
+
+摘要发送复用 T11 的不可变快照、原子 delivery 占用、退信检查、结果不明对账及有界恢复。服务关闭时不准备新摘要。管理员在邮件状态列表看到类型“每日摘要”，用户在订阅活动中查看相同投递事实。
+
 以上是本地实现和配置说明。真实 Queue、供应商与指定邮箱的完整验收仍在 T17；正式开启按 T18 上线方案审批。
