@@ -36,7 +36,7 @@
     "QUEUE_DEAD_LETTER_AFTER_MS":"900000",
     "OPERATIONS_DIAGNOSTIC_LIMIT":"20",
     "PDF_OCR_ENABLED":"true",
-    "PDF_OCR_MODEL":"mistral-ocr-4-1",
+    "PDF_OCR_MODEL":"textin-xparse-auto",
     "MAX_PDF_OCR_PAGES_PER_DAY":"50",
     "MAX_PDF_OCR_PAGES_PER_MONTH":"1000"
   },

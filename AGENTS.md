@@ -10,7 +10,7 @@
 - `worker/page-action.mjs`、`bridge*.mjs`：Firecrawl 源站浏览器与临时 OCR/上传桥接。保留 origin、HMAC、有效期、文件签名和额度校验。
 - `worker/auth.mjs`：独立 BFF 会话。所有业务 API、R2 文件、截图、快照均实时检查 `feed.access`。
 - `worker/storage.mjs`：受保护文件流、Range 和静态快照。只给已保存的 PDF 嵌入自托管 PDF.js 阅读框；源站脚本与表单提交保持禁用。
-- `worker/pdf-ocr.mjs`、`mistral-ocr.mjs`：扫描正文 PDF 云 OCR、缓存和页数预算。见 `docs/pdf-ocr-design.md`；真实对比见 `docs/ocr-comparison.md`。识别输出为派生内容，不覆盖原 PDF。
+- `worker/archive-ocr.mjs`、`pdf-ocr.mjs`、`ocr-cache.mjs`、`textin-ocr.mjs`：TextIn PDF OCR、MVP 缓存复用、请求记录和页数预算。见 `docs/pdf-ocr-design.md`；真实对比见 `docs/ocr-comparison.md`。识别输出为派生内容，不覆盖原 PDF。
 - `src/`：CQU Moe Design 1.1.0 阅读界面。先读 `node_modules/@cqu-moe/ui/dist/START-HERE.md`；基础组件来自 `@cqu-moe/ui`，样式使用语义变量，不覆盖 `.ds-*` 内部实现。
 
 采集不能依赖本机浏览器。不得提交 `.private/`、`.dev.vars`、OAuth 凭据或会话数据。R2 原始产物保留，派生文本可重建；不要把验证码 HTML 当成功附件。

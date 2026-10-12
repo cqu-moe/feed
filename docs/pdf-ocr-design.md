@@ -1,55 +1,78 @@
-# 扫描 PDF OCR 实现
+# PDF 文字提取与 TextIn OCR
 
-2026-10-11。已完成真实云端 A/B 识别，默认采用 `mistral-ocr-4-1`。实测方法、质量和成本见 [ocr-comparison.md](ocr-comparison.md)，官方资料见 [ocr-provider-research.md](ocr-provider-research.md)。
+基于 2026-10-12 MVP、2026-10-13 正式适配。默认 `textin-xparse-auto`；下述 legacy 流程覆盖正文和普通 PDF 附件，正式版本的适配与范围见末节。Mistral 适配器保留用于已有对比结果，自动任务不再选择它。
 
-## 流程
+## 云端流程
 
 ```text
 采集 PDF → 私有 R2 → PdfOcrWorkflow → unpdf 逐页检查
-  → 有效文字层：免费本地解析
-  → 扫描页：Mistral /v1/ocr（内联 PDF bytes + 零基页码）
-  → R2 保存原始响应、逐页结果 → D1 正文与 FTS5 → 按页阅读、原 PDF 对照
+  → 有任何非空文字层：直接提取，不调用 OCR
+  → 无文字层且有图像：TextIn xParse sync，选择对应页码
+  → R2 原始响应 → 安全 Markdown/逐页文本缓存 → D1 正文与 FTS5 → 统一阅读
 ```
 
-生产全链路在 Cloudflare 和 Mistral 运行，不调用 Browser Run，不依赖本机浏览器。实测时的本地 PDF 渲染仅用于人工质检。
+生产运行在 Cloudflare 与 TextIn，不调用 Browser Run，不依赖本机浏览器或 PDF 转图服务。TextIn 直接接收已下载的 PDF。扫描检测严格遵守“只处理无文字层”：即使只有一个页码、短标题也跳过 OCR，因此部分文字层加扫描正文的页面可能漏掉图中文字。无图无文字的空白页也跳过。
 
-- `worker/pdf-text.mjs`：逐页提取文字、检测图像与乱码。图像页少于 80 个非空白字符，或乱码比例超过阈值时进入 OCR。
-- `worker/mistral-ocr.mjs`：固定官方 API endpoint；校验模型白名单、PDF 签名、大小、页码、响应完整性和 usage；按表格 ID 展开占位符。直接使用 fetch，无额外供应商 SDK。
-- `worker/pdf-ocr.mjs`：独立 Workflow、去重、额度、结果落盘和发布。采集成功后入队，每日 Cron 补偿未完成任务。
-- `src/ocr-reading.tsx`：安全 Markdown/GFM 表格，按页展示，可打开 `/reader/{articleId}/{filename}?page=N`。不执行 OCR 返回的 HTML 或加载其外部图片。
+- `worker/pdf-text.mjs`：unpdf 逐页提取与扫描检测。
+- `worker/textin-ocr.mjs`：固定 API、multipart、1 基页码转换、响应范围校验、表格转 GFM。结构化表格与普通文字共同进入阅读和搜索；原始字符/坐标数据保留在私有 R2。
+- `worker/pdf-ocr.mjs`：Workflow、文件缓存、请求记录、全局预算和安全发布。
+- `src/ocr-reading.tsx`：Markdown/GFM 按页阅读，链接对应原文件与页码；不执行供应商 HTML、不加载外部图片。
 
-## 存储与一致性
+原 PDF、HTML、截图不修改。派生阅读保留 HTML 正文，再拼接 PDF 文本。发布核对当前附件 hash、归档 prefix 与正文 hash；FTS5 触发器同步索引。业务 API 和所有文件继续检查 Feed BFF session 与 `feed.access`。
 
-迁移 `0004_pdf_ocr.sql` 新增 jobs、calls、budget、usage 表，以及 articles 的 OCR 派生信息。文档状态为 pending/running/complete/deferred_budget/failed，与原件存档状态分开。
+## 缓存和防重复计费
 
-R2 原 PDF、HTML、截图不修改。派生缓存按 SHA256 + 固定模型 + 配置版本区分：
+缓存按 PDF SHA-256、固定引擎、请求配置摘要、文字层策略和适配版本区分，与文章 URL 无关。同文件跨通知复用；文件变化生成新缓存；配置版本变化必须先迁移旧结果/raw/receipt，不能直接换键重付。
 
 ```text
-derived/pdf/<sha256>/<model>/v1/native.json
-derived/pdf/<sha256>/<model>/v1/ocr-<selected-page-indices>.json
-derived/pdf/<sha256>/<model>/v1/result.json
+derived/pdf/<sha>/<model>/<version-and-config>/native.json
+derived/pdf/<sha>/<model>/<version-and-config>/ocr-<pages>.json.request.json
+derived/pdf/<sha>/<model>/<version-and-config>/ocr-<pages>.json.raw.json
+derived/pdf/<sha>/<model>/<version-and-config>/ocr-<pages>.json
+derived/pdf/<sha>/<model>/<version-and-config>/result.json
 derived/reading/<article-id>/<content-hash>/reading.json
-derived/reading/<article-id>/<content-hash>/reading.txt
-derived/reading/<article-id>/<content-hash>/previous-body.txt
 ```
 
-响应先保存到 R2，再标记任务完成，再发布正文。发布核对当前附件 hash、归档 prefix 和正文 content hash；旧源文件任务不能覆盖新附件。重新采集时清理旧 OCR 指针。保留非 PDF 的 HTML 正文，替换旧 PDF 派生文本，FTS5 触发器同步索引。相同文件跨文章复用识别结果，阅读访问仍受对应文章的 feed.access 保护。
+1. 先查完整结果、页组缓存、原始响应与此前付费的同配置 TextIn benchmark。
+2. D1 原子 lease 避免同文件并发调用；发送前用 R2 条件写入不可覆盖的请求记录。
+3. 收到有界 TextIn 响应后先保存原始字节，再解码 JSON、校验/转换，最后保存规范化结果。
+4. 网络超时、响应损坏等已发请求失败标为 `needs_review`，每日任务不自动再次付费。手动重新入队也必须先复用原始响应；已有请求记录而没有可用结果时拒绝再次调用。
+5. 预算不足标为 `deferred_budget`，并发占用标为 `deferred_busy`，可由每日任务恢复。缓存读取和原生文字提取不需要供应商凭据。
 
-所有普通用户读取仍走 Feed BFF session + Auth 实时权益检查。Mistral key 只作为 Worker Secret，原 PDF 以内联数据输入供应商，不公开 R2，也不传 Auth Cookie。
+这个设计选择“未知结果时停下”，不声称外部服务支持 exactly-once。供应商成功但响应完全丢失时，需要人工对账恢复，不能直接删除请求记录重试。缓存和请求记录不设置自动过期。解析故障修复可重用当前缓存中的 raw JSON，不必重新识别。未来升级缓存版本、页组方式或扫描判定策略时，应先显式迁移旧 raw/请求记录，不能把换 key 当作免费重算。历史 8 页 TextIn 测试结果在源 hash 与请求配置完全匹配时直接升级为阅读缓存。
 
-## 费用控制
+## 费用与限制
 
-- 原文字层免费解析，当前只自动处理 `role=body-pdf`。普通 PDF/Office/压缩包附件的全文索引另行实现。
-- OCR 默认 `mistral-ocr-4-1`，基础 OCR 按 $4/1000 页估算；不启用 annotations、Batch 或供应商缓存折扣假设。
-- 默认每日 50、每月 1000 页尝试（UTC）；每次请求保守按完整源 PDF 页数预留，即使只选部分页。额度由一个 D1 行原子更新，失败不退额度。
-- 每文档最多 12 MiB、100 个源页、20 个 OCR 页；每请求最多 10 个待 OCR 页。超限停止 OCR，原件仍可读。单请求 120 秒超时、响应上限 8 MiB。
-- 全局文件/模型/页组缓存及 lease 防重，每页组最多两次付费尝试，文档自动重试也受次数限制。网络失败不会立即循环付费重试；未耗尽次数的失败任务由后续每日补偿恢复。预算耗尽不消耗付费尝试次数。
-- 1000 个预留页按默认模型对应约 $4 的基础 OCR 用量规模；不是整个云账号账单硬封顶，也不包含 Cloudflare 费用。usage_info 与发票仍需对账。
+- 每日 50、每月 1000 个预留源页（UTC）；每次请求保守预留完整源 PDF 页数，失败不退额度。成功页数与请求记录另存，不能当成供应商发票。
+- 每文档最大 12 MiB、100 个源页、20 个扫描页，每次最多选择 10 个扫描页。超限保留原件，OCR 停止。
+- TextIn 请求最长 180 秒，响应上限 24 MiB；规范化派生产物写入上限 12 MiB。
+- TextIn 账号实际单价未自动获取，不把历史 Mistral 美元单价套用到 TextIn；结果和管理状态的美元估算为 null。`pdf_ocr_usage.estimated_usd` 仅累积 Mistral 的历史美元估算，TextIn 以页数计量并对账账号余额。
+- Cloudflare 费用不包含在供应商页数预算中。OCR 并非免费，缓存命中与原生文字提取不产生新供应商识别调用。
 
-## 管理与边界
+## 运维
 
-`GET /internal/pdf-ocr/<article-id>` 读状态；加 `?model=<exact-id>` 读取完成的原始对比结果。`POST` JSON `{ "model": "mistral-ocr-4-1", "publish": true }` 创建任务或复用结果发布。全部要求 ADMIN_TOKEN。
+使用已有 `0004_pdf_ocr.sql` 表，无新增迁移。Secret 为 `TEXTIN_APP_ID` 与 `TEXTIN_SECRET_CODE`；凭据只发送给 TextIn，不发送 Auth Cookie，也不公开 R2。
 
-`scripts/compare-ocr.mjs` 固定首份扫描样片，支持 status/start/results/publish；results 写入忽略的 `.private/ocr-comparison/`。publish 已完成的模型不会再调用供应商。`scripts/evaluate-ocr.mjs` 只比较本地私有结果和人工转录，不发 API 请求。
+```sh
+pnpm exec wrangler secret put TEXTIN_APP_ID --name cqu-feed
+pnpm exec wrangler secret put TEXTIN_SECRET_CODE --name cqu-feed
+node scripts/compare-ocr.mjs status
+node scripts/compare-ocr.mjs publish textin-xparse-auto
+FEED_ARTICLE_ID=<article-id> node scripts/compare-ocr.mjs publish textin-xparse-auto
+```
 
-目前按页的扫描检测是启发式：较多原文字与图中文字混在同一页时可能漏掉图中文字；未做所有 PDF 类型的质量验证。空白无图页跳过，有图但 OCR 返回空文本会标失败待检查。超大/加密/损坏文件只保留原件，不保证 OCR。没有生成隐形文字层 PDF、逐字高亮或置信度复核系统。自动识别可能把姓名、数字识别错，界面提供原 PDF 对照，不把识别结果当作校方名单的替代原件。
+`publish` 会优先复用结果；首次扫描件可能付费。管理 API 仍为 `/internal/pdf-ocr/<article-id>`（ADMIN_TOKEN）：GET 状态、GET `?model=...` 私有结果、POST `{ "model":"textin-xparse-auto", "publish":true }` 入队。`needs_review` 自动停住；不要为恢复而清空 calls、预算或 R2 请求记录。
+
+每日 Cron 同时接新通知并补偿未完成的 PDF。`PDF_OCR_ENABLED=false` 停止自动入队，已启动 Workflow 不撤销。普通 Office/压缩附件暂不全文索引；加密、损坏、超大或文字仅由矢量轮廓构成的 PDF 不保证提取。OCR 仍可能错姓名和数字，原 PDF 保留作对照；不生成新的隐形文字层 PDF。
+
+## 正式版本适配（2026-10-13）
+
+正式链路使用 `ArchiveOcrWorkflow`，默认 `textin-xparse-auto`；只配置 `TEXTIN_APP_ID` / `TEXTIN_SECRET_CODE` 即可。既有 Mistral 结果仍可读，显式模型对比仍兼容；正常采集不要求 Mistral 凭据，也不自动降级到另一供应商。
+
+`textin-ocr` descriptor 固定 `pdf-no-text-v1` 判定、`TEXTIN_CACHE_VERSION=v1` 与完整请求模板（包括 auto、字符详情、表格结构等）；选中页组进入独立缓存键。payload 必须匹配冻结的 options hash 与支持的请求配置，配置漂移时停止。当前 MVP 命名空间为 `derived/pdf/<sha>/textin-xparse-auto/v1-no-text-75eefb13df7f1ce9/`，正式版直接复用其中完整结果、十页组、raw 与不可覆盖的 request receipt。只改 `ARCHIVE_OCR_PROCESSOR_VERSION` 会新建派生身份，不会绕开这个已付费缓存。
+
+正式结果另写 `derived/ocr/<inputHash>/<processor>/<processorVersion>/<optionsHash>/result.json` 及不可变 hash 对象；D1 derived output、revision requirement 和 ready/reconcile 规则不变。历史版本冻结旧结果；当前阅读重建不产生源版本或通知事件。迁移除正文 PDF 外，也接纳普通 PDF 附件已有的完整 MVP OCR/原生文字结果，保留原键和全文检索。正式新采集的必要 OCR 范围仍为正文 PDF；legacy Workflow 继续支持全部 PDF 附件，不将两条采集链路的范围混称为全面附件 OCR。
+
+TextIn 请求超时、解析失败或原始响应写入失败后，正式 task 为 `blocked`，attempt `error_code=ocr_review_required`，不会由自动恢复再次付费。并发占用为 `deferred/ocr_busy`；MVP 分别为 `needs_review` 和 `deferred_busy`。已有 raw 可由修复后的解析器重建，无可用 raw 且存在 receipt 时必须人工对账，不能清除凭据或换键自动重付。OCR 页组没有自动过期；D1 lease 的释放带原租约条件，R2 receipt 是最终防重边界。
+
+此次实现的验证为本地真实 Worker/D1/R2 加外部 OCR 替身，没有实际付费请求、部署或浏览器验收。适配协议来自已验证签名 MVP `7fb8e2a`；供应商账号价格、真实服务限额与生产 Secret 就绪仍由上线验收确认。

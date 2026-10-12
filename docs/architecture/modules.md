@@ -73,7 +73,7 @@ Cloudflare Queue/Workflow Adapter 只解析已约定消息、装配运行依赖�
 
 [Auth 契约](auth-contract.md) 中带 `clientId/clientSecret/contractVersion` 的结构是跨部署传输格式。Feed 的业务 Interface 只提供 `authClient.getPolicy(authSub)` 与 `authClient.getRecipient(authSub)`；凭证、版本、Service Binding 与 transport exception 转换由 Adapter 在组装时接收并隐藏。业务调用者和测试都不构造 RPC credential envelope。
 
-OCR 可在 Archive Implementation 内部形成 `process(inputDescriptor)` / `status(inputDescriptor)` 的 Module，复用既有 Mistral 与测试 Adapter；输入 hash、处理器版本与选项决定派生结果身份。它只报告识别结果，版本 requirement 和内容事件仍由 Archive 修改，不把“是否可以推送”的知识再分给 OCR 调用者。
+OCR 可在 Archive Implementation 内部形成 `process(inputDescriptor)` / `status(inputDescriptor)` 的 Module，复用 TextIn 与测试 Adapter（保留 Mistral 历史读取/显式对比）；输入 hash、处理器版本与选项决定派生结果身份。它只报告识别结果，版本 requirement 和内容事件仍由 Archive 修改，不把“是否可以推送”的知识再分给 OCR 调用者。
 
 ## 通过 Interface 验证
 

@@ -10,8 +10,9 @@ const articleId='1234567890abcdef12345678';
 const articleUrl='https://jwc.cqu.edu.cn/info/1082/1.htm';
 const prefix='articles/1234567890abcdef12345678/legacy-run';
 
-test('an MVP archive imports through Archive reconcile and supports read switching',async()=>{
-  const {mf,auth}=await fixture();
+for(const [model,ocrRole,caption='',native=false] of [['mistral-ocr-4-1','body-pdf'],['textin-xparse-auto','body-pdf'],['textin-xparse-auto','attachment'],['mistral-ocr-4-1','body-pdf','page 1'],['textin-xparse-auto','attachment','page 1',true]])test(`an MVP ${model} ${ocrRole} ${caption} archive imports through Archive reconcile and supports read switching`,async()=>{
+  const {mf,auth,bucket,legacy}=await fixture({model,ocrRole,caption,native});
+  const pdfText=native?'page 1':'扫描通知 资助名单';
   try{
     const cookie=await login(mf,auth);
     const admin=(path,init={})=>mf.dispatchFetch('https://feed.test'+path,{
@@ -48,13 +49,15 @@ test('an MVP archive imports through Archive reconcile and supports read switchi
     assert.equal(detailResponse.status,200,await detailResponse.clone().text());
     const detail=await detailResponse.json();
     assert.equal(detail.revision.id,revision.id);
-    assert.equal(detail.article.bodyText,'通知说明\n\n扫描通知 资助名单');
+    assert.equal(detail.article.ocr.model,model);
+    assert.deepEqual(await (await bucket.get(legacy.keys.ocr)).json(),legacy.ocrResult);
+    assert.equal(detail.article.bodyText,'通知说明\n\n'+pdfText);
     assert.equal(detail.article.ocr.pages.at(-1).filename,'attachment-1.pdf');
-    assert.equal(detail.article.ocr.pages.at(-1).text,'扫描通知 资助名单');
+    assert.equal(detail.article.ocr.pages.at(-1).text,pdfText);
 
-    const search=await(await read('/api/articles?'+new URLSearchParams({q:'资助名单'}))).json();
+    const search=await(await read('/api/articles?'+new URLSearchParams({q:native?'page':'资助名单'}))).json();
     assert.deepEqual(search.articles.map(row=>row.id),[articleId]);
-    const shortSearch=await(await read('/api/articles?'+new URLSearchParams({q:'名单'}))).json();
+    const shortSearch=await(await read('/api/articles?'+new URLSearchParams({q:native?'pa':'名单'}))).json();
     assert.deepEqual(shortSearch.articles.map(row=>row.id),[articleId]);
     const file=await read(detail.attachments.find(item=>item.filename==='attachment-1.pdf').url,{headers:{Cookie:cookie,Range:'bytes=0-4'}});
     assert.equal(file.status,206);
@@ -77,8 +80,8 @@ test('an MVP archive imports through Archive reconcile and supports read switchi
     const switched=await mf.dispatchFetch('https://feed.test/fixture/read-switch',{method:'POST',body:'false'});
     assert.equal(await switched.text(),'false');
     const legacyDetail=await(await read(`/api/articles/${articleId}`)).json();
-    assert.equal(legacyDetail.article.bodyText,'通知说明\n\n扫描通知 资助名单');
-    const legacySearch=await(await read('/api/articles?'+new URLSearchParams({q:'资助名单'}))).json();
+    assert.equal(legacyDetail.article.bodyText,'通知说明\n\n'+pdfText);
+    const legacySearch=await(await read('/api/articles?'+new URLSearchParams({q:native?'page':'资助名单'}))).json();
     assert.deepEqual(legacySearch.articles.map(row=>row.id),[articleId]);
     const legacySnapshot=await read(`/api/snapshots/${articleId}`);
     assert.equal(legacySnapshot.status,200);
@@ -364,7 +367,7 @@ test('recovering a missing body PDF requires OCR and preserves unconfirmed migra
   }finally{await mf.dispose();}
 });
 
-async function fixture({pageCount=1}={}){
+async function fixture({pageCount=1,model='mistral-ocr-4-1',ocrRole='body-pdf',caption='',native=false}={}){
   const bundle=await build({stdin:{contents:`
     import worker from './worker/index.mjs';
     import {createArchive} from './worker/archive.mjs';
@@ -406,54 +409,55 @@ async function fixture({pageCount=1}={}){
     for(const name of ['0001_feed.sql','0002_auth.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql','0007_archive_versions.sql','0008_content_events.sql','0009_subscriptions.sql','0010_subscription_editing.sql','0011_archive_migration.sql']){
       await applyMigration(db,await readFile('migrations/'+name,'utf8'));
     }
-    const legacy=await seedLegacyArchive({db,bucket,pageCount});
+    const legacy=await seedLegacyArchive({db,bucket,pageCount,model,ocrRole,caption,native});
     return {mf,auth,db,bucket,legacy};
   }catch(error){
     await mf.dispose();throw error;
   }
 }
 
-async function seedLegacyArchive({db,bucket,pageCount=1}){
-  const pdf=scannedPdf(pageCount),normalAttachment='%PDF-1.7\n普通附件';
+async function seedLegacyArchive({db,bucket,pageCount=1,model='mistral-ocr-4-1',ocrRole='body-pdf',caption='',native=false}){
+  const pdf=scannedPdf(pageCount,caption),normalAttachment='%PDF-1.7\n普通附件';
   const pdfHash=sha256(pdf),normalHash=sha256(normalAttachment);
   const body='通知说明\n\nPDF 正文暂未提取到可搜索文字；可在下方阅读原文件。';
   const snapshot=`<html><body><main><h1>迁移通知</h1><p>通知说明</p><iframe data-feed-pdf="attachment-1.pdf" src="https://jwc.cqu.edu.cn/old.pdf" width="700"></iframe></main><script>alert(1)</script></body></html>`;
   const keys={
     body:`${prefix}/body.txt`,snapshot:`${prefix}/offline.html`,
     pdf:`${prefix}/attachment-1.pdf`,normal:`${prefix}/attachment-2.pdf`,
-    ocr:`derived/pdf/${pdfHash}/mistral-ocr-4-1/v1/result.json`,
+    ocr:`derived/pdf/${pdfHash}/${model}/${model==='textin-xparse-auto'?'v1-no-text-75eefb13df7f1ce9':'v1'}/result.json`,
   };
   await bucket.put(keys.body,new TextEncoder().encode(body),{httpMetadata:{contentType:'text/plain; charset=utf-8'}});
   await bucket.put(keys.snapshot,new TextEncoder().encode(snapshot),{httpMetadata:{contentType:'text/html; charset=utf-8'}});
   await bucket.put(keys.pdf,new TextEncoder().encode(pdf),{httpMetadata:{contentType:'application/pdf'}});
   await bucket.put(keys.normal,new TextEncoder().encode(normalAttachment),{httpMetadata:{contentType:'application/pdf'}});
-  const ocrResult={sourceHash:pdfHash,model:'mistral-ocr-4-1',totalPages:pageCount,
-    pages:Array.from({length:pageCount},(_,index)=>({index,text:'扫描通知 资助名单',markdown:'扫描通知 资助名单',source:'ocr'})),createdAt:'2026-10-10T08:00:00Z'};
+  const text=native?caption:'扫描通知 资助名单';
+  const ocrResult={sourceHash:pdfHash,model,totalPages:pageCount,
+    pages:Array.from({length:pageCount},(_,index)=>({index,text,markdown:text,source:native?'native':'ocr'})),createdAt:'2026-10-10T08:00:00Z'};
   await bucket.put(keys.ocr,new TextEncoder().encode(JSON.stringify(ocrResult)),{httpMetadata:{contentType:'application/json'}});
   const now=Date.parse('2026-10-10T09:00:00Z');
   await db.prepare(`INSERT INTO articles(id,source_id,url,title,published_at,discovered_at,captured_at,status,attempts,body_text,excerpt,prefix,content_hash,attachment_count,snapshot_key,ocr_result_key,ocr_model,ocr_updated_at)
-    VALUES (?,'jwc',?,'迁移通知','unknown','2026-10-09T08:00:00Z','2026-10-10T09:00:00Z','complete',0,?,?,?,?,2,?,?,'mistral-ocr-4-1','2026-10-10T10:00:00Z')`)
-    .bind(articleId,articleUrl,'通知说明\n\n扫描通知 资助名单','通知说明',prefix,sha256('通知说明\n\n扫描通知 资助名单'),keys.snapshot,keys.ocr).run();
+    VALUES (?,'jwc',?,'迁移通知','unknown','2026-10-09T08:00:00Z','2026-10-10T09:00:00Z','complete',0,?,?,?,?,2,?,?,?,'2026-10-10T10:00:00Z')`)
+    .bind(articleId,articleUrl,'通知说明\n\n'+text,'通知说明',prefix,sha256('通知说明\n\n'+text),keys.snapshot,keys.ocr,model).run();
   await db.prepare(`INSERT INTO attachments(id,article_id,name,original_url,filename,object_key,bytes,content_type,sha256,status,role)
-    VALUES ('legacy-file-1',?,'正文.pdf','https://jwc.cqu.edu.cn/body.pdf','attachment-1.pdf',?,?,?,?, 'complete','body-pdf'),
+    VALUES ('legacy-file-1',?,'正文.pdf','https://jwc.cqu.edu.cn/body.pdf','attachment-1.pdf',?,?,?,?, 'complete',?),
       ('legacy-file-2',?,'普通附件.pdf','https://jwc.cqu.edu.cn/normal.pdf','attachment-2.pdf',?,?,?,?, 'complete','attachment')`)
-    .bind(articleId,keys.pdf,Buffer.byteLength(pdf),'application/pdf',pdfHash,articleId,keys.normal,Buffer.byteLength(normalAttachment),'application/pdf',normalHash).run();
+    .bind(articleId,keys.pdf,Buffer.byteLength(pdf),'application/pdf',pdfHash,ocrRole,articleId,keys.normal,Buffer.byteLength(normalAttachment),'application/pdf',normalHash).run();
   await db.prepare(`INSERT INTO pdf_ocr_jobs(id,article_id,attachment_id,source_hash,source_key,filename,model,status,attempts,total_pages,ocr_pages,result_key,created_at,updated_at)
     VALUES ('legacy-ocr-1',?,'legacy-file-1',?,?,?,?, 'complete',1,?,?,?, ?,?)`)
-    .bind(articleId,pdfHash,keys.pdf,'attachment-1.pdf','mistral-ocr-4-1',pageCount,pageCount,keys.ocr,now,now).run();
+    .bind(articleId,pdfHash,keys.pdf,'attachment-1.pdf',model,pageCount,native?0:pageCount,keys.ocr,now,now).run();
   await db.prepare(`INSERT INTO article_sources(article_id,source_id,first_seen_at,last_seen_at,discovery_class,published_at,published_day,date_precision,source_timezone)
     VALUES (?,'jwc',?,?,?,?,?,'unknown','Asia/Shanghai')`)
     .bind(articleId,Date.parse('2026-10-09T08:00:00Z'),Date.parse('2026-10-10T09:00:00Z'),'migrated',null,null).run();
   return {keys,ocrResult};
 }
 
-function scannedPdf(pageCount=1){
-  const stream='q 200 0 0 200 20 20 cm /Im0 Do Q';
+function scannedPdf(pageCount=1,caption=''){
+  const stream='q 200 0 0 200 20 20 cm /Im0 Do Q'+(caption?' BT /F1 12 Tf 72 120 Td ('+caption+') Tj ET':'');
   const objects=['<< /Type /Catalog /Pages 2 0 R >>',
     `<< /Type /Pages /Kids [${Array.from({length:pageCount},(_,index)=>`${3+index*3} 0 R`).join(' ')}] /Count ${pageCount} >>`];
   for(let index=0;index<pageCount;index++){
     const page=3+index*3;
-    objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources << /XObject << /Im0 ${page+2} 0 R >> >> /Contents ${page+1} 0 R >>`,
+    objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> /XObject << /Im0 ${page+2} 0 R >> >> /Contents ${page+1} 0 R >>`,
       `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`,
       '<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 1 >>\nstream\nP\nendstream');
   }

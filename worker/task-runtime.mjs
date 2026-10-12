@@ -420,8 +420,10 @@ async function finishTask(env,kind,taskId,attemptNo,result,now=()=>Date.now()){
   const retryFrom=kind==='backfill'?(await env.DB.prepare('SELECT backfill_retry_from FROM tasks WHERE id=?').bind(taskId).first())?.backfill_retry_from??1:1;
   let state='succeeded',errorCode=null,dueAt=timestamp;
   if(result.superseded&&kind==='backfill')state='cancelled';
-  if(result.skipped||result.deferred){
-    errorCode=result.skipped?'capture_busy':classifyLimit(result.error);
+  if(kind==='ocr'&&result.reviewRequired){
+    state='blocked';errorCode='ocr_review_required';
+  }else if(result.skipped||result.deferred){
+    errorCode=result.ocrBusy?'ocr_busy':result.skipped?'capture_busy':classifyLimit(result.error);
     state=errorCode==='quota_exhausted'||attemptNo>=1000||attemptNo-retryFrom+1>=maxAttempts?'blocked':'deferred';
     const retryAfter=Number.isFinite(result.retryAfterMs)?Math.max(0,result.retryAfterMs):0;
     if(retryAfter>24*60*60*1000)state='blocked';
@@ -460,7 +462,10 @@ async function failTask(env,kind,taskId,attemptNo,error,now=()=>Date.now()){
     .bind(taskId,attemptNo).first();
   if(receipt?.result_json)return finishTask(env,kind,taskId,attemptNo,JSON.parse(receipt.result_json),now);
   const message=cleanError(error),classification=classifyLimit(message);
-  return finishTask(env,kind,taskId,attemptNo,{error:message,...(classification!=='provider_error'?{deferred:true}:{})},now);
+  const reviewRequired=kind==='ocr'&&/review required/i.test(message);
+  const ocrBusy=kind==='ocr'&&/Identical PDF OCR is busy/.test(message);
+  return finishTask(env,kind,taskId,attemptNo,{error:message,...(reviewRequired?{reviewRequired:true}:{}),
+    ...(ocrBusy?{ocrBusy:true,deferred:true,retryAfterMs:60_000}:classification!=='provider_error'?{deferred:true}:{})},now);
 }
 
 async function persistWorkflowStatus(env,{taskId,attemptNo,status,now}){

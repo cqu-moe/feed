@@ -1,29 +1,33 @@
-import {mistralOcr} from './mistral-ocr.mjs';
+import {OCR_MODELS,mistralOcr} from './mistral-ocr.mjs';
+import {TEXTIN_MODEL,TEXTIN_CACHE_VERSION,textinConfig} from './textin-ocr.mjs';
 import {pdfPages} from './pdf-text.mjs';
 import {aggregateOcrProjection,applyOcrEntries,validateOcrProjection} from './archive-ocr-view.mjs';
-import {reservePages} from './pdf-ocr.mjs';
+import {cachedPdfText,reservePages} from './ocr-cache.mjs';
 import {storeTextObject} from './archive-objects.mjs';
 import {launchOutboxId,launchOutboxStatement} from './task-statements.mjs';
 import {WorkflowEntrypoint} from 'cloudflare:workers';
 import {createTaskRuntime,failOcrTask,finishOcrTask} from './task-runtime.mjs';
 import {sha} from './utils.mjs';
 
-export const OCR_PROCESSOR='mistral-ocr';
+export const OCR_PROCESSOR='textin-ocr';
 const hashPattern=/^[a-f0-9]{64}$/;
 const idPattern=/^[a-f0-9]{24}$/;
 const processorVersion=env=>/^v[1-9][0-9a-z.-]{0,19}$/.test(env.ARCHIVE_OCR_PROCESSOR_VERSION??'')?env.ARCHIVE_OCR_PROCESSOR_VERSION:'v1';
 
 export async function ocrDescriptor(env){
-  const model=env.PDF_OCR_MODEL??'mistral-ocr-4-1';
-  const options={model,pageDetection:'pdf-operators-v1',includeImageBase64:false,tableFormat:null};
+  const model=env.PDF_OCR_MODEL??TEXTIN_MODEL;
+  if(model!==TEXTIN_MODEL&&!Object.hasOwn(OCR_MODELS,model))throw new Error('Unsupported OCR model');
+  const options=model===TEXTIN_MODEL
+    ?{model,pageDetection:'pdf-no-text-v1',cacheVersion:TEXTIN_CACHE_VERSION,requestConfig:textinConfig([0])}
+    :{model,pageDetection:'pdf-operators-v1',includeImageBase64:false,tableFormat:null};
   const optionsHash=await sha(JSON.stringify(options));
-  return {inputProcessor:OCR_PROCESSOR,processorVersion:processorVersion(env),options,optionsHash};
+  return {inputProcessor:model===TEXTIN_MODEL?OCR_PROCESSOR:'mistral-ocr',processorVersion:processorVersion(env),options,optionsHash};
 }
 
 export async function withOcrIdentity(env,row){
   if(row.kind!=='body_ocr')return row;
   const descriptor=await ocrDescriptor(env);
-  return {...row,processor:descriptor.inputProcessor,processorVersion:descriptor.processorVersion,optionsHash:descriptor.optionsHash};
+  return {...row,processor:descriptor.inputProcessor,processorVersion:descriptor.processorVersion,optionsHash:descriptor.optionsHash,options:descriptor.options};
 }
 
 export async function ocrTaskStatements(env,row,timestamp,{articleId=null}={}){
@@ -31,7 +35,7 @@ export async function ocrTaskStatements(env,row,timestamp,{articleId=null}={}){
   const businessKey=JSON.stringify(['ocr',row.inputHash,row.processor,row.processorVersion,row.optionsHash]);
   const taskId=(await sha(businessKey)).slice(0,24),outboxId=await launchOutboxId(taskId,1);
   const payload={v:1,inputHash:row.inputHash,processor:row.processor,processorVersion:row.processorVersion,
-    optionsHash:row.optionsHash,options:{model:row.options?.model??env.PDF_OCR_MODEL??'mistral-ocr-4-1'}};
+    optionsHash:row.optionsHash,options:row.options??(await ocrDescriptor(env)).options};
   return [
     env.DB.prepare(`INSERT INTO tasks(id,kind,business_key,article_id,payload_json,state,due_at,created_at,updated_at)
       VALUES (?,'ocr',?,?,?,'queued',?,?,?) ON CONFLICT(business_key) DO NOTHING`)
@@ -73,13 +77,13 @@ export async function adoptExistingOcrStatements(env,revisionId,row,timestamp){
   ];
 }
 
-export async function processOcrTask(env,taskId,attemptNo,{provider=mistralOcr,now=()=>Date.now()}={}){
+export async function processOcrTask(env,taskId,attemptNo,{provider,now=()=>Date.now()}={}){
   if(!idPattern.test(taskId??''))throw new Error('Invalid OCR task id');
   const task=await env.DB.prepare(`SELECT t.*,a.state AS attempt_state
     FROM tasks t JOIN task_attempts a ON a.task_id=t.id AND a.attempt_no=t.attempt_no
     WHERE t.id=? AND t.kind='ocr' AND t.attempt_no=?`).bind(taskId,attemptNo).first();
   if(!task||task.attempt_state!=='running')return {skipped:true};
-  const descriptor=validateTaskPayload(task);
+  const descriptor=await validateTaskPayload(task);
   let derived=await findDerived(env,descriptor);
   if(!derived){
     derived=await recognize(env,descriptor,provider);
@@ -134,16 +138,21 @@ export async function archiveOcrStatus(env,articleId){
   return {current,tasks:tasks.results};
 }
 
-function validateTaskPayload(task){
+async function validateTaskPayload(task){
   let payload;
   try{payload=JSON.parse(task.payload_json);}catch{throw new Error('Invalid OCR task payload');}
   if(payload?.v!==1||!hashPattern.test(payload.inputHash??'')
-    ||payload.processor!==OCR_PROCESSOR
+    ||!['textin-ocr','mistral-ocr'].includes(payload.processor)
     ||!/^[a-z][a-z0-9.-]{0,19}$/i.test(payload.processorVersion??'')
     ||!hashPattern.test(payload.optionsHash??'')||typeof payload.options?.model!=='string')
     throw new Error('OCR task identity is invalid');
   const businessKey=JSON.stringify(['ocr',payload.inputHash,payload.processor,payload.processorVersion,payload.optionsHash]);
   if(task.business_key!==businessKey)throw new Error('OCR task payload does not match its business key');
+  if(payload.processor==='textin-ocr'){
+    const supported=await ocrDescriptor({PDF_OCR_MODEL:TEXTIN_MODEL,ARCHIVE_OCR_PROCESSOR_VERSION:payload.processorVersion});
+    if(payload.optionsHash!==supported.optionsHash||await sha(JSON.stringify(payload.options))!==payload.optionsHash)
+      throw new Error('OCR request configuration does not match its pinned identity; review required');
+  }else if(!Object.hasOwn(OCR_MODELS,payload.options.model))throw new Error('OCR model does not match its processor identity');
   return {inputHash:payload.inputHash,processor:payload.processor,processorVersion:payload.processorVersion,
     optionsHash:payload.optionsHash,model:payload.options.model};
 }
@@ -161,15 +170,22 @@ async function recognize(env,descriptor,provider){
   if(!input)throw new Error('OCR input object is missing');
   const object=await env.ARCHIVE.get(input.r2_key);
   if(!object||object.size!==input.byte_size)throw new Error('OCR input object is unavailable');
-  const inspectBytes=await object.arrayBuffer(),analysis=await pdfPages(inspectBytes.slice(0));
-  const wanted=analysis.pages.filter(page=>page.needsOcr).map(page=>page.index);
-  if(wanted.length>20)throw new Error('PDF exceeds 20 OCR pages; requires a larger explicit budget');
-  let output=await readDerivedJournal(env,descriptor),call=null;
+  let output=await readDerivedJournal(env,descriptor);
+  if(!output&&descriptor.model===TEXTIN_MODEL){
+    const result=await cachedPdfText(env,{source_hash:descriptor.inputHash,source_key:input.r2_key,model:descriptor.model});
+    output=await writeDerivedJournal(env,descriptor,{v:1,inputHash:descriptor.inputHash,processor:descriptor.processor,
+      processorVersion:descriptor.processorVersion,optionsHash:descriptor.optionsHash,model:descriptor.model,
+      totalPages:result.totalPages,pages:result.pages,calls:result.calls??[],estimatedUsd:null,estimatedCny:null,createdAt:result.createdAt});
+  }
   if(!output){
+    const inspectBytes=await object.arrayBuffer(),analysis=await pdfPages(inspectBytes.slice(0));
+    const wanted=analysis.pages.filter(page=>page.needsOcr).map(page=>page.index);
+    if(wanted.length>20)throw new Error('PDF exceeds 20 OCR pages; requires a larger explicit budget');
+    let call=null;
     if(wanted.length){
       await reservePages(env,analysis.totalPages);
       const source=await env.ARCHIVE.get(input.r2_key);
-      call=await provider(env,{bytes:await source.arrayBuffer(),pages:wanted,model:descriptor.model});
+      call=await (provider??mistralOcr)(env,{bytes:await source.arrayBuffer(),pages:wanted,model:descriptor.model});
     }
     const recognized=new Map((call?.pages??[]).map(page=>[page.index,page]));
     const pages=analysis.pages.map(page=>{
@@ -380,7 +396,8 @@ export class ArchiveOcrWorkflow extends WorkflowEntrypoint{
         return result[0].results.length>0;
       });
       if(!claimed)return {superseded:true};
-      const result=await step.do('extract',()=>processOcrTask(this.env,taskId,attempt));
+      const result=await step.do('extract',{retries:{limit:0,delay:'30 seconds'},timeout:'10 minutes'},
+        ()=>processOcrTask(this.env,taskId,attempt));
       await step.do('finish',()=>finishOcrTask(this.env,taskId,attempt,result));
       await createTaskRuntime(this.env).dispatchDueOutbox().catch(()=>{});
       return result;

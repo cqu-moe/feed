@@ -1,5 +1,6 @@
 # CQU Feed 扫描 PDF OCR 方案调研
 
+> 历史选型研究。2026-10-13 正式版已按用户纠正沿用已验证 TextIn MVP；当前默认、缓存和计费保护以 [pdf-ocr-design.md](pdf-ocr-design.md) 为准。以下 Mistral 调研与对比证据保留，不代表当前默认。
 调研日期：2026-10-11。下文保留实测前的官方文档调研；后续已完成两模型真实云端对比并选定 OCR 4.1，当前结论以 [实测报告](ocr-comparison.md) 和 [实现说明](pdf-ocr-design.md) 为准。
 
 ## 结论

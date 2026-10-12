@@ -1,0 +1,31 @@
+{
+  "code": 200,
+  "message": "success",
+  "data": {
+    "schema_version": "1.4.0",
+    "file_id": "file-single-page",
+    "job_id": "job-single-page",
+    "success_count": 1,
+    "metadata": {
+      "filename": "document.pdf",
+      "filetype": "application/pdf",
+      "page_count": 1
+    },
+    "pages": [
+      {
+        "page_number": 1,
+        "status": "Success",
+        "element_ids": ["text-1"]
+      }
+    ],
+    "elements": [
+      {
+        "element_id": "text-1",
+        "type": "NarrativeText",
+        "text": "scanned page text",
+        "page_number": 1,
+        "metadata": {}
+      }
+    ]
+  }
+}

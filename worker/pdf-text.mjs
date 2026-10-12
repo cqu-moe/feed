@@ -13,9 +13,9 @@ export async function pdfPages(buffer){
       const page=await pdf.getPage(number),content=await page.getTextContent();
       const text=content.items.filter(item=>'str' in item).map(item=>item.str+(item.hasEOL?'\n':' ')).join('').trim();
       const operators=await page.getOperatorList(),hasImages=operators.fnArray.some(op=>imageOps.has(op));
-      const chars=text.replace(/\s/g,''),corrupt=(chars.match(/[\uFFFD\u0000-\u0008]/g)||[]).length;
-      // A sparse caption/page number does not make an otherwise scanned page searchable.
-      const needsOcr=(hasImages&&chars.length<80)||corrupt>Math.max(2,chars.length*.1);
+      // The user opted into OCR only when a page has no text layer. Even a
+      // short caption/page number counts: never charge to replace existing text.
+      const needsOcr=hasImages&&!text.replace(/\s/g,'').length;
       pages.push({index:number-1,text,hasImages,needsOcr});
       page.cleanup();
     }

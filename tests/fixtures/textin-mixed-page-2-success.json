@@ -1,0 +1,47 @@
+{
+  "code": 200,
+  "message": "success",
+  "data": {
+    "schema_version": "1.4.0",
+    "file_id": "file-mixed-page-2",
+    "job_id": "job-mixed-page-2",
+    "success_count": 1,
+    "metadata": {
+      "filename": "document.pdf",
+      "filetype": "application/pdf",
+      "page_count": 2
+    },
+    "pages": [
+      {
+        "page_number": 2,
+        "status": "Success",
+        "element_ids": ["table-2"]
+      }
+    ],
+    "elements": [
+      {
+        "element_id": "table-2",
+        "type": "Table",
+        "text": "<table>second scanned page</table>",
+        "page_number": 2,
+        "metadata": {
+          "is_continuation": true,
+          "continuation_of": "table-1"
+        },
+        "table_structure": {
+          "rows": 1,
+          "cols": 1,
+          "cells": [
+            {
+              "row": 1,
+              "col": 1,
+              "row_span": 1,
+              "col_span": 1,
+              "text": "second scanned page"
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

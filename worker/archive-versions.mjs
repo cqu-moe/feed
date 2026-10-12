@@ -158,25 +158,25 @@ async function frozenRevisionBody(env,requirements){
 async function revisionOcr(env,requirements,projection=null){
   const rows=requirements.filter(item=>item.kind==='body_ocr');
   if(!rows.length)return null;
-  if(rows.some(item=>item.state!=='fulfilled'||!item.objectHash))return {status:'pending',model:env.PDF_OCR_MODEL??'mistral-ocr-4-1',htmlText:'',pages:[],updatedAt:null};
+  if(rows.some(item=>item.state!=='fulfilled'||!item.objectHash))return {status:'pending',model:env.PDF_OCR_MODEL??'textin-xparse-auto',htmlText:'',pages:[],updatedAt:null};
   if(projection?.ocrResultHash){
     const object=await env.ARCHIVE.get(objectKeyFromHash(projection.ocrResultHash));
     if(!object)throw new Error('Current projection OCR result is unavailable');
     const output=await object.json();
     if(Array.isArray(output?.inputs)){
       validateOcrProjection(output,rows);
-      return {status:'complete',model:projection.ocrModel??output.model??env.PDF_OCR_MODEL??'mistral-ocr-4-1',htmlText:'',
+      return {status:'complete',model:projection.ocrModel??output.model??env.PDF_OCR_MODEL??'textin-xparse-auto',htmlText:'',
         pages:flattenOcrEntries(output.inputs),updatedAt:projection.ocrUpdatedAt??output.updatedAt??null};
     }
     if(!rows.some(item=>item.inputHash===output?.inputHash)||!Array.isArray(output.pages))throw new Error('Current projection OCR identity is invalid');
     const filenameByInput=new Map(rows.map(item=>[item.inputHash,item.filename]));
-    return {status:'complete',model:projection.ocrModel??output.model??env.PDF_OCR_MODEL??'mistral-ocr-4-1',htmlText:'',
+    return {status:'complete',model:projection.ocrModel??output.model??env.PDF_OCR_MODEL??'textin-xparse-auto',htmlText:'',
       pages:output.pages.map(page=>({page:page.index+1,filename:filenameByInput.get(output.inputHash)??null,
         source:page.source==='native'?'native':'ocr',markdown:String(page.markdown??page.text??''),text:String(page.text??'')})),
       updatedAt:projection.ocrUpdatedAt??output.createdAt??null};
   }
   const pages=[];
-  let model=env.PDF_OCR_MODEL??'mistral-ocr-4-1',updatedAt=null;
+  let model=env.PDF_OCR_MODEL??'textin-xparse-auto',updatedAt=null;
   const entries=[];
   for(const requirement of rows){
     const object=await env.ARCHIVE.get(objectKeyFromHash(requirement.objectHash));

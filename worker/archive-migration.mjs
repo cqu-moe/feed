@@ -246,7 +246,12 @@ export function createArchiveMigration(env,{now=()=>Date.now()}={}){
         inspected.row.state='failed';inspected.row.errorCode='duplicate_filename';
       }
       if(inspected)inventory.push(inspected.row);
-      if(inspectAttachment.role!=='body-pdf')continue;
+      // MVP TextIn also published ordinary PDF attachments (including native-only
+      // documents). Keep those paid/readable results in the frozen revision.
+      const completedOcr=await env.DB.prepare(`SELECT id FROM pdf_ocr_jobs WHERE article_id=? AND attachment_id=?
+        AND source_hash=? AND status='complete' LIMIT 1`)
+        .bind(article.id,inspectAttachment.id,inspectAttachment.sha256??'').first();
+      if(inspectAttachment.role!=='body-pdf'&&!completedOcr)continue;
       if(!inspected?.bytes){
         continue;
       }
@@ -264,7 +269,7 @@ export function createArchiveMigration(env,{now=()=>Date.now()}={}){
         continue;
       }
       const wanted=analysis.pages.filter(page=>page.needsOcr).length;
-      if(!wanted)continue;
+      if(!wanted&&!completedOcr)continue;
       const adopted=await adoptLegacyOcr({article,attachment:inspectAttachment,analysis,objects,differences,ocrComparisons,timestamp:now()});
       const processing=adopted??await legacyOcrIdentity(env,article,inspectAttachment);
       inventory.push(requirementRow(`ocr:${slotNo}`,'body_ocr',inspectAttachment,true,adopted?'fulfilled':'failed',
@@ -580,7 +585,7 @@ export function createArchiveMigration(env,{now=()=>Date.now()}={}){
     }
 
     for(const requirement of requirements.results){
-      if(requirement.kind==='body_pdf'&&requirement.object_hash){
+      if(['body_pdf','attachment'].includes(requirement.kind)&&requirement.object_hash){
         const slot=Number(requirement.slot_key.split(':')[1]),ocrSlot=`ocr:${slot}`;
         const ocrRequirement=requirements.results.find(row=>row.slot_key===ocrSlot);
         if(ocrRequirement?.required&&ocrRequirement.state!=='fulfilled'&&!ocrRequirement.derived_output_id){
@@ -637,7 +642,7 @@ export function createArchiveMigration(env,{now=()=>Date.now()}={}){
             expectedHash,expectedBytes,
             contentType:attachment.content_type??frozen?.contentType,required:requirement.required,
             requireSignature:true,errorCode:requirement.error_code,differences,objects,observedAt:now()});
-          if(inspected?.bytes&&requirement.kind==='body_pdf')
+          if(inspected?.bytes&&(requirement.kind==='body_pdf'||expected.ocrJobs?.some(job=>job.sourceHash===expectedHash)))
             bodyInputs.set(requirement.slot_key,{attachment:{...attachment,sha256:expectedHash,
               bytes:expectedBytes},bytes:inspected.bytes,objectHash:inspected.row.objectHash});
         }
@@ -652,7 +657,7 @@ export function createArchiveMigration(env,{now=()=>Date.now()}={}){
     for(const [slotKey,input] of bodyInputs){
       let analysis;
       try{analysis=await pdfPages(input.bytes);}catch{continue;}
-      if(!analysis.pages.some(page=>page.needsOcr))continue;
+      if(!analysis.pages.some(page=>page.needsOcr)&&!expected.ocrJobs?.some(job=>job.sourceHash===input.objectHash))continue;
       const adopted=await adoptLegacyOcr({article:context,attachment:input.attachment,analysis,objects,
         differences,ocrComparisons:[],timestamp:now(),expectedJobs:expected.ocrJobs??null});
       const slot=slotKey.split(':')[1],ocrSlot=`ocr:${slot}`;
@@ -892,6 +897,12 @@ function excludedComparison(reason){
 }
 
 function validateLegacyOcr(output,analysis,job){
+  // Historical Mistral jobs used the old sparse/corrupt-text policy. Validate
+  // their frozen evidence under that policy; new TextIn requests never use it.
+  if(['mistral-ocr-2512','mistral-ocr-4-1'].includes(job.model))analysis={...analysis,pages:analysis.pages.map(page=>{
+    const chars=page.text.replace(/\s/g,''),corrupt=(chars.match(/[\uFFFD\u0000-\u0008]/g)||[]).length;
+    return {...page,needsOcr:(page.hasImages&&chars.length<80)||corrupt>Math.max(2,chars.length*.1)};
+  })};
   if(!output||typeof output!=='object')return 'OCR result is not an object';
   if(!validHash(output.sourceHash)&&!validHash(output.inputHash))return 'OCR result has no original PDF identity';
   if(!Number.isSafeInteger(job.total_pages)||job.total_pages!==analysis.totalPages)return 'OCR job page count does not cover the PDF';

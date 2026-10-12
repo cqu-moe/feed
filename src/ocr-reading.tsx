@@ -76,10 +76,10 @@ export function OcrReading({
 }) {
   return (
     <section className="feed-detail-section feed-ocr-section" aria-labelledby="feed-ocr-title">
-      <h2 id="feed-ocr-title">扫描件文字识别</h2>
+      <h2 id="feed-ocr-title">PDF 正文与附件文字</h2>
       <div className="feed-ocr-shell">
         <p className="feed-ocr-intro">
-          以下为扫描版 PDF 的自动识别结果。姓名和数字可能有误，请以原 PDF 为准。
+          以下文字来自已存档的 PDF；扫描页由 OCR 自动识别。姓名和数字可能有误，请以原 PDF 为准。
         </p>
         {ocr.htmlText && <div className="feed-prose">{ocr.htmlText}</div>}
         <p className="feed-ocr-status">{statusLabel(ocr)}</p>
@@ -88,7 +88,7 @@ export function OcrReading({
             {ocr.pages.map((item) => (
               <article className="feed-ocr-page" key={`${item.filename}-${item.page}`}>
                 <header className="feed-ocr-page-header">
-                  <h3>第 {item.page} 页</h3>
+                  <h3>{ocr.pages.some((page) => page.filename !== item.filename) && `${item.filename} · `}第 {item.page} 页</h3>
                   <Button asChild variant="outline" size="sm">
                     <Link
                       to={
