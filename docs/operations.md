@@ -43,7 +43,7 @@ Workers secrets：
 
 | Secret | 用途 |
 | --- | --- |
-| `FIRECRAWL_API_KEY` | 可选；当前未配置，使用 Firecrawl keyless 入口，可能受 IP 限流 |
+| `FIRECRAWL_API_KEY` | 已确认生产 Worker 存在同名 Secret；未读取值，真实付费调用有效性待隔离验收。未配置时回退 keyless 入口 |
 | `BRIDGE_SECRET` | 给 Firecrawl 页面签发 5 分钟源站 origin 绑定 HMAC capability |
 | `MISTRAL_API_KEY` | 私有 R2 正文 PDF 的 Mistral OCR；与验证码 Workers AI 分开计费 |
 | `ADMIN_TOKEN` | `/internal/*` 管理 Bearer token |
@@ -207,6 +207,18 @@ PDF-only 缺失原件时保留 blocked 观察，列表明确显示缺项，待�
 `POST /internal/articles/:articleId/pdf-ocr` 使用当前处理器配置重建当前阅读投影，`GET` 返回对应 OCR 状态。历史完整版本继续使用发布时冻结的结果；重做不新建源版本或内容事件。多份正文 PDF 的结果按文件保存到聚合投影，版本检查避免并发重做覆盖另一份文件的识别改进。新源版本的投影与旧投影分开，HTML 后续版本不会继承旧 PDF 的 OCR。
 
 正文、附件或必要 OCR 未齐备时，不开放该候选版本的正文与文件链接；既有完整版本继续可读。历史补抓/迁移的内容事件带 `history_only`，日期未知的事件保留待核实。当前 `event-ready` 仅完成持久交接校验，订阅匹配与投递由后续任务接入；不能把事件存在等同于已发邮件。本地验证包括实际 Worker Queue/BFF 入口、R2/D1 故障重放、乱序就绪与多 PDF 重做；云平台持久步骤及真实供应商验收仍属于 T17。
+
+## 4B. T07 个人订阅配置
+
+应用 `0009_subscriptions.sql` 后，登录用户可在 `/subscriptions` 命名并创建多个订阅，选择栏目或创建时展开的站点范围，默认每日摘要。当前切片只保存配置，RSS 内容与邮件由后续 T09/T11 开放，界面明确显示这一状态。
+
+`GET /api/subscriptions` 返回当前会话所有者的配置、当前 Auth 配额、计算出的运行状态和可选栏目。`POST /api/subscriptions` 接受 `{requestId,name,siteIds,sourceIds,emailMode}`，校验同源 Origin；不接受客户端指定 owner。所有未删除配置计创建额度，包括暂停、邮件关闭和 RSS 撤销项；条件 INSERT 与目标、请求回执同批提交，防止并发超额。同 requestId 重试返回原订阅和原栏目范围，不因站点新增栏目而扩大。
+
+每个订阅生成 256 bit 随机 RSS token。D1 保存 hash 及 AES-GCM 密文，密文绑定所有者、订阅 ID 和凭证代次，使用区别于 BFF 会话的用途派生密钥。当前密钥材料使用既有 `FEED_SESSION_ENCRYPTION_KEY`（兼容别名 `SESSION_ENCRYPTION_KEY`）；不新增必须配置的 secret。登录后的所有者可持续查看和复制当前链接，刷新或重试不会生成新链接。响应不缓存，token 不写入日志。重置/撤销功能由 T08 接入。
+
+更换上述密钥材料前，应使用旧密钥解密并迁移 RSS 密文，再切换运行时 secret；只更换 secret 会使旧 RSS 链接无法在设置中取回。RSS hash 校验与密文展示分别保留，后续轮换可重建凭证；不能通过静默重置链接掩盖密钥丢失。
+
+界面区分零/缺失额度、权限撤回、超额和 Auth 暂不可用；已保存配置保留。创建后发生降额或 Auth 查询故障，返回 `created` 与当前暂停原因；响应丢失时按同 requestId 重试，不断言保存失败。保存期间锁定表单，避免旧响应覆盖新草稿。
 
 ## 5. 构建与部署
 

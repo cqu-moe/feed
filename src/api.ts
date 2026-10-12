@@ -36,6 +36,7 @@ export type Session = {
 
 export type Source = {
   id: string;
+  siteId: string;
   name: string;
   url: string;
   lastRunAt: string | null;
@@ -161,6 +162,17 @@ async function readJson(response: Response): Promise<unknown> {
   }
 }
 
+async function errorResult(response: Response): Promise<{ ok: false; status: number; message: string }> {
+  let message = `请求失败（HTTP ${response.status}）。`;
+  try {
+    const value = await readJson(response);
+    if (isRecord(value) && typeof value.error === 'string' && value.error) message = value.error;
+  } catch {
+    // Keep the HTTP fallback when the server could not return structured JSON.
+  }
+  return { ok: false, status: response.status, message };
+}
+
 export async function requestJson<T>(
   path: string,
   validate: (value: unknown) => T,
@@ -178,7 +190,7 @@ export async function requestJson<T>(
     });
 
     if (!response.ok) {
-      return { ok: false, status: response.status, message: `请求失败（HTTP ${response.status}）。` };
+      return await errorResult(response);
     }
 
     return { ok: true, data: validate(await readJson(response)) };
@@ -261,9 +273,10 @@ function parseSource(value: unknown): Source {
   if (
     !isRecord(value) ||
     typeof value.id !== 'string' ||
+    typeof value.siteId !== 'string' ||
     typeof value.name !== 'string' ||
     typeof value.url !== 'string' ||
-    typeof value.lastRunAt !== 'string' ||
+    (value.lastRunAt !== null && typeof value.lastRunAt !== 'string') ||
     typeof value.articleCount !== 'number' ||
     !Number.isFinite(value.articleCount)
   ) {
@@ -271,11 +284,189 @@ function parseSource(value: unknown): Source {
   }
   return {
     id: value.id,
+    siteId: value.siteId,
     name: value.name,
     url: value.url,
     lastRunAt: value.lastRunAt,
     articleCount: value.articleCount,
     error: stringOrNull(value.error),
+  };
+}
+
+export type SubscriptionEffectiveStatus =
+  | 'active'
+  | 'paused'
+  | 'access_revoked'
+  | 'quota_exceeded'
+  | 'auth_unavailable';
+
+export type SubscriptionTarget = {
+  sourceId: string;
+  sourceName: string;
+  effectiveFrom: string;
+};
+
+export type Subscription = {
+  id: string;
+  name: string;
+  requestedEnabled: boolean;
+  priority: number;
+  emailMode: 'off' | 'immediate' | 'daily_digest';
+  activatedAt: string;
+  createdAt: string;
+  targetSourceIds: string[];
+  targets: SubscriptionTarget[];
+  effectiveStatus: SubscriptionEffectiveStatus;
+  rssUrl: string | null;
+};
+
+export type SubscriptionPolicy =
+  | {
+      status: 'available';
+      access: boolean;
+      subscriptionLimit: SubscriptionLimit;
+    }
+  | { status: 'auth_unavailable' };
+
+export type SubscriptionSite = {
+  id: string;
+  name: string;
+};
+
+export type SubscriptionSourceOption = {
+  id: string;
+  siteId: string;
+  name: string;
+};
+
+export type SubscriptionList = {
+  subscriptions: Subscription[];
+  policy: SubscriptionPolicy;
+  usage: number;
+  sites: SubscriptionSite[];
+  sources: SubscriptionSourceOption[];
+  outputChannels: {
+    rss: { enabled: false; reason: string };
+    email: { enabled: false; reason: string };
+  };
+};
+
+export type SubscriptionCreateResponse = {
+  created: boolean;
+  subscription: Subscription;
+};
+
+function parseSubscriptionEffectiveStatus(value: unknown): SubscriptionEffectiveStatus {
+  if (
+    value === 'active' ||
+    value === 'paused' ||
+    value === 'access_revoked' ||
+    value === 'quota_exceeded' ||
+    value === 'auth_unavailable'
+  ) return value;
+  throw new Error('订阅状态结构不匹配。');
+}
+
+function parseSubscriptionEmailMode(value: unknown): Subscription['emailMode'] {
+  if (value === 'off' || value === 'immediate' || value === 'daily_digest') return value;
+  throw new Error('订阅邮件模式结构不匹配。');
+}
+
+function parseSubscriptionTarget(value: unknown): SubscriptionTarget {
+  if (!isRecord(value) || typeof value.sourceId !== 'string' || typeof value.sourceName !== 'string' || typeof value.effectiveFrom !== 'string') {
+    throw new Error('订阅栏目结构不匹配。');
+  }
+  return { sourceId: value.sourceId, sourceName: value.sourceName, effectiveFrom: value.effectiveFrom };
+}
+
+function parseSubscription(value: unknown): Subscription {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== 'string' ||
+    typeof value.name !== 'string' ||
+    typeof value.requestedEnabled !== 'boolean' ||
+    typeof value.priority !== 'number' ||
+    typeof value.activatedAt !== 'string' ||
+    typeof value.createdAt !== 'string' ||
+    !Array.isArray(value.targetSourceIds) ||
+    value.targetSourceIds.some((item) => typeof item !== 'string') ||
+    !Array.isArray(value.targets) ||
+    (value.rssUrl !== null && (typeof value.rssUrl !== 'string' || !/^\/rss\?token=[A-Za-z0-9_-]{43}$/.test(value.rssUrl)))
+  ) throw new Error('订阅结构不匹配。');
+  return {
+    id: value.id,
+    name: value.name,
+    requestedEnabled: value.requestedEnabled,
+    priority: value.priority,
+    emailMode: parseSubscriptionEmailMode(value.emailMode),
+    activatedAt: value.activatedAt,
+    createdAt: value.createdAt,
+    targetSourceIds: value.targetSourceIds,
+    targets: value.targets.map(parseSubscriptionTarget),
+    effectiveStatus: parseSubscriptionEffectiveStatus(value.effectiveStatus),
+    rssUrl: value.rssUrl,
+  };
+}
+
+function parseSubscriptionPolicy(value: unknown): SubscriptionPolicy {
+  if (!isRecord(value)) throw new Error('订阅额度结构不匹配。');
+  if (value.status === 'auth_unavailable') return { status: value.status };
+  if (
+    value.status !== 'available' ||
+    typeof value.access !== 'boolean' ||
+    !isRecord(value.subscriptionLimit)
+  ) throw new Error('订阅额度结构不匹配。');
+  return {
+    status: 'available',
+    access: value.access,
+    subscriptionLimit: parseSubscriptionLimit(value.subscriptionLimit),
+  };
+}
+
+function parseOutputChannel(value: unknown, label: string): { enabled: false; reason: string } {
+  if (!isRecord(value) || value.enabled !== false || typeof value.reason !== 'string') {
+    throw new Error(`${label}输出通道结构不匹配。`);
+  }
+  return { enabled: false, reason: value.reason };
+}
+
+export function parseSubscriptionList(value: unknown): SubscriptionList {
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.subscriptions) ||
+    !Array.isArray(value.sites) ||
+    !Array.isArray(value.sources) ||
+    typeof value.usage !== 'number' ||
+    !Number.isSafeInteger(value.usage) ||
+    value.usage < 0 ||
+    !isRecord(value.outputChannels) ||
+    !isRecord(value.outputChannels.rss) ||
+    !isRecord(value.outputChannels.email)
+  ) throw new Error('订阅列表结构不匹配。');
+  if (
+    value.sites.some((item) => !isRecord(item) || typeof item.id !== 'string' || typeof item.name !== 'string') ||
+    value.sources.some((item) => !isRecord(item) || typeof item.id !== 'string' || typeof item.siteId !== 'string' || typeof item.name !== 'string')
+  ) throw new Error('订阅栏目选项结构不匹配。');
+  return {
+    subscriptions: value.subscriptions.map(parseSubscription),
+    policy: parseSubscriptionPolicy(value.policy),
+    usage: value.usage,
+    sites: value.sites as SubscriptionSite[],
+    sources: value.sources as SubscriptionSourceOption[],
+    outputChannels: {
+      rss: parseOutputChannel(value.outputChannels.rss, 'RSS'),
+      email: parseOutputChannel(value.outputChannels.email, '邮件'),
+    },
+  };
+}
+
+export function parseSubscriptionCreate(value: unknown): SubscriptionCreateResponse {
+  if (!isRecord(value) || typeof value.created !== 'boolean' || !isRecord(value.subscription)) {
+    throw new Error('订阅保存结果结构不匹配。');
+  }
+  return {
+    created: value.created,
+    subscription: parseSubscription(value.subscription),
   };
 }
 

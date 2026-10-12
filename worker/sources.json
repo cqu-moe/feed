@@ -1,6 +1,7 @@
 [
   {
     "id": "jwc",
+    "siteId": "7fd03676e5751e9b6dd95ecb",
     "name": "教务处",
     "url": "https://jwc.cqu.edu.cn/",
     "listUrls": [
@@ -11,6 +12,7 @@
   },
   {
     "id": "intex",
+    "siteId": "1922681dab068aba5ab31dd8",
     "name": "国际处",
     "url": "https://intex.cqu.edu.cn/",
     "listUrls": [
@@ -20,6 +22,7 @@
   },
   {
     "id": "civil",
+    "siteId": "9527c4fa93c87021fea169ff",
     "name": "土木学院",
     "url": "https://civil.cqu.edu.cn/",
     "listUrls": [
@@ -29,6 +32,7 @@
   },
   {
     "id": "xgb",
+    "siteId": "40b5b99980d313a8206ab67c",
     "name": "学工部",
     "url": "https://xgb.cqu.edu.cn/",
     "listUrls": [
@@ -38,6 +42,7 @@
   },
   {
     "id": "news",
+    "siteId": "9076295fe7a44c01dabe3c33",
     "name": "新闻网",
     "url": "https://news.cqu.edu.cn/",
     "listUrls": [

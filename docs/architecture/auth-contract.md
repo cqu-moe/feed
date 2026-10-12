@@ -113,7 +113,7 @@ Auth 在一次一致的数据库读取中取得用户状态、Feed 两个权益�
 
 ## RSS 与邮件的对外表现
 
-RSS 先验证 token hash，再按 owner 查询 policy 和运行集合。无效、已轮换或撤销 token 返回 404；有效 token 但明确权益/配额暂停返回 403；Auth 暂不可用返回 503 + Retry-After。响应 `Cache-Control: private, no-store`，不通过公开 CDN 缓存绕开实时权限。暂停不发送 410，避免阅读器把可恢复订阅永久移除。
+订阅设置仅向当前已验证会话的所有者返回解密后的当前 RSS 链接，允许持续查看和复制；RSS 读取仍先验证 token hash，再按 owner 查询 policy 和运行集合。无效、已轮换或撤销 token 返回 404；有效 token 但明确权益/配额暂停返回 403；Auth 暂不可用返回 503 + Retry-After。响应 `Cache-Control: private, no-store`，不通过公开 CDN 缓存绕开实时权限。暂停不发送 410，避免阅读器把可恢复订阅永久移除。
 
 正常 RSS 只包含日期已核实、完整事件的标题、摘要和版本链接；附件不提供公开对象地址。ETag 可以用于客户端条件读取，但先完成权限检查再考虑 304。正文和文件路由继续登录并检查 `feed.access`。
 
