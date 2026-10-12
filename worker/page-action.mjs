@@ -29,6 +29,8 @@ export async function captchaPage(input) {
     if(!report.bodyRecognized)return report;
     const content = document.querySelector('.v_news_content, #vsb_content, #vsb_content_2, article, .article-content, .news_content') || document.body;
     report.bodyText = content.innerText.trim();
+    report.bodyHtml = content.innerHTML;
+    report.bodyCapturedAt = new Date().toISOString();
     report.heading = document.querySelector('h1, .title')?.innerText?.trim() || input.title || document.title;
     report.dateText = document.querySelector('meta[name=\"PubDate\"]')?.content || document.body.innerText.slice(0,4000);
     const candidates=[];
@@ -93,6 +95,7 @@ export async function captchaPage(input) {
           if(!response.kind){const returned=new DOMParser().parseFromString(new TextDecoder().decode(response.bytes),'text/html');attemptReport.captchaAgain=!!returned.querySelector('input[name="codeValue"]');attemptReport.text=returned.body.textContent.trim().slice(-450);}
           row.attempts.push(attemptReport);
         }
+        row.fetchedAt=new Date().toISOString();
         row.status=response.status;row.originalFile=response.status===200&&!!response.kind;row.kind=response.kind;row.bytes=response.bytes.length;row.contentType=response.type;row.contentDisposition=response.headers.disposition;
         if(row.originalFile){const ext=response.kind==='pdf'?'pdf':/\.(docx?|xlsx?|pptx?|zip|rar|7z)$/i.exec(item.name)?.[1]?.toLowerCase()??'bin';const name=`attachment-${index+1}.${ext}`;row.saved=response.bytes.length>2*1024*1024?await upload(name,response.bytes):save(name,response.bytes,response.type);}
         else row.error??='CAPTCHA attempt limit reached';

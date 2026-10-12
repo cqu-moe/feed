@@ -82,7 +82,7 @@ const firecrawlPlugin={
   },
 };
 
-async function fixture(){
+async function fixture({versioned=false}={}){
   const bundle=await build({
     stdin:{
       contents:`
@@ -199,13 +199,13 @@ async function fixture(){
       return new Promise(resolve=>{gate.release=()=>{gate.url=null;gate.held=false;resolve(new Response('ready'));};});
     }},
     bindings:{...provider.bindings,ADMIN_TOKEN:'test-admin-token',BASE_URL:'https://feed.test',BRIDGE_SECRET:'test-bridge-secret',
-      SOURCE_MANAGEMENT_ENABLED:'true',CRAWL_ENABLED:'true',TASK_RUNTIME_ENABLED:'true',PDF_OCR_ENABLED:'false',MAX_DISCOVERY_PAGES_PER_RUN:'2'},
+      ARCHIVE_VERSIONS_ENABLED:String(versioned),ARCHIVE_READS_ENABLED:String(versioned),SOURCE_MANAGEMENT_ENABLED:'true',CRAWL_ENABLED:'true',TASK_RUNTIME_ENABLED:'true',PDF_OCR_ENABLED:'false',MAX_DISCOVERY_PAGES_PER_RUN:'2'},
     d1Databases:['DB'],r2Buckets:['ARCHIVE'],
     queueProducers:{FEED_JOBS:{queueName:'feed-jobs'}},
     queueConsumers:{'feed-jobs':{maxBatchSize:1,maxRetries:3,deadLetterQueue:'feed-jobs-dlq'}},
   }));
   const db=await mf.getD1Database('DB');
-  for(const name of ['0001_feed.sql','0002_auth.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql']){
+  for(const name of ['0001_feed.sql','0002_auth.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql','0007_archive_versions.sql']){
     await applyMigration(db,await readFile(`migrations/${name}`,'utf8'));
   }
   return {mf,db,provider,gate,read:async path=>mf.dispatchFetch('https://feed.test'+path,{headers:{Cookie:await login(mf,provider)}})};
@@ -244,7 +244,7 @@ test('admin verifies a saved source asynchronously before enabling it; duplicate
 });
 
 test('two discovered columns share one notification and capture while all finite pages finish and both filters find it',async()=>{
-  const {mf,read,provider}=await fixture();
+  const {mf,read,provider}=await fixture({versioned:true});
   try{
     const site=await request(mf,'/internal/sites',{method:'POST',body:{name:'多栏目站点',origin:'https://a.test'}});
     const a=await createVerifiedSource(mf,site.data.site.id,'https://a.test/list-a.htm');

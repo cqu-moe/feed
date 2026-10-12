@@ -8,6 +8,7 @@ import {captchaPage} from './page-action.mjs';
 import {issueGrant} from './bridge.mjs';
 import {scrape} from './firecrawl.mjs';
 import {put,bounded,fileKind,sha,cleanError} from './utils.mjs';
+import {resumeSavedCapture,saveCaptureRevision} from './archive-capture.mjs';
 
 export function createCollector(dependencies={}){
   const {
@@ -26,6 +27,11 @@ async function collectArticle(env,source,article,dependencies,captureContext){
   const {scrape:scrapeDependency,fetch:fetchDependency,enqueueOcr:enqueueOcrDependency}=dependencies;
   const {fence,taskId=null,attemptNo=null}=captureContext??{};
   if(!Number.isSafeInteger(fence))throw new Error('Capture lease is required');
+  const versioned=taskId&&env.ARCHIVE_VERSIONS_ENABLED==='true';
+  if(versioned){
+    const saved=await resumeSavedCapture(env,source,article,captureContext);
+    if(saved)return saved;
+  }
   const commitGuard=`EXISTS(SELECT 1 FROM articles WHERE id=? AND capture_fence=? AND status='collecting' AND lease_until>?)
     AND (? IS NULL OR EXISTS(SELECT 1 FROM tasks WHERE id=? AND attempt_no=? AND state='running'))`;
   const runId=crypto.randomUUID(),prefix=`articles/${article.id}/${runId}`;
@@ -35,7 +41,7 @@ async function collectArticle(env,source,article,dependencies,captureContext){
   const data=await scrapeDependency(env,article.url,{formats:['markdown','rawHtml',{type:'screenshot',fullPage:true}],onlyMainContent:true,actions:[{type:'executeJavascript',script:`var __name=value=>value; (${captchaPage.toString()})(${JSON.stringify(input)})`}]});
   let page=data.actions?.javascriptReturns?.[0]?.value;if(typeof page==='string')page=JSON.parse(page);
   if(!page?.bodyRecognized||new URL(page.page.url).origin!==new URL(source.url).origin)throw new Error('Article body not recognized');
-  const report={id:article.id,runId,url:article.url,captureFence:fence,capturedAt:new Date().toISOString(),provider:{statusCode:data.metadata?.statusCode,creditsUsed:data.metadata?.creditsUsed,proxyUsed:data.metadata?.proxyUsed},artifacts:[],errors:[...(page.errors??[])]};
+  const report={id:article.id,runId,url:article.url,captureFence:fence,capturedAt:new Date().toISOString(),bodyCapturedAt:page.bodyCapturedAt??null,provider:{statusCode:data.metadata?.statusCode,creditsUsed:data.metadata?.creditsUsed,proxyUsed:data.metadata?.proxyUsed},artifacts:[],errors:[...(page.errors??[])]};
   const stored=new Map();
   for(const item of page.artifacts??[]){
     if(!/^(attachment-\d+\.(pdf|docx?|xlsx?|pptx?|zip|rar|7z|bin)|snapshot\.html|offline\.html)$/.test(item.name))throw new Error('Unexpected artifact');
@@ -52,6 +58,7 @@ async function collectArticle(env,source,article,dependencies,captureContext){
     stored.set(name,saved);report.artifacts.push(saved);
   }
   let body=page.bodyText?.trim()||((page.downloads??[]).some(row=>row.role==='body-pdf')?'':data.markdown||'');
+  const rawBody=body,nativePdfs=new Set();
   // PDF-only notices still have searchable, unified text; original PDF remains authoritative.
   for(const row of page.downloads??[]){
     const saved=stored.get(row.saved?.name);
@@ -59,13 +66,18 @@ async function collectArticle(env,source,article,dependencies,captureContext){
       try{
         const object=await env.ARCHIVE.get(saved.key);
         const converted=await pdfText(await object.arrayBuffer());
+        if(converted.text?.trim())nativePdfs.add(saved.name);
         body+='\n\n'+(converted.text||PDF_TEXT_UNAVAILABLE);
         report.artifacts.push(await put(env,prefix,`${saved.name}.txt`,converted.text,'text/plain; charset=utf-8'));
-      }catch(error){report.errors.push(cleanError(error));}
+      }catch(error){body+='\n\n'+PDF_TEXT_UNAVAILABLE;report.errors.push(cleanError(error));}
     }
   }
   body=readingText(body);
-  if(!body.trim())throw new Error('Empty article body');
+  // A PDF-only notice is still a real observation when its original cannot be
+  // downloaded. Keep the empty HTML body and the failed PDF requirement together.
+  if(!body.trim()&&!(versioned&&page.attachmentCandidates?.some(row=>row.role==='body-pdf'))){
+    throw new Error('Empty article body');
+  }
   report.artifacts.push(await put(env,prefix,'body.txt',body,'text/plain; charset=utf-8'));
   if(data.markdown)report.artifacts.push(await put(env,prefix,'body.md',data.markdown,'text/markdown; charset=utf-8'));
   if(data.rawHtml)report.artifacts.push(await put(env,prefix,'rendered.html',data.rawHtml,'text/html; charset=utf-8'));
@@ -95,6 +107,7 @@ async function collectArticle(env,source,article,dependencies,captureContext){
   report.status=status;report.attachmentCount=candidates.length;report.downloadedCount=completeFiles;
   report.downloads=(page.downloads??[]).map(({attempts,...row})=>({...row,attemptCount:attempts?.length??0}));
   report.artifacts.push(await put(env,prefix,'manifest.json',JSON.stringify(report,null,2),'application/json'));
+  if(versioned)return saveCaptureRevision(env,source,article,captureContext,{report,stored,candidates,downloaded,body,rawBody,sourceMarkup:page.bodyHtml??null,nativePdfs,sourceTitle:page.heading||page.page.title});
   const result={id:article.id,status,attachments:candidates.length,downloaded:completeFiles,creditsUsed:report.provider.creditsUsed};
   // One eligibility cutoff for the entire atomic batch, after all R2 writes. A later
   // claimant changes the fence; the clock cannot expire between individual writes.

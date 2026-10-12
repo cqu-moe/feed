@@ -176,6 +176,12 @@ const router = createBrowserRouter([
   { path: '/admin/tasks', element: <AdminTasksPage />, errorElement: <RouteError /> },
   { path: '/admin/sources', element: <AdminSourcesPage />, errorElement: <RouteError /> },
   {
+    path: '/reader/:articleId/revisions/:revisionId/:filename',
+    loader: loadProtectedSession,
+    element: <Suspense fallback={<p role="status">正在加载 PDF 阅读器…</p>}><PdfReader /></Suspense>,
+    errorElement: <RouteError />,
+  },
+  {
     path: '/reader/:id/:filename',
     loader: loadProtectedSession,
     element: <Suspense fallback={<p role="status">正在加载 PDF 阅读器…</p>}><PdfReader /></Suspense>,

@@ -32,23 +32,32 @@ export function createArchive(env,{
     },
     async capture(source,article,{taskId=null,attemptNo=null}={}){
       const timestamp=Date.now();
+      const versioned=taskId&&env.ARCHIVE_VERSIONS_ENABLED==='true';
       const lease=await env.DB.prepare(`UPDATE articles
-        SET status='collecting',attempts=attempts+1,lease_until=?,capture_fence=capture_fence+1
-        WHERE id=? AND (status<>'collecting' OR lease_until<=?) AND (
+        SET status=${versioned?'status':"'collecting'"},attempts=attempts+1,lease_until=?,capture_fence=capture_fence+1${versioned?',next_revision_no=next_revision_no+1':''}
+        WHERE id=? AND lease_until<=? AND (
           (? IS NULL AND status IN ('pending','partial','failed','collecting') AND attempts<3)
           OR (? IS NOT NULL AND EXISTS(SELECT 1 FROM tasks WHERE id=? AND article_id=articles.id AND attempt_no=? AND state='running'))
-        ) RETURNING id,prefix,capture_fence,lease_until`)
+        ) RETURNING id,prefix,capture_fence,lease_until${versioned?',next_revision_no-1 AS observation_no':''}`)
         .bind(timestamp+10*60000,article.id,timestamp,taskId,taskId,taskId,attemptNo).first();
       if(!lease)return {skipped:true};
       try{
-        return await collector(env,source,article,{fence:lease.capture_fence,taskId,attemptNo});
+        return await collector(env,source,article,{fence:lease.capture_fence,taskId,attemptNo,observationNo:lease.observation_no});
       }catch(error){
-        const message=cleanError(error),deferred=isGlobalLimitError(message);
+        if(taskId){
+          const receipt=await env.DB.prepare('SELECT result_json FROM task_attempts WHERE task_id=? AND attempt_no=?')
+            .bind(taskId,attemptNo).first().catch(()=>null);
+          if(receipt?.result_json)return JSON.parse(receipt.result_json);
+        }
+        const message=cleanError(error);
+        const savedResult=versioned&&!/fence|identity|checksum|inventory/i.test(message)
+          ?await env.ARCHIVE.head(`captures/${taskId}/result.json`).catch(()=>null):null;
+        const deferred=isGlobalLimitError(message)||Boolean(savedResult);
         await env.DB.prepare(`UPDATE articles
-          SET status=CASE WHEN prefix IS NULL THEN ? ELSE 'partial' END,
-              attempts=attempts-?,lease_until=0,error=?
-          WHERE id=? AND status='collecting' AND capture_fence=?`)
-          .bind(deferred?'pending':'failed',deferred?1:0,message,article.id,lease.capture_fence).run();
+          SET status=CASE WHEN ? THEN status WHEN prefix IS NULL THEN ? ELSE 'partial' END,
+              attempts=attempts-?,lease_until=0,error=CASE WHEN ? THEN error ELSE ? END
+          WHERE id=? AND capture_fence=?`)
+          .bind(versioned?1:0,deferred?'pending':'failed',deferred?1:0,versioned?1:0,message,article.id,lease.capture_fence).run();
         return {...(deferred?{deferred:true}:{}),...(Number.isFinite(error.retryAfterMs)?{retryAfterMs:error.retryAfterMs}:{}),error:message};
       }
     },

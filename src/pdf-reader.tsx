@@ -29,7 +29,8 @@ function clampPage(page: number, pageCount: number): number {
 }
 
 export default function PdfReader() {
-  const { id = '', filename = '' } = useParams();
+  const { articleId: revisionArticleId, id: legacyArticleId, revisionId, filename = '' } = useParams();
+  const articleId = revisionArticleId ?? legacyArticleId ?? '';
   const [params, setParams] = useSearchParams();
   const requestedPage = readPage(params.get('page'));
   const container = useRef<HTMLDivElement>(null);
@@ -51,9 +52,11 @@ export default function PdfReader() {
 
   useEffect(() => {
     setPage(pages ? clampPage(requestedPage, pages) : requestedPage);
-  }, [id, filename, requestedPage, pages]);
+  }, [articleId, revisionId, filename, requestedPage, pages]);
 
-  const valid = /^[a-f0-9]{24}$/.test(id) && /^attachment-\d+\.pdf$/.test(filename);
+  const valid = /^[a-f0-9]{24}$/.test(articleId)
+    && (revisionId === undefined || /^[A-Za-z0-9_-]+$/.test(revisionId))
+    && /^attachment-\d+\.pdf$/.test(filename);
   if (!valid) {
     return (
       <PageState
@@ -64,7 +67,9 @@ export default function PdfReader() {
     );
   }
 
-  const file = `/api/files/${id}/${filename}`;
+  const file = revisionId
+    ? `/api/articles/${articleId}/revisions/${encodeURIComponent(revisionId)}/files/${filename}`
+    : `/api/files/${articleId}/${filename}`;
 
   function goToPage(nextPage: number) {
     if (!pages) return;

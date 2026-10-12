@@ -19,6 +19,8 @@
     "TASK_RUNTIME_ENABLED":"false",
     "SOURCE_MANAGEMENT_ENABLED":"false",
     "MAX_DISCOVERY_PAGES_PER_RUN":"2",
+    "ARCHIVE_VERSIONS_ENABLED":"false",
+    "ARCHIVE_READS_ENABLED":"false",
     "MAX_TASK_ATTEMPTS":"3",
     "PDF_OCR_ENABLED":"true",
     "PDF_OCR_MODEL":"mistral-ocr-4-1",
