@@ -185,7 +185,7 @@ test('mixed PDF OCR is cached, adopted per revision, and reconciles out of order
   }));
   try{
     const db=await mf.getD1Database('DB');
-    for(const name of ['0001_feed.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql','0007_archive_versions.sql','0008_content_events.sql']){
+    for(const name of ['0001_feed.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql','0007_archive_versions.sql','0008_content_events.sql','0018_outbox_receipts.sql']){
       await applyMigration(db,await readFile(`migrations/${name}`,'utf8'));
     }
     const now=Date.now();

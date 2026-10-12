@@ -6,6 +6,7 @@ import { requestJson } from './api';
 import { articleStatusLabel, formatDateTime, StandaloneHeader } from './components';
 import { AdminMailPanel } from './admin-mail';
 import { AdminNotificationEvents } from './admin-notifications';
+import { AdminOperationsPanel } from './admin-operations';
 
 type Task = {
   id: string; kind?: string; sourceId?: string; articleId: string | null; articleTitle?: string; state: string;
@@ -156,6 +157,7 @@ export function AdminTasksPage() {
             {activeTask.lastError && <p role="status">{activeTask.lastError}</p>}
             {activeTask.articleId && <Button asChild variant="outline"><Link to={`/articles/${activeTask.articleId}`}>查看通知</Link></Button>}
           </section>}
+          <AdminOperationsPanel token={token} />
           <AdminNotificationEvents token={token} />
           <AdminMailPanel token={token} />
           <section aria-label="最近采集任务">

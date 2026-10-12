@@ -10,10 +10,11 @@ const activeStates=['queued','starting','running'];
 const platformStates=new Set(['queued','running','paused','waiting','waitingForPause','rollingBack']);
 const terminalPlatformStates=new Set(['complete','errored','terminated']);
 const idPattern=/^[a-f0-9]{24}$/;
-const replayAfterMs=15*60*1000;
 
 export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,workflow,workflows}={}){
   const maxAttempts=boundedInteger(env.MAX_TASK_ATTEMPTS,3,1,10);
+  const maxLaunchAttempts=boundedInteger(env.TASK_MAX_LAUNCH_ATTEMPTS,5,1,20);
+  const launchReplayAfterMs=boundedDuration(env.TASK_LAUNCH_REPLAY_AFTER_MS,15*60*1000,60*1000,24*60*60*1000);
   const articleStatus=env.ARCHIVE_VERSIONS_ENABLED==='true'
     ?"COALESCE((SELECT CASE WHEN r.state='ready' THEN 'complete' ELSE 'partial' END FROM article_revisions r WHERE r.id=json_extract(a.result_json,'$.revisionId')),ar.status)"
     :'ar.status';
@@ -120,7 +121,7 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
         JOIN outbox o ON o.topic='feed-jobs' AND o.dedupe_key='start:'||t.id||':a'||t.attempt_no
         WHERE t.state IN ('queued','starting') AND o.state='sent' AND o.updated_at<=?
         AND NOT EXISTS(SELECT 1 FROM task_attempts a WHERE a.task_id=t.id AND a.attempt_no=t.attempt_no AND a.handed_off_at IS NOT NULL)
-        ORDER BY o.updated_at,o.id LIMIT ?`).bind(timestamp-replayAfterMs,pageSize).all();
+        ORDER BY o.updated_at,o.id LIMIT ?`).bind(timestamp-launchReplayAfterMs,pageSize).all();
       for(const row of stranded.results){
         if(row.workflow_instance_id){
           try{
@@ -129,7 +130,7 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
             continue;
           }catch{ /* An unconfirmed handoff may only retry its original identity. */ }
         }
-        if(row.attempts>=5){
+        if(row.attempts>=maxLaunchAttempts){
           await env.DB.batch([env.DB.prepare(`UPDATE tasks SET state='blocked',last_error='launch_delivery_exhausted',updated_at=?
             WHERE id=? AND attempt_no=? AND state IN ('queued','starting')`).bind(timestamp,row.id,row.attempt_no),
             ...(row.kind==='backfill'?[backfillFailureStatement(env,row.id,row.attempt_no,timestamp)]:[])]);
@@ -173,6 +174,96 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
       return {dispatched,reconciled:rows.results.length,recovered};
     },
 
+    async recoverTask(taskId){
+      if(!idPattern.test(taskId??''))throw new ValidationError('taskId must be a 24-character lowercase hex id');
+      let task=await env.DB.prepare(`SELECT t.*,a.workflow_instance_id,a.handed_off_at,a.result_json
+        FROM tasks t LEFT JOIN task_attempts a ON a.task_id=t.id AND a.attempt_no=t.attempt_no
+        WHERE t.id=?`).bind(taskId).first();
+      if(!task)return null;
+      if(!['discover','capture','ocr'].includes(task.kind))
+        throw new ValidationError('Task recovery uses its business queue message');
+      requireCrawlRuntime(env);
+      let workflowStatus=null;
+      if(activeStates.includes(task.state)&&!task.workflow_instance_id){
+        const replayed=await runtime.requeueLaunch(task.id,task.attempt_no,now());
+        return {id:task.id,state:task.state,recovered:recovered(replayed),workflowStatus:null};
+      }
+      if(task.workflow_instance_id&&(activeStates.includes(task.state)||task.state==='failed'
+        ||task.state==='deferred'&&task.due_at<=now())){
+        const observedAttempt=task.attempt_no,observedInstance=task.workflow_instance_id;
+        const instance=await selectWorkflow(env,{workflow,workflows},task.kind).get(task.workflow_instance_id);
+        const status=await instance.status();
+        workflowStatus=status.status;
+        await persistWorkflowStatus(env,{taskId:task.id,attemptNo:task.attempt_no,status,now});
+        task=await env.DB.prepare(`SELECT t.*,a.workflow_instance_id,a.handed_off_at
+          FROM tasks t LEFT JOIN task_attempts a ON a.task_id=t.id AND a.attempt_no=t.attempt_no
+          WHERE t.id=?`).bind(taskId).first();
+        // A status observation authorizes only the attempt that was actually queried.
+        if(task.attempt_no!==observedAttempt||task.workflow_instance_id!==observedInstance
+          ||!terminalPlatformStates.has(workflowStatus)||activeStates.includes(task.state))
+          return {id:task.id,state:task.state,recovered:0,workflowStatus};
+      }
+      const due=task.state==='deferred'&&task.due_at<=now();
+      if(!['failed','deferred'].includes(task.state)||!due&&task.state==='deferred')
+        return {id:task.id,state:task.state,recovered:0,workflowStatus};
+      if(task.handed_off_at===null||!terminalPlatformStates.has(workflowStatus))
+        return {id:task.id,state:task.state,recovered:0,workflowStatus};
+      if(task.attempt_no>=maxAttempts){
+        await env.DB.prepare(`UPDATE tasks SET state='blocked',last_error='retry_limit_reached',updated_at=?
+          WHERE id=? AND attempt_no=? AND state IN ('failed','deferred')`).bind(now(),task.id,task.attempt_no).run();
+        return {id:task.id,state:'blocked',recovered:0,workflowStatus};
+      }
+      const next=task.attempt_no+1,id=await launchOutboxId(task.id,next),timestamp=now();
+      const result=await env.DB.batch([
+        env.DB.prepare(`UPDATE tasks SET state='queued',attempt_no=?,due_at=?,checkpoint_json=NULL,last_error=NULL,updated_at=?
+          WHERE id=? AND attempt_no=? AND (state='failed' OR (state='deferred' AND due_at<=?))`)
+          .bind(next,timestamp,timestamp,task.id,task.attempt_no,timestamp),
+        launchOutboxStatement(env,{id,taskId:task.id,attempt:next,timestamp}),
+      ]);
+      const changed=result[0].meta.changes>0;
+      let dispatched=true;
+      if(changed){
+        try{await runtime.dispatchOutbox(id);}
+        catch{dispatched=false;}
+      }
+      return {id:task.id,state:changed?'queued':task.state,recovered:Number(changed),workflowStatus,
+        ...(dispatched?{}:{dispatched:false})};
+    },
+
+    async requeueLaunch(taskId,attemptNo,timestamp){
+      const key=launchDedupeKey(taskId,attemptNo);
+      await env.DB.prepare(`UPDATE outbox SET state='queued',available_at=?,updated_at=?
+        WHERE topic='feed-jobs' AND dedupe_key=? AND state='sent'`)
+        .bind(timestamp,timestamp,key).run();
+      const row=await env.DB.prepare('SELECT id FROM outbox WHERE topic=? AND dedupe_key=?')
+        .bind('feed-jobs',key).first();
+      if(!row)return false;
+      return await runtime.dispatchOutbox(row.id).catch(()=>false);
+    },
+
+    async dispatchOutbox(outboxId){
+      if(!idPattern.test(outboxId??''))throw new ValidationError('outboxId must be a 24-character lowercase hex id');
+      const timestamp=now(),row=await env.DB.prepare(`SELECT * FROM outbox WHERE id=? AND state='queued' AND available_at<=?`)
+        .bind(outboxId,timestamp).first();
+      if(!row)return false;
+      const target=row.topic==='feed-jobs'?queue:row.topic==='feed-events'?env.FEED_EVENTS:env.FEED_MAIL;
+      if(!target)throw new Error(`Queue binding unavailable for ${row.topic}`);
+      try{
+        const message=JSON.parse(row.payload_json);
+        if(row.topic==='feed-jobs'&&env.SOURCE_MANAGEMENT_ENABLED==='true'
+          &&!await admitDiscovery(env,message.taskId,message.attempt,timestamp))return false;
+        await target.send(message,{contentType:'json'});
+        await env.DB.prepare(`UPDATE outbox SET state='sent',attempts=attempts+1,last_error=NULL,updated_at=?
+          WHERE id=? AND state='queued'`).bind(timestamp,row.id).run();
+        return true;
+      }catch(error){
+        await env.DB.prepare(`UPDATE outbox SET attempts=attempts+1,last_error=?,available_at=?,updated_at=?
+          WHERE id=? AND state='queued'`)
+          .bind(cleanError(error),timestamp+Math.min(6*60*60*1000,60_000*2**Math.min(row.attempts,9)),timestamp,row.id).run();
+        throw error;
+      }
+    },
+
     async status(taskId){
       if(!idPattern.test(taskId??''))return null;
       return env.DB.prepare(`SELECT t.id,t.kind,t.business_key,t.source_id AS sourceId,t.article_id AS articleId,
@@ -214,12 +305,36 @@ export async function handleFeedJobs(batch,env,dependencies={}){
       else if(['check-ready','event-ready','match-source','source-associated'].includes(message.body?.type))
         await handleFeedEvent(env,message,dependencies);
       else await runtime.startJob(message.body);
+      await recordOutboxReceipt(env,message.body,'processed',dependencies.now?.()??Date.now()).catch(()=>{});
       message.ack();
     }catch(error){
-      console.warn(JSON.stringify({event:'feed_message_failed',type:message.body?.type,error:cleanError(error)}));
+      const warning={event:'feed_message_failed',type:message.body?.type,error:cleanError(error)};
+      console.warn(JSON.stringify(warning));
+      await recordOutboxReceipt(env,message.body,'failed',dependencies.now?.()??Date.now(),error).catch(()=>{});
       message.retry({delaySeconds:Math.min(300,30*2**Math.max(0,(message.attempts??1)-1))});
     }
   }
+}
+
+async function recordOutboxReceipt(env,payload,state,timestamp,error=null){
+  const outboxId=payload?.outboxId,topic=topicForPayload(payload);
+  if(!idPattern.test(outboxId??'')||!topic)return;
+  await env.DB.prepare(`INSERT INTO outbox_receipts(outbox_id,topic,state,attempts,last_error,processed_at,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?)
+    ON CONFLICT(outbox_id) DO UPDATE SET
+      state=CASE WHEN outbox_receipts.state='processed' OR excluded.state='processed' THEN 'processed' ELSE excluded.state END,
+      attempts=attempts+1,
+      last_error=CASE WHEN outbox_receipts.state='processed' OR excluded.state='processed' THEN NULL ELSE excluded.last_error END,
+      processed_at=COALESCE(processed_at,excluded.processed_at),
+      updated_at=excluded.updated_at`)
+    .bind(outboxId,topic,state,1,error?cleanError(error):null,state==='processed'?timestamp:null,timestamp,timestamp).run();
+}
+
+function topicForPayload(payload){
+  if(payload?.type==='send-mail')return 'feed-mail';
+  if(['check-ready','event-ready','match-source','source-associated'].includes(payload?.type))return 'feed-events';
+  if(payload?.type==='start-job')return 'feed-jobs';
+  return null;
 }
 
 async function handleFeedEvent(env,message,dependencies={}){
@@ -300,15 +415,18 @@ export async function finishOcrTask(env,taskId,attemptNo,result,now=()=>Date.now
 
 async function finishTask(env,kind,taskId,attemptNo,result,now=()=>Date.now()){
   const timestamp=now(),maxAttempts=boundedInteger(env.MAX_TASK_ATTEMPTS,3,1,10);
+  const baseDelayMs=boundedDuration(env.TASK_RETRY_BASE_DELAY_MS,15*60*1000,60_000,24*60*60*1000);
+  const maxDelayMs=boundedDuration(env.TASK_RETRY_MAX_DELAY_MS,6*60*60*1000,baseDelayMs,7*24*60*60*1000);
   const retryFrom=kind==='backfill'?(await env.DB.prepare('SELECT backfill_retry_from FROM tasks WHERE id=?').bind(taskId).first())?.backfill_retry_from??1:1;
-  let state=result.superseded&&kind==='backfill'?'cancelled':'succeeded',errorCode=null,dueAt=timestamp;
+  let state='succeeded',errorCode=null,dueAt=timestamp;
+  if(result.superseded&&kind==='backfill')state='cancelled';
   if(result.skipped||result.deferred){
     errorCode=result.skipped?'capture_busy':classifyLimit(result.error);
     state=errorCode==='quota_exhausted'||attemptNo>=1000||attemptNo-retryFrom+1>=maxAttempts?'blocked':'deferred';
     const retryAfter=Number.isFinite(result.retryAfterMs)?Math.max(0,result.retryAfterMs):0;
     if(retryAfter>24*60*60*1000)state='blocked';
     const jitter=(parseInt(taskId.slice(0,6),16)%60)*1000;
-    dueAt=timestamp+Math.max(Math.min(retryAfter,24*60*60*1000),errorCode==='capture_busy'?60_000:Math.min(6*60*60*1000,15*60*1000*2**(attemptNo-1)+jitter));
+    dueAt=timestamp+Math.max(retryAfter,errorCode==='capture_busy'?60_000:Math.min(maxDelayMs,baseDelayMs*2**(attemptNo-1)+jitter));
   }else if(result.error){state='failed';errorCode=`${kind}_failed`;}
   await env.DB.batch([
     env.DB.prepare(`UPDATE tasks SET state=?,due_at=?,last_error=?,checkpoint_json=?,updated_at=?
@@ -395,5 +513,13 @@ function classifyLimit(message){
   return 'provider_error';
 }
 function boundedInteger(value,fallback,min,max){const n=Number(value);return Number.isSafeInteger(n)?Math.min(max,Math.max(min,n)):fallback;}
+function boundedDuration(value,fallback,min,max){const n=Number(value);return Number.isSafeInteger(n)?Math.min(max,Math.max(min,n)):fallback;}
+function recovered(value){return Number(value);}
 export class ValidationError extends Error{}
+export function requireCrawlRuntime(env){
+  if(env.TASK_RUNTIME_ENABLED==='true'&&env.CRAWL_ENABLED==='true')return;
+  const error=new ValidationError('Crawl task runtime is disabled');
+  error.status=503;
+  throw error;
+}
 class SchemaError extends Error{}

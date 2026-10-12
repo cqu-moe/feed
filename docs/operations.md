@@ -16,7 +16,7 @@
 | Auth | service binding `AUTH`，服务 `cqu-moe-auth` |
 | Workflow | binding `INGEST`，class `FeedIngest`；binding `PDF_OCR`，class `PdfOcrWorkflow` |
 | Workflow | binding `CAPTURE`，class `CaptureWorkflow`，执行单篇采集任务 |
-| Queue | producer binding `FEED_JOBS`，队列 `feed-jobs`；consumer 指向 `feed-jobs-dlq` |
+| Queue | producer/consumer 覆盖 `feed-jobs`、`feed-events`、`feed-mail` 三条业务队列，consumer 分别指向同名 `-dlq` |
 | Cron | `0 0 * * *` 为每日采集；`*/5 * * * *` 在 runtime 开启时恢复任务/outbox |
 
 非敏感变量：
@@ -32,6 +32,12 @@
 | `SOURCE_MANAGEMENT_ENABLED` | `false` | T04 动态站点/栏目、样本验证与发现调度；需先应用 0006 迁移并绑定 DISCOVERY |
 | `TASK_RUNTIME_ENABLED` | `false` | T03 单篇任务入口默认关闭；POST 需它与 `CRAWL_ENABLED` 同时为 `true`，状态 GET 不受此开关影响 |
 | `MAX_TASK_ATTEMPTS` | `3` | 自动恢复的 429 等暂态失败最大尝试次数；配置会限制在 1–10 |
+| `TASK_MAX_LAUNCH_ATTEMPTS` | `5` | start-job 出站投递恢复预算；超过后任务标记 `launch_delivery_exhausted` |
+| `TASK_LAUNCH_REPLAY_AFTER_MS` | `900000` | 已发送但未确认交接的 start-job 重放等待窗口 |
+| `TASK_RETRY_BASE_DELAY_MS` | `900000` | 429 等暂态任务失败的基础退避 |
+| `TASK_RETRY_MAX_DELAY_MS` | `21600000` | 本地指数退避上限；不缩短供应商 Retry-After，超过 24 小时的供应商等待要求保持 blocked |
+| `QUEUE_DEAD_LETTER_AFTER_MS` | `900000` | 业务 outbox 被运营诊断列为可人工重放的最小等待窗口 |
+| `OPERATIONS_DIAGNOSTIC_LIMIT` | `20` | 每类诊断与管理界面单次展示上限，实际会限制在 1–100 |
 | `PDF_OCR_ENABLED` | `true` | 自动入队与每日补偿；不禁止显式 admin 对比任务 |
 | `PDF_OCR_MODEL` | `mistral-ocr-4-1` | 固定文档 OCR 模型 |
 | `MAX_PDF_OCR_PAGES_PER_DAY` | `50` | UTC 每日预留源 PDF 页数 |
@@ -123,6 +129,7 @@ https://<feed-origin>/auth/callback
 - `0007_archive_versions.sql`：不可变通知版本与物理对象引用。
 - `0009_subscriptions.sql`：个人订阅配置、目标区间和 RSS 凭证。
 - `0010_subscription_editing.sql`：订阅版本、删除时的栏目快照、编辑命令回执、所有者偏好版本和恢复额度原子计数。
+- `0018_outbox_receipts.sql`：记录三条业务 outbox 的消费者处理、失败和人工重放回执。
 
 远程迁移：
 
@@ -177,7 +184,27 @@ Firecrawl 429 保存为 `rate_limited` deferred，默认最多 3 次 attempt；4
 
 本地测试使用真实 Miniflare D1/R2/Queue、真实业务采集代码、Firecrawl 外部替身和可控 Workflow 执行适配器。Miniflare Queue broker 是内存态，本地投递和恢复通过不能证明 Cloudflare 队列留存、DLQ、实际 Workflow 持久步骤或生产账号额度行为；这些属于后续隔离云验收。
 
-## 4A. T05 不可变版本读写开关
+## 4A. T15 运行诊断与恢复
+
+应用 `0018_outbox_receipts.sql` 后，`/admin/tasks` 的「运行诊断」面板和下列管理接口可用。诊断按 source/task/revision/event/message 只展示业务 ID，区分 `queue_handoff`、`workflow_failure`/`workflow_deferred`、`missing_requirement`、`matching_pending`、`auth_unavailable` 与 `mail_unknown`；错误原因经服务端去除 URL、Bearer/token/secret/password 和邮箱后返回。
+
+| 方法与路径 | 作用 |
+| --- | --- |
+| `GET /internal/operations/diagnostics?limit=<1-100>` | 汇总三条业务队列候选、任务、版本缺项、邮件结果与指标 |
+| `POST /internal/operations/replay` | 仅对指定 `{outboxId,topic}` 重放持久化原文，保持业务身份 |
+| `POST /internal/operations/tasks/:taskId/recover` | 只恢复指定 Workflow 任务；先查询平台状态，active/waiting 不新建实例 |
+
+Worker 内没有列出 Cloudflare DLQ 原消息的 API。运营诊断以持久 outbox 与 `outbox_receipts` 为审查来源：超过 `QUEUE_DEAD_LETTER_AFTER_MS` 仍未 processed 的 sent 消息、或有失败回执的消息，按对应业务队列展示为候选；人工重放会把同一 JSON payload 发回原业务 Queue，消费者继续用 outbox/task/message 幂等身份去重。Cloudflare DLQ 中的原消息仍按平台保留策略存在，云端 DLQ 存量与告警属于 T17 隔离验收。
+
+人工重放先在 D1 原子占用新的等待窗口；并发或窗口内再次点击返回 409。诊断暂时隐藏窗口内候选。Queue 响应丢失或发送前进程退出也保留该窗口，到期后才可再次按原身份重放。消费者写入的 processed 回执和首次 processed 时间不会被迟到的 replay 或失败回执覆盖。
+
+指标包含最老 queued outbox/active task/immediate delivery、live 发现到 ready 的最小/最大延迟、必要缺项、Firecrawl/OCR 用量与页数、Auth unavailable、邮件 unknown，以及仍被版本或派生结果引用的不可变原件数量。诊断只覆盖 T03–T11 的 live 采集、版本、匹配和及时邮件链路；每日摘要、复查、补抓和迁移由各自任务接入恢复行为。
+
+指定任务恢复只从任务账本推进。对已有实例的 active、failed 和到期 deferred 均查询同一 `task-<taskId>-a<attempt>` 的真实平台状态；平台仍 active/waiting 时返回未恢复，未知状态或查询失败不启动下一次尝试。只有确认该 attempt 的平台实例 terminal 后，failed 或到期 deferred 才原子递增 attempt 并写入新 start-job outbox。恢复及 start-job 人工重放要求 `TASK_RUNTIME_ENABLED`、`CRAWL_ENABLED` 同时开启；诊断读取、事件和邮件操作不受采集开关影响。402/预算耗尽保持 blocked，不自动进入付费重试。邮件 `submission_unknown` 只显示人工处理状态；未确认受理前不提供重发按钮，避免同一邮件重复投递。
+
+任务、attempt、requirement 和 Queue 回执的诊断错误统一脱敏，包含 JSON 凭据、Basic/Bearer、邮箱和 URL，原始 R2 证据保持原样。OCR 通过 input hash、processor、processor version、options hash 四元组追溯引用它的 requirements、通知版本和来源；任务及队列诊断返回有界 `references` 与截断标志，缺项诊断分别保留 OCR `taskId` 和 `captureTaskId`。管理面板可展开关联版本；每个 OCR trace 使用本次诊断 limit，最多 100 条。
+
+## 4B. T05 不可变版本读写开关
 
 T05 使用两个默认关闭的独立开关，便于采集写入与阅读切换分批上线：
 
@@ -202,7 +229,7 @@ T05 使用两个默认关闭的独立开关，便于采集写入与阅读切换�
 
 PDF-only 缺失原件时保留 blocked 观察，列表明确显示缺项，待确认完整后才开放阅读。文件抓取时间按实际下载记录保存；未记录的时间保持未知，不用其他文件的时间冒充。
 
-## 4B. T06 正文 OCR 与完整版本发布
+## 4C. T06 正文 OCR 与完整版本发布
 
 应用 `0008_content_events.sql` 后，正式版增加 `ARCHIVE_OCR` Workflow、`FEED_EVENTS` Queue 及其 DLQ。采集只保存观察结果与后续 outbox；采集任务成功不代表文章已完整。所有版本统一经 `Archive.reconcileRevision` 检查必需原件与 OCR，确认 R2 对象存在且匹配记录后，在同一 D1 批次提交 ready、内容事件、来源证据、阅读投影、只向前移动的最新完整版本指针和事件 outbox。管理任务详情同时显示版本缺项。
 
@@ -212,7 +239,7 @@ PDF-only 缺失原件时保留 blocked 观察，列表明确显示缺项，待�
 
 正文、附件或必要 OCR 未齐备时，不开放该候选版本的正文与文件链接；既有完整版本继续可读。历史补抓/迁移的内容事件带 `history_only`，日期未知的事件保留待核实。当前 `event-ready` 仅完成持久交接校验，订阅匹配与投递由后续任务接入；不能把事件存在等同于已发邮件。本地验证包括实际 Worker Queue/BFF 入口、R2/D1 故障重放、乱序就绪与多 PDF 重做；云平台持久步骤及真实供应商验收仍属于 T17。
 
-## 4B. T07 个人订阅配置
+## 4D. T07 个人订阅配置
 
 应用 `0009_subscriptions.sql` 后，登录用户可在 `/subscriptions` 命名并创建多个订阅，选择栏目或创建时展开的站点范围，默认每日摘要。当前切片只保存配置，RSS 内容与邮件由后续 T09/T11 开放，界面明确显示这一状态。
 
@@ -224,7 +251,7 @@ PDF-only 缺失原件时保留 blocked 观察，列表明确显示缺项，待�
 
 界面区分零/缺失额度、权限撤回、超额和 Auth 暂不可用；已保存配置保留。创建后发生降额或 Auth 查询故障，返回 `created` 与当前暂停原因；响应丢失时按同 requestId 重试，不断言保存失败。保存期间锁定表单，避免旧响应覆盖新草稿。
 
-## 4C. T08 订阅编辑与运行集合
+## 4E. T08 订阅编辑与运行集合
 
 应用 `0010_subscription_editing.sql` 后，登录所有者可以编辑订阅名称、栏目、邮件模式、启用状态和优先级，也可以软删除、恢复、轮换或撤销 RSS 链接。除创建和恢复外，这些收窄或重排操作不重新消耗创建额度，也不因当前已超额、撤权或 Auth 暂不可用而丢失配置。
 

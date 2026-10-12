@@ -55,6 +55,11 @@ const firecrawlPlugin={
           calls.push(url);
           const mode=globalThis.TASK_RUNTIME_SCRAPE_MODE;
           if(mode==='rate-limit')throw new Error('Firecrawl HTTP 429: rate limit exceeded');
+          if(mode==='long-rate-limit'){
+            const error=new Error('Firecrawl HTTP 429: rate limit exceeded');
+            error.retryAfterMs=12*60*60*1000;
+            throw error;
+          }
           if(mode==='quota')throw new Error('Firecrawl HTTP 402: quota exhausted');
           if(mode==='hang'){
             while(globalThis.TASK_RUNTIME_SCRAPE_MODE==='hang')await new Promise(resolve=>setTimeout(resolve,10));
@@ -282,7 +287,8 @@ async function fixture({
   }));
   const db=await mf.getD1Database('DB'),bucket=await mf.getR2Bucket('ARCHIVE');
   for(const name of ['0001_feed.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql',
-    ...(recheckRuntime?['0007_archive_versions.sql','0008_content_events.sql','0017_archive_recheck.sql']:[])]){
+    ...(recheckRuntime?['0007_archive_versions.sql','0008_content_events.sql','0017_archive_recheck.sql']:[]),
+    '0018_outbox_receipts.sql']){
     await applyMigration(db,await readFile(`migrations/${name}`,'utf8'));
   }
   await db.prepare("INSERT INTO sources(id,name,url) VALUES ('jwc','教务处','https://jwc.cqu.edu.cn/')").run();
@@ -801,6 +807,32 @@ test('start-job redelivery while running keeps the task running and the same cap
   }finally{
     await mf.dispose();
   }
+});
+
+test('provider Retry-After beyond the local backoff cap remains the earliest retry time',async()=>{
+  const {mf,db}=await fixture();
+  try{
+    await mf.dispatchFetch('https://feed.test/fixture/scrape-mode',{method:'POST',body:JSON.stringify({mode:'long-rate-limit'})});
+    const before=Date.now();
+    const response=await mf.dispatchFetch('https://feed.test/internal/capture-tasks',{
+      method:'POST',headers:{Authorization:'Bearer test-admin-token','Content-Type':'application/json'},
+      body:JSON.stringify({articleId,requestId:'provider-minimum-delay'}),
+    });
+    assert.equal(response.status,202);
+    const created=await response.json();
+    await waitFor(async()=>{
+      assert.equal((await task(db,created.task.id)).state,'deferred');
+      assert.equal(await workflowStatus(mf,`task-${created.task.id}-a1`),'complete');
+    });
+    assert.ok((await task(db,created.task.id)).dueAt>=before+12*60*60*1000);
+    const recovery=await mf.dispatchFetch(`https://feed.test/internal/operations/tasks/${created.task.id}/recover`,{
+      method:'POST',headers:{Authorization:'Bearer test-admin-token'},
+    });
+    assert.equal(recovery.status,202);
+    assert.equal((await recovery.json()).recovered,0);
+    assert.equal((await task(db,created.task.id)).attemptNo,1);
+    assert.equal((await scrapes(mf)).calls.length,1);
+  }finally{await mf.dispose();}
 });
 
 test('a scheduled recheck launches the existing CaptureWorkflow and records an immutable replay',async()=>{
