@@ -48,7 +48,8 @@ export async function reconcileRevision(env,revisionId){
     WHERE article_id=? AND revision_no<? LIMIT 1`).bind(revision.article_id,revision.revision_no).first();
   const hasEvent=revision.change_kind!=='presentation_only';
   const captureIntent=parseCaptureIntent(revision.source_metadata_json);
-  const historyOnly=captureIntent==='live'?false:captureIntent?true:!sources.some(source=>source.discovery_class==='live');
+  const historyOnly=captureIntent==='backfill'||captureIntent==='migrated'
+    ||(!captureIntent&&!sources.some(source=>source.discovery_class==='live'));
   const dateUnknown=sources.length>0&&sources.every(source=>source.date_precision==='unknown');
 
   const statements=[];
@@ -155,7 +156,7 @@ async function assembleBodyText(env,requirements){
 function parseCaptureIntent(value){
   try{
     const intent=JSON.parse(value).captureIntent;
-    return ['live','backfill','migrated'].includes(intent)?intent:null;
+    return ['live','recheck','backfill','migrated'].includes(intent)?intent:null;
   }catch{return null;}
 }
 
