@@ -14,7 +14,7 @@
 | 任务 | 状态 | 交付依据 |
 | --- | --- | --- |
 | T01 / #2 | 本地验收完成 | 签名提交 `91c2d1c`；24 项测试、构建与设计检查通过，独立审查通过 |
-| T02 / #3 | 实现中 | Feed `impl/feed-t02`，Auth `impl/feed-policy-t02`；账户 UI 7 种状态及窄屏深色/桌面浅色已通过本地浏览器检查（API fixture，不是云端验收） |
+| T02 / #3 | 本地验收完成 | Feed `eee13e0`，Auth `f66e2dd`；独立审查后快进合入两条集成分支。Feed 27 tests/build/design 与 Auth check:ci（896 unit / 393 DO）通过；账户 UI 7 种状态及窄屏双主题检查通过（API fixture） |
 | T03 / #4 | 实现中 | 独立分支 `impl/feed-t03`，基于 T01 集成提交 |
 | T04–T18 / #5–#19 | 等待各自依赖 | 未声称实现或验收完成 |
 
