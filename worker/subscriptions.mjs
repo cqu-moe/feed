@@ -3,6 +3,7 @@ import {sealRssToken,rssUrlForOwner} from './subscription-credentials.mjs';
 import {computeSubscriptionRuntime} from './subscription-runtime.mjs';
 import {createSources} from './sources.mjs';
 import {createFeedAuthClient} from './feed-auth-client.mjs';
+import {createNotifications} from './notifications.mjs';
 
 const emailModes=new Set(['off','immediate','daily_digest']);
 
@@ -626,6 +627,11 @@ export async function subscriptionsRoute(request,env,state){
   if(request.method==='GET'&&url.pathname==='/api/subscriptions'){
     const result=await subscriptions.list({id:state.user.id});
     return json(result);
+  }
+  if(request.method==='GET'&&detail){
+    const subscription=await createNotifications(env).readSubscription(detail[1]);
+    if(!subscription||subscription.ownerSub!==state.user.id)return json({error:'订阅不存在'},404);
+    return json({subscription});
   }
   const create=request.method==='POST'&&url.pathname==='/api/subscriptions';
   const update=request.method==='PATCH'&&detail;

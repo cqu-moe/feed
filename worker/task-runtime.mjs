@@ -2,6 +2,7 @@ import {cleanError,sha} from './utils.mjs';
 import {createSources} from './sources.mjs';
 import {reconcileRevision} from './archive-reconcile.mjs';
 import {launchDedupeKey,launchOutboxId,launchOutboxStatement} from './task-statements.mjs';
+import {createNotifications} from './notifications.mjs';
 
 const activeStates=['queued','starting','running'];
 const platformStates=new Set(['queued','running','paused','waiting','waitingForPause','rollingBack']);
@@ -185,7 +186,8 @@ export async function handleFeedJobs(batch,env,dependencies={}){
   const runtime=createTaskRuntime(env,dependencies);
   for(const message of batch.messages){
     try{
-      if(message.body?.type==='check-ready'||message.body?.type==='event-ready')await handleFeedEvent(env,message);
+      if(message.body?.type==='check-ready'||message.body?.type==='event-ready'||message.body?.type==='match-source')
+        await handleFeedEvent(env,message,dependencies);
       else await runtime.startJob(message.body);
       message.ack();
     }catch(error){
@@ -195,7 +197,7 @@ export async function handleFeedJobs(batch,env,dependencies={}){
   }
 }
 
-async function handleFeedEvent(env,message){
+async function handleFeedEvent(env,message,dependencies={}){
   const payload=parseFeedEventMessage(message.body);
   const outbox=await env.DB.prepare("SELECT dedupe_key,payload_json FROM outbox WHERE id=? AND topic='feed-events'")
     .bind(payload.outboxId).first();
@@ -206,9 +208,11 @@ async function handleFeedEvent(env,message){
     if(result.notFound)throw new SchemaError('Ready revision is missing');
     return result;
   }
+  if(payload.type==='match-source')return createNotifications(env,{now:dependencies.now}).processMatchTask(payload);
   const event=await env.DB.prepare('SELECT id,revision_id FROM content_events WHERE id=?').bind(payload.eventId).first();
   if(!event||event.revision_id!==payload.revisionId)throw new SchemaError('Content event is missing');
-  return {eventReady:true};
+  const result=await createNotifications(env,{now:dependencies.now}).enqueueEvent(payload.eventId);
+  return {eventReady:true,...result};
 }
 
 function parseFeedEventMessage(payload){
@@ -223,11 +227,19 @@ function parseFeedEventMessage(payload){
     if(!idPattern.test(payload.eventId??'')||!idPattern.test(payload.revisionId??''))throw new SchemaError('Invalid content event identity');
     return {v:1,type:payload.type,outboxId:payload.outboxId,eventId:payload.eventId,revisionId:payload.revisionId};
   }
+  if(payload.type==='match-source'){
+    if(!idPattern.test(payload.taskId??'')||typeof payload.sourceId!=='string')
+      throw new SchemaError('Invalid match payload');
+    return {v:1,type:payload.type,outboxId:payload.outboxId,taskId:payload.taskId,eventId:payload.eventId,
+      sourceId:payload.sourceId,generation:payload.generation,page:payload.page};
+  }
   throw new SchemaError('Invalid feed event type');
 }
 function feedEventDedupeKey(payload){
   return payload.type==='check-ready'
     ? `ready:${payload.revisionId}:${payload.generation??`task:${payload.sourceTaskId}`}`
+  : payload.type==='match-source'
+    ? `match-source:${payload.taskId}:p${payload.page}`
     : `event:${payload.eventId}`;
 }
 

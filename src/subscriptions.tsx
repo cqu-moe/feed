@@ -27,6 +27,7 @@ import {
   type SubscriptionList,
 } from './api';
 import { LoginRequiredState, RetryButton, formatDateTime } from './components';
+import { SubscriptionActivity } from './subscription-activity';
 
 type ListState =
   | { kind: 'loading' }
@@ -115,6 +116,7 @@ function SubscriptionCard({ subscription, data, onChanged }: {
   const [pending, setPending] = useState<Mutation | null>(null);
   const busy = useRef(false);
   const [copied, setCopied] = useState(false);
+  const [showActivity, setShowActivity] = useState(false);
   const base = `/api/subscriptions/${subscription.id}`;
   const deleted = subscription.deletedAt !== null;
   const availableIds = new Set(data.sources.map(source => source.id));
@@ -260,6 +262,11 @@ function SubscriptionCard({ subscription, data, onChanged }: {
         </div>
       </Alert>}
       {message && <p role="status">{message}</p>}
+      {!deleted && <div className="feed-card-actions">
+        <Button type="button" variant="outline" aria-expanded={showActivity} aria-controls={`activity-${subscription.id}`}
+          onClick={() => setShowActivity(value => !value)}>{showActivity ? '收起通知记录' : '查看通知记录'}</Button>
+      </div>}
+      {!deleted && showActivity && <SubscriptionActivity subscriptionId={subscription.id} version={subscription.version} />}
     </article>
   );
 }

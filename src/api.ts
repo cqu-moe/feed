@@ -492,6 +492,33 @@ export function parseSubscriptionChange(value: unknown): { changed: boolean; sub
   return { changed: value.changed, subscription: parseSubscription(value.subscription) };
 }
 
+export type NotificationMatch = {
+  eventId: string;
+  eventKind: 'initial' | 'update';
+  title: string;
+  status: string;
+  reason: string;
+  readyAt: string;
+  matchedAt: string;
+};
+
+export function parseSubscriptionMatches(value: unknown): NotificationMatch[] {
+  if (!isRecord(value) || !isRecord(value.subscription) || !Array.isArray(value.subscription.notificationMatches)) {
+    throw new Error('通知记录不完整，请刷新重试。');
+  }
+  return value.subscription.notificationMatches.map((item: unknown) => {
+    if (!isRecord(item) || typeof item.eventId !== 'string' || !/^[a-f0-9]{24}$/.test(item.eventId)
+      || (item.eventKind !== 'initial' && item.eventKind !== 'update')
+      || typeof item.title !== 'string' || typeof item.status !== 'string' || typeof item.reason !== 'string'
+      || typeof item.readyAt !== 'string' || !Number.isFinite(Date.parse(item.readyAt))
+      || typeof item.matchedAt !== 'string' || !Number.isFinite(Date.parse(item.matchedAt))) {
+      throw new Error('通知记录不完整，请刷新重试。');
+    }
+    return { eventId: item.eventId, eventKind: item.eventKind, title: item.title, status: item.status,
+      reason: item.reason, readyAt: item.readyAt, matchedAt: item.matchedAt };
+  });
+}
+
 export function parseSources(value: unknown): Source[] {
   if (!isRecord(value) || !Array.isArray(value.sources)) {
     throw new Error('采集来源接口结构不匹配。');

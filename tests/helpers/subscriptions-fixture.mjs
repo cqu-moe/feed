@@ -9,16 +9,30 @@ const policyOrigin = 'https://policy.test';
 export const staticSiteId = '7fd03676e5751e9b6dd95ecb';
 export const sharedArticleUrl = 'https://jwc.cqu.edu.cn/info/2026/1.htm';
 
-export async function subscriptionsFixture({ editingMigration = true, clock } = {}) {
+export async function subscriptionsFixture({ editingMigration = true, clock, notificationPageSize } = {}) {
   const app = await build({
     stdin: { contents: `
       import worker from './worker/index.mjs';
       import {createSubscriptions} from './worker/subscriptions.mjs';
+      import {createNotifications} from './worker/notifications.mjs';
+      import {handleFeedJobs} from './worker/task-runtime.mjs';
       export default {async fetch(request,env,context){
         if(${clock !== undefined}&&new URL(request.url).pathname==='/__test/subscriptions'){
           const {method,actor,args}=await request.json();
           try{return Response.json(await createSubscriptions(env,{now:()=>${clock ?? 0}})[method](actor,...args));}
           catch(error){return Response.json({error:error.message},{status:error.status??503});}
+        }
+        if(new URL(request.url).pathname==='/__test/notifications'){
+          const {method,args}=await request.json();
+          try{return Response.json(await createNotifications(env,{now:()=>${clock ?? 'Date.now()'}})[method](...args));}
+          catch(error){return Response.json({error:error.message},{status:error.status??503});}
+        }
+        if(new URL(request.url).pathname==='/__test/feed-jobs'){
+          const {messages}=await request.json();
+          const batch={messages:messages.map(body=>({body,acked:false,retried:false,
+            ack(){this.acked=true;},retry(){this.retried=true;}}))};
+          await handleFeedJobs(batch,env,{now:()=>${clock ?? 'Date.now()'}});
+          return Response.json({messages:batch.messages.map(({acked,retried})=>({acked,retried}))});
         }
         return worker.fetch(request,env,context);
       }};
@@ -97,7 +111,7 @@ export async function subscriptionsFixture({ editingMigration = true, clock } = 
         script: app.outputFiles[0].text,
         compatibilityDate: '2026-10-11',
         compatibilityFlags: ['nodejs_compat'],
-        bindings: { ...provider.bindings, ADMIN_TOKEN: 'test-admin-token', BASE_URL: feedOrigin, SOURCE_MANAGEMENT_ENABLED: 'true', FEED_AUTH_RPC_CLIENT_ID: 'feed-rpc-client', FEED_AUTH_RPC_CLIENT_SECRET: 'feed-rpc-secret' },
+        bindings: { ...provider.bindings, ADMIN_TOKEN: 'test-admin-token', BASE_URL: feedOrigin, SOURCE_MANAGEMENT_ENABLED: 'true', FEED_AUTH_RPC_CLIENT_ID: 'feed-rpc-client', FEED_AUTH_RPC_CLIENT_SECRET: 'feed-rpc-secret', ...(notificationPageSize === undefined ? {} : { NOTIFICATION_MATCH_PAGE_SIZE: notificationPageSize }) },
         d1Databases: ['DB'],
         r2Buckets: ['ARCHIVE'],
         serviceBindings: { AUTH: request => provider.fetch(request), AUTH_FEED_RPC: { name: 'policy', entrypoint: 'AuthService' } },
@@ -114,6 +128,7 @@ export async function subscriptionsFixture({ editingMigration = true, clock } = 
   const db = await mf.getD1Database('DB', 'feed');
   const migrationNames = ['0001_feed.sql', '0002_auth.sql', '0003_collection_lease.sql', '0004_pdf_ocr.sql', '0005_task_runtime.sql', '0006_sources.sql', '0007_archive_versions.sql', '0008_content_events.sql', '0009_subscriptions.sql'];
   if (editingMigration) migrationNames.push('0010_subscription_editing.sql');
+  migrationNames.push('0013_notification_matching.sql');
   for (const name of migrationNames) {
     await applyMigration(db, await readFile(`migrations/${name}`, 'utf8'));
   }
@@ -139,11 +154,38 @@ export async function subscriptionCall(mf, path, { cookie, method = 'GET', origi
   return { status: response.status, body: await response.json() };
 }
 
+export async function subscriptionsInvoke(mf, method, actor, ...args) {
+  const response = await mf.dispatchFetch(feedOrigin + '/__test/subscriptions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ method, actor, args }),
+  });
+  return { status: response.status, body: await response.json() };
+}
+
 export async function adminRequest(mf, path, body, { method = 'POST' } = {}) {
   const response = await mf.dispatchFetch(feedOrigin + path, {
     method,
     headers: { Authorization: 'Bearer test-admin-token', 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+  });
+  return { status: response.status, body: await response.json() };
+}
+
+export async function notificationInvoke(mf, method, ...args) {
+  const response = await mf.dispatchFetch(feedOrigin + '/__test/notifications', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ method, args }),
+  });
+  return { status: response.status, body: await response.json() };
+}
+
+export async function feedJobsInvoke(mf, ...messages) {
+  const response = await mf.dispatchFetch(feedOrigin + '/__test/feed-jobs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messages }),
   });
   return { status: response.status, body: await response.json() };
 }

@@ -4,6 +4,7 @@ import {createArchive} from './archive.mjs';
 import {createSources} from './sources.mjs';
 import {createTaskRuntime,ValidationError} from './task-runtime.mjs';
 import {repairPdfText} from './pdf-text.mjs';
+import {createNotifications} from './notifications.mjs';
 
 export async function internalRoute(request,env){
   const url=new URL(request.url);
@@ -96,6 +97,36 @@ export async function internalRoute(request,env){
     return json({error:'Method not allowed'},405);
   }
 
+  if(url.pathname.startsWith('/internal/notification-events')){
+    const notifications=createNotifications(env);
+    const detail=/^\/internal\/notification-events\/([a-f0-9]{24})$/.exec(url.pathname);
+    const dateVerification=/^\/internal\/notification-events\/([a-f0-9]{24})\/date-verification$/.exec(url.pathname);
+    const dateEvidence=/^\/internal\/notification-events\/([a-f0-9]{24})\/sources\/([A-Za-z0-9_-]{1,64})\/date-evidence\/(\d+)$/.exec(url.pathname);
+    if(dateVerification&&request.method==='POST'){
+      try{
+        const result=await notifications.verifyDate(dateVerification[1],await readJson(request));
+        return json(result,202);
+      }catch(error){return validationResponse(error);}
+    }
+    if(dateEvidence&&request.method==='GET'){
+      const result=await notifications.readDateEvidence(dateEvidence[1],dateEvidence[2],Number(dateEvidence[3]));
+      return result?json(result):json({error:'Date evidence not found'},404);
+    }
+    if(request.method==='GET'&&detail){
+      const result=await notifications.eventStatus(detail[1]);
+      return result?json(result):json({error:'Content event not found'},404);
+    }
+    if(request.method==='GET'&&url.pathname==='/internal/notification-events'){
+      const rows=await env.DB.prepare(`SELECT e.id,e.kind,r.title,e.ready_at AS readyAt,e.history_only AS historyOnly,
+          (SELECT COUNT(*) FROM notification_matches m WHERE m.event_id=e.id) AS matches,
+          (SELECT COUNT(*) FROM user_deliveries d WHERE d.event_id=e.id) AS deliveries
+        FROM content_events e JOIN article_revisions r ON r.id=e.revision_id
+        ORDER BY e.ready_at DESC,e.id LIMIT ?`).bind(Math.min(100,Math.max(1,parseInt(new URL(request.url).searchParams.get('limit')??'50')||50))).all();
+      return json({events:rows.results.map(row=>({...row,readyAt:new Date(row.readyAt).toISOString(),historyOnly:row.historyOnly===1}))});
+    }
+    return json({error:'Method not allowed'},405);
+  }
+
   const archive=createArchive(env);
   const archiveOcrArticle=/^\/internal\/articles\/([a-f0-9]{24})\/pdf-ocr$/.exec(url.pathname);
   if(archiveOcrArticle){
@@ -146,7 +177,7 @@ async function readJson(request){
 }
 
 function validationResponse(error){
-  if(error?.name==='ValidationError')return json({error:error.message},error.status??400);
+  if(error?.name==='ValidationError'||error?.name==='NotificationError')return json({error:error.message},error.status??400);
   throw error;
 }
 

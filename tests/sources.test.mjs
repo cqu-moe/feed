@@ -82,13 +82,14 @@ const firecrawlPlugin={
   },
 };
 
-async function fixture({versioned=false}={}){
+async function fixture({versioned=false,notifications=false}={}){
   const bundle=await build({
     stdin:{
       contents:`
         import worker from './worker/index.mjs';
         import {createSources} from './worker/sources.mjs';
         import {createTaskRuntime,handleFeedJobs} from './worker/task-runtime.mjs';
+        import {createNotifications} from './worker/notifications.mjs';
         import {CaptureWorkflow} from './worker/capture-workflow.mjs';
         import {DiscoveryWorkflow} from './worker/discovery-workflow.mjs';
         import {issueGrant} from './worker/bridge.mjs';
@@ -100,6 +101,7 @@ async function fixture({versioned=false}={}){
         const instances=new Map();
         let clockOffset=0;
         const runtimeNow=()=>Date.now()+clockOffset;
+        const notificationsEnabled=${notifications};
         const instance=id=>{
           if(!instances.has(id))throw new Error('Workflow instance not found');
           return {id,status:async()=>({status:instances.get(id).status,error:instances.get(id).error})};
@@ -173,11 +175,23 @@ async function fixture({versioned=false}={}){
               await createTaskRuntime(env,{now:runtimeNow}).dispatchDueOutbox();
               return Response.json(result);
             }
+            if(notificationsEnabled&&url.pathname==='/fixture/drain-matches'){
+              return Response.json(await createNotifications(env,{now:runtimeNow}).drainDue(100));
+            }
             return worker.fetch(request,env);
           },
           async queue(batch,rawEnv){
             const env=prepareEnv(rawEnv);
-            await handleFeedJobs(batch,env,{workflow,now:runtimeNow});
+            const messages=batch.messages.map(message=>message.body);
+            if(messages.some(payload=>payload?.type==='match-source'||payload?.type==='event-ready')){
+              const notifications=createNotifications(env,{now:runtimeNow});
+              for(const payload of messages){
+                if(payload.type==='match-source')await notifications.processMatchTask(payload);
+                else if(payload.type==='event-ready')await notifications.enqueueEvent(payload.eventId);
+              }
+            }else{
+              await handleFeedJobs(batch,env,{workflow,now:runtimeNow});
+            }
             await Promise.allSettled(globalThis.SOURCES_ACTIVE_WORKFLOWS.splice(0));
           },
         }
@@ -190,22 +204,56 @@ async function fixture({versioned=false}={}){
   });
   const provider=oauthProvider();
   const gate={url:null,held:false,release:null};
-  const mf=new Miniflare(convertV4MiniflareOptions({
-    modules:true,script:bundle.outputFiles[0].text,compatibilityDate:'2026-10-11',
+  const policyScript=`
+    import {WorkerEntrypoint} from 'cloudflare:workers';
+    export class AuthService extends WorkerEntrypoint{
+      async getFeedPolicy(request){
+        if(request.contractVersion!==1||request.clientId!=='feed-rpc-client'||request.clientSecret!=='feed-rpc-secret')
+          return {ok:false,code:'CLIENT_NOT_ALLOWED',retryable:false,requestId:'test'};
+        return {ok:true,contractVersion:1,checkedAt:Date.now(),data:
+          {access:true,subscriptionLimit:{kind:'limited',value:10}}};
+      }
+      async getFeedRecipient(request){
+        if(request.contractVersion!==1||request.clientId!=='feed-rpc-client'||request.clientSecret!=='feed-rpc-secret')
+          return {ok:false,code:'CLIENT_NOT_ALLOWED',retryable:false,requestId:'test'};
+        return {ok:true,contractVersion:1,checkedAt:Date.now(),data:{
+          policy:{access:true,subscriptionLimit:{kind:'limited',value:10}},
+          recipient:{status:'verified',email:'reader@example.test'},
+        }};
+      }
+    }
+    export default{async fetch(){return new Response('Not found',{status:404});}};
+  `;
+  const feedServiceBindings={AUTH:request=>provider.fetch(request),TEST_GATE:request=>{
+    if(new URL(request.url).searchParams.get('url')!==gate.url)return new Response('ready');
+    gate.held=true;
+    return new Promise(resolve=>{gate.release=()=>{gate.url=null;gate.held=false;resolve(new Response('ready'));};});
+  }};
+  if(notifications)feedServiceBindings.AUTH_FEED_RPC={name:'policy',entrypoint:'AuthService'};
+  const workers=[{
+    name:'feed',modules:true,script:bundle.outputFiles[0].text,compatibilityDate:'2026-10-11',
     compatibilityFlags:['nodejs_compat'],
-    serviceBindings:{AUTH:request=>provider.fetch(request),TEST_GATE:request=>{
-      if(new URL(request.url).searchParams.get('url')!==gate.url)return new Response('ready');
-      gate.held=true;
-      return new Promise(resolve=>{gate.release=()=>{gate.url=null;gate.held=false;resolve(new Response('ready'));};});
-    }},
+    serviceBindings:feedServiceBindings,
     bindings:{...provider.bindings,ADMIN_TOKEN:'test-admin-token',BASE_URL:'https://feed.test',BRIDGE_SECRET:'test-bridge-secret',
+      FEED_AUTH_RPC_CLIENT_ID:'feed-rpc-client',FEED_AUTH_RPC_CLIENT_SECRET:'feed-rpc-secret',
       ARCHIVE_VERSIONS_ENABLED:String(versioned),ARCHIVE_READS_ENABLED:String(versioned),SOURCE_MANAGEMENT_ENABLED:'true',CRAWL_ENABLED:'true',TASK_RUNTIME_ENABLED:'true',PDF_OCR_ENABLED:'false',MAX_DISCOVERY_PAGES_PER_RUN:'2'},
     d1Databases:['DB'],r2Buckets:['ARCHIVE'],
     queueProducers:{FEED_JOBS:{queueName:'feed-jobs'},FEED_EVENTS:{queueName:'feed-events'}},
     queueConsumers:{'feed-jobs':{maxBatchSize:1,maxRetries:3,deadLetterQueue:'feed-jobs-dlq'},'feed-events':{maxBatchSize:1,maxRetries:3,deadLetterQueue:'feed-events-dlq'}},
-  }));
+  }];
+  if(notifications)workers.push({
+    name:'policy',modules:true,script:policyScript,compatibilityDate:'2026-10-11',
+    compatibilityFlags:['nodejs_compat'],
+  });
+  const mf=new Miniflare(convertV4MiniflareOptions({workers}));
   const db=await mf.getD1Database('DB');
-  for(const name of ['0001_feed.sql','0002_auth.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql','0007_archive_versions.sql','0008_content_events.sql']){
+  const migrationNames=['0001_feed.sql','0002_auth.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql','0007_archive_versions.sql','0008_content_events.sql'];
+  for(const name of migrationNames){
+    await applyMigration(db,await readFile(`migrations/${name}`,'utf8'));
+  }
+  await applyMigration(db,await readFile('migrations/0009_subscriptions.sql','utf8'));
+  await db.prepare('DELETE FROM sources').run();
+  for(const name of ['0010_subscription_editing.sql','0013_notification_matching.sql']){
     await applyMigration(db,await readFile(`migrations/${name}`,'utf8'));
   }
   return {mf,db,provider,gate,read:async path=>mf.dispatchFetch('https://feed.test'+path,{headers:{Cookie:await login(mf,provider)}})};
@@ -306,6 +354,53 @@ test('two discovered columns share one notification and capture while all finite
     assert.equal((await mf.dispatchFetch('https://feed.test/api/articles')).status,401);
     provider.setAccess(false);
     assert.equal((await read('/api/articles')).status,403);
+  }finally{await mf.dispose();}
+});
+
+test('a later column association fans out an already ready shared event',async()=>{
+  const {mf,provider}=await fixture({versioned:true,notifications:true});
+  try{
+    const site=await request(mf,'/internal/sites',{method:'POST',body:{name:'晚到关联站点',origin:'https://a.test'}});
+    const first=await createVerifiedSource(mf,site.data.site.id,'https://a.test/list-a.htm');
+    await request(mf,'/internal/sources/schedule',{method:'POST'});
+    let eventId;
+    await waitFor(async()=>{
+      const events=(await request(mf,'/internal/notification-events')).data.events;
+      assert.equal(events.length,1,JSON.stringify(events));
+      eventId=events[0].id;
+    });
+
+    const second=await createVerifiedSource(mf,site.data.site.id,'https://a.test/list-b.htm');
+    const cookie=await login(mf,provider);
+    const created=await userRequest(mf,cookie,'/api/subscriptions',{
+      method:'POST',
+      body:{requestId:'late-column-subscription',name:'晚到栏目',siteIds:[],sourceIds:[second],emailMode:'immediate'},
+    });
+    assert.equal(created.status,201,JSON.stringify(created));
+    await request(mf,'/internal/sources/schedule',{method:'POST'});
+    await waitFor(async()=>{
+      assert.equal((await request(mf,`/internal/sources/${second}/discoveries`)).data.discoveries.length,1);
+    });
+
+    const before=(await request(mf,`/internal/notification-events/${eventId}`)).data;
+    assert.deepEqual(before.sources.map(source=>source.sourceId).sort(),[first,second].sort());
+    assert.equal(before.matchTasks.length,2);
+    const verified=await request(mf,`/internal/notification-events/${eventId}/date-verification`,{
+      method:'POST',
+      body:{requestId:'late-column-date-verification',sourceId:second,verifiedBy:'feed-admin',
+        datePrecision:'minute',publishedAt:new Date(Date.now()+60_000).toISOString(),evidence:{method:'source-page'}},
+    });
+    assert.equal(verified.status,202,JSON.stringify(verified));
+    const drained=await(await mf.dispatchFetch('https://feed.test/fixture/drain-matches')).json();
+    assert.equal(drained.pendingPages,0,JSON.stringify(drained));
+
+    const detail=await userRequest(mf,cookie,`/api/subscriptions/${created.data.subscription.id}`);
+    assert.equal(detail.status,200,JSON.stringify(detail));
+    assert.deepEqual(detail.data.subscription.notificationMatches.map(match=>[match.eventId,match.status]),
+      [[eventId,'pending_immediate']]);
+    const after=(await request(mf,`/internal/notification-events/${eventId}`)).data;
+    assert.equal(after.sources.find(source=>source.sourceId===second).datePrecision,'minute');
+    assert.equal(after.delivery.kind,'immediate');
   }finally{await mf.dispose();}
 });
 
@@ -462,6 +557,14 @@ async function request(mf,path,{method='GET',body}={}){
   if(path==='/internal/sites'&&method==='POST')body={requestId:crypto.randomUUID(),...body};
   const response=await mf.dispatchFetch('https://feed.test'+path,{
     method,headers:{Authorization:'Bearer test-admin-token','Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),
+  });
+  return {status:response.status,data:await response.json()};
+}
+async function userRequest(mf,cookie,path,{method='GET',body}={}){
+  const response=await mf.dispatchFetch('https://feed.test'+path,{
+    method,
+    headers:{Cookie:cookie,Origin:'https://feed.test','Content-Type':'application/json'},
+    body:body===undefined?undefined:JSON.stringify(body),
   });
   return {status:response.status,data:await response.json()};
 }

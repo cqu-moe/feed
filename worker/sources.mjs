@@ -2,6 +2,7 @@ import staticSources from './sources.json';
 import {savedDiscoveryPage} from './discovery-journal.mjs';
 import {verifySource} from './source-validation.mjs';
 import {launchOutboxId,launchOutboxStatement} from './task-statements.mjs';
+import {articleSourceAssociationStatements} from './notifications.mjs';
 import {articleId,cleanError,cutoffDate,sha} from './utils.mjs';
 
 const sourceSelect=`SELECT s.*,st.origin AS site_origin,st.enabled AS site_enabled
@@ -279,6 +280,16 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
           launchOutboxStatement(env,{id:await launchOutboxId(captureTaskId,1),taskId:captureTaskId,attempt:1,timestamp:at,
             guardSql:'kind=? AND '+activeTask.sql,guardArgs:['capture',...activeTask.args]}),
         );
+        const association=await articleSourceAssociationStatements(env,{
+          articleId:aid,sourceId:source.id,timestamp:at,
+          source:{
+            first_seen_at:result.observedAt,last_seen_at:result.observedAt,discovery_class:'live',
+            published_at:row.precision==='minute'?row.publishedAt:null,
+            published_day:row.precision==='unknown'?null:row.publishedDay,
+            date_precision:row.precision,source_timezone:source.timezone,
+          },
+        });
+        statements.push(...association.statements);
       }
       const continuation=nextPageUrls.length&&page<boundedInteger(env.MAX_DISCOVERY_PAGES_PER_RUN,2,1,10);
       const checkpointJson=JSON.stringify({
