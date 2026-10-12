@@ -6,9 +6,11 @@ export function oauthProvider({feedOrigin='https://feed.test',authOrigin='https:
   const clientId='feed-test-client',clientSecret='feed-test-secret',codes=new Map(),tokens=new Map();
   const keys=generateKeyPair('EdDSA',{crv:'Ed25519',extractable:true});
   let access=true;
+  let subject='test-user';
   return {
     bindings:{AUTH_BASE_URL:authOrigin,FEED_AUTH_CLIENT_ID:clientId,FEED_AUTH_CLIENT_SECRET:clientSecret,FEED_SESSION_ENCRYPTION_KEY:'test-session-encryption-key'},
     setAccess(value){access=value;},
+    setSubject(value){subject=value;},
     async fetch(request){
       const url=new URL(request.url);
       if(url.pathname.endsWith('/authorize')){
@@ -27,9 +29,9 @@ export function oauthProvider({feedOrigin='https://feed.test',authOrigin='https:
         const challenge=Buffer.from(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(form.get('code_verifier')))).toString('base64url');
         if(!code||challenge!==code.code_challenge||request.headers.get('Authorization')!=='Basic '+btoa(clientId+':'+clientSecret))return Response.json({error:'invalid_grant'},{status:400});
         codes.delete(form.get('code'));
-        const token=crypto.randomUUID();tokens.set(token,'test-user');
+        const token=crypto.randomUUID();tokens.set(token,subject);
         const jwt=await new SignJWT({nonce:code.nonce}).setProtectedHeader({alg:'EdDSA',kid:'test-auth'})
-          .setIssuer(authOrigin+'/api/auth').setAudience(clientId).setSubject('test-user').setIssuedAt().setExpirationTime('10m').sign((await keys).privateKey);
+          .setIssuer(authOrigin+'/api/auth').setAudience(clientId).setSubject(subject).setIssuedAt().setExpirationTime('10m').sign((await keys).privateKey);
         return Response.json({access_token:token,token_type:'Bearer',expires_in:3600,id_token:jwt});
       }
       if(url.pathname.endsWith('/userinfo'))return Response.json({sub:tokens.get(request.headers.get('Authorization')?.slice(7)),name:'测试读者'});
@@ -42,7 +44,8 @@ export function oauthProvider({feedOrigin='https://feed.test',authOrigin='https:
   };
 }
 
-export async function login(mf,provider){
+export async function login(mf,provider,subject){
+  if(subject)provider.setSubject(subject);
   const start=await mf.dispatchFetch('https://feed.test/auth/login',{redirect:'manual'});
   if(start.status!==303)throw new Error('Login start failed: '+await start.text());
   const transactionCookie=start.headers.getSetCookie().find(value=>value.startsWith('__Host-feed_login='))?.split(';')[0];

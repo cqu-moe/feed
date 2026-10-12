@@ -4,6 +4,7 @@ import {session,authRoute} from './auth.mjs';
 import {bridgeRoute} from './bridge.mjs';
 import {apiRoute} from './api.mjs';
 import {internalRoute} from './internal.mjs';
+import {subscriptionsRoute} from './subscriptions.mjs';
 import {json,encoder,cleanError} from './utils.mjs';
 import {createArchive} from './archive.mjs';
 import {createSources} from './sources.mjs';
@@ -40,6 +41,7 @@ export default {
         const state=await session(request,env,{includeAccount:url.pathname==='/api/session'});
         if(state.error==='unavailable')return json({error:'认证服务暂时不可用，请稍后重试'},503);
         if(url.pathname==='/api/session')return json(state);
+        const subscriptions=await subscriptionsRoute(request,env,state);if(subscriptions)return subscriptions;
         if(!state.authenticated)return json({error:'请先登录'},401);
         if(!state.entitled)return json({error:'需要 feed.access 权益'},403);
         return apiRoute(request,env);

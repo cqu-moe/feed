@@ -24,12 +24,13 @@ import {
   Toaster,
   toast,
 } from '@cqu-moe/ui';
-import { House, RefreshCw, UserRound } from 'lucide-react';
+import { BellPlus, House, RefreshCw, UserRound } from 'lucide-react';
 import { parseSession, requestJson, type Session } from './api';
 import { AccessDeniedState, LoginRequiredState, LogoutButton, safeNext } from './components';
 import { AccessPage, AccountPage, ArticleDetailPage, ArticlesPage, LoginPage, SourcesPage } from './pages';
 import { AdminTasksPage } from './admin-tasks';
 import { AdminSourcesPage } from './admin-sources';
+import { SubscriptionsPage } from './subscriptions';
 import '@cqu-moe/theme/styles.css';
 import '@cqu-moe/ui/styles.css';
 import './styles.css';
@@ -109,6 +110,10 @@ function Layout() {
           <NavLink to="/sources">
             <RefreshCw aria-hidden="true" />
             采集状态
+          </NavLink>
+          <NavLink to="/subscriptions">
+            <BellPlus aria-hidden="true" />
+            我的订阅
           </NavLink>
           <NavLink to="/account">
             <UserRound aria-hidden="true" />
@@ -209,6 +214,7 @@ const router = createBrowserRouter([
       { index: true, element: <ArticlesPage /> },
       { path: 'articles/:id', element: <ArticleDetailPage /> },
       { path: 'sources', element: <SourcesPage /> },
+      { path: 'subscriptions', element: <SubscriptionsPage /> },
       { path: 'account', element: <AccountPage /> },
       { path: '*', element: <NotFound /> },
     ],
