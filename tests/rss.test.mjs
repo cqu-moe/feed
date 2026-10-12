@@ -111,7 +111,8 @@ test('a valid private RSS emits dated historical and update events with stable i
     assert.equal(extract(updateItem, 'category'), '更新');
     assert.notEqual(extract(updateItem, 'guid'), extract(items(xml).find(item => item !== updateItem), 'guid'));
     const updateLink = extract(updateItem, 'link');
-    assert.equal(new URL(updateLink, feedOrigin).pathname, `/api/articles/${history.articleId}/revisions/${update.revisionId}`);
+    assert.equal(new URL(updateLink, feedOrigin).href, `${feedOrigin}/articles/${history.articleId}?revision=${update.revisionId}`);
+    assert.equal(extract(updateItem, 'guid'), `urn:cqu-feed:event:${await eventIdFor(mf, update.revisionId)}`);
     assert.doesNotMatch(xml, /\/files\//);
 
     const etag = first.headers.get('ETag');
@@ -172,6 +173,78 @@ test('a valid private RSS emits dated historical and update events with stable i
   }
 });
 
+test('RSS eligibility follows the subscription target source date association', async () => {
+  const { mf, login } = await subscriptionsFixture();
+  try {
+    const cookie = await login('rss-source-date-reader');
+    const subscriptions = [];
+    for (const sourceId of ['jwc', 'intex']) {
+      const created = await subscriptionCall(mf, '/api/subscriptions', {
+        cookie,
+        method: 'POST',
+        origin: feedOrigin,
+        body: {
+          requestId: `create-${sourceId}-rss`,
+          name: `${sourceId} 日期精确订阅`,
+          siteIds: [],
+          sourceIds: [sourceId],
+          emailMode: 'off',
+        },
+      });
+      assert.equal(created.status, 201, JSON.stringify(created.body));
+      subscriptions.push(new URL(created.body.subscription.rssUrl, feedOrigin));
+    }
+
+    const knownElsewhere = await seedReadyEvent(mf, {
+      articleId: 'aaa000000000000000000101',
+      taskId: 'bbb000000000000000000101',
+      revisionId: 'ccc000000000000000000101',
+      revisionNo: 1,
+      title: '其他栏目已知日期',
+      body: '订阅栏目自己的日期仍未核实',
+      intent: 'live',
+      changeKind: 'baseline',
+      precision: 'minute',
+    });
+    await associateEventSource(mf, {
+      articleId: knownElsewhere.articleId,
+      revisionId: knownElsewhere.revisionId,
+      sourceId: 'intex',
+      precision: 'unknown',
+    });
+
+    const initiallyUnknown = await seedReadyEvent(mf, {
+      articleId: 'aaa000000000000000000102',
+      taskId: 'bbb000000000000000000102',
+      revisionId: 'ccc000000000000000000102',
+      revisionNo: 1,
+      sourceId: 'intex',
+      title: '后来栏目日期已知',
+      body: '事件聚合状态保持未知，但订阅目标关联已核实',
+      intent: 'live',
+      changeKind: 'baseline',
+      precision: 'unknown',
+    });
+    await associateEventSource(mf, {
+      articleId: initiallyUnknown.articleId,
+      revisionId: initiallyUnknown.revisionId,
+      sourceId: 'jwc',
+      precision: 'day',
+    });
+    assert.equal(await eventDateState(mf, initiallyUnknown.revisionId), 'date_unknown');
+
+    const [jwcResponse, intexResponse] = await Promise.all(subscriptions.map(url => mf.dispatchFetch(url)));
+    assert.equal(jwcResponse.status, 200);
+    assert.equal(intexResponse.status, 200);
+    const jwcXml = await jwcResponse.text();
+    const intexXml = await intexResponse.text();
+    assert.deepEqual(itemTitles(intexXml), []);
+    assert.deepEqual(itemTitles(jwcXml).sort(), ['其他栏目已知日期', '后来栏目日期已知']);
+  } finally {
+    await mf.dispose();
+  }
+});
+
 async function seedReadyEvent(mf, options) {
   const db = await mf.getD1Database('DB', 'feed');
   const bucket = await mf.getR2Bucket('ARCHIVE', 'feed');
@@ -215,6 +288,35 @@ async function seedReadyEvent(mf, options) {
   return { ...JSON.parse(responseText), articleId, revisionId, dateState: precision === 'unknown' ? 'date_unknown' : 'verified' };
 }
 
+async function associateEventSource(mf, { articleId, revisionId, sourceId, precision }) {
+  const db = await mf.getD1Database('DB', 'feed');
+  const event = await db.prepare('SELECT id FROM content_events WHERE revision_id=?').bind(revisionId).first();
+  assert.ok(event, 'Seed revision did not create a content event');
+  const now = Date.parse('2026-10-12T08:00:00.000Z');
+  await db.prepare(`INSERT INTO article_sources(article_id,source_id,first_seen_at,last_seen_at,discovery_class,published_at,published_day,date_precision,source_timezone)
+    VALUES (?,?,?,?,?,?,?,?,'Asia/Shanghai')`)
+    .bind(articleId, sourceId, now - 21_600_000, now, 'migrated', precision === 'minute' ? '2026-10-12T09:00:00+08:00' : null,
+      precision === 'unknown' ? null : '2026-10-12', precision).run();
+  await db.prepare(`INSERT INTO event_sources(event_id,source_id,article_source_first_seen_at,discovery_class,published_at,published_day,date_precision,source_timezone)
+    VALUES (?,?,?,?,?,?,?,'Asia/Shanghai')`)
+    .bind(event.id, sourceId, now - 21_600_000, 'migrated', precision === 'minute' ? '2026-10-12T09:00:00+08:00' : null,
+      precision === 'unknown' ? null : '2026-10-12', precision).run();
+}
+
+async function eventIdFor(mf, revisionId) {
+  const db = await mf.getD1Database('DB', 'feed');
+  const event = await db.prepare('SELECT id FROM content_events WHERE revision_id=?').bind(revisionId).first();
+  assert.ok(event, 'Expected a content event for the RSS item');
+  return event.id;
+}
+
+async function eventDateState(mf, revisionId) {
+  const db = await mf.getD1Database('DB', 'feed');
+  const event = await db.prepare('SELECT date_state AS dateState FROM content_events WHERE revision_id=?').bind(revisionId).first();
+  assert.ok(event, 'Expected a content event');
+  return event.dateState;
+}
+
 function extract(xml, tag) {
   const match = xml.match(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)</${tag}>`));
   return match?.[1];
@@ -222,4 +324,8 @@ function extract(xml, tag) {
 
 function items(xml) {
   return xml.match(/<item>[\s\S]*?<\/item>/g) ?? [];
+}
+
+function itemTitles(xml) {
+  return items(xml).map(item => extract(item, 'title'));
 }

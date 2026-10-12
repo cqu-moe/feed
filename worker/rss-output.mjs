@@ -28,7 +28,7 @@ export function renderRss({title,description,link,lastModified,items}){
       <title>${xmlText(item.title,maxTitleLength)}</title>
       <description>${xmlText(item.summary,maxSummaryLength)}</description>
       <link>${xmlAttribute(item.link)}</link>
-      <guid isPermaLink="false">cqu-feed:event:${xmlText(item.id,80)}</guid>
+      <guid isPermaLink="false">urn:cqu-feed:event:${xmlText(item.id,80)}</guid>
       <pubDate>${rfc1123(item.readyAt)}</pubDate>
       <category>${item.kind==='update'?'更新':'新通知'}</category>
     </item>`);

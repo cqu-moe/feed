@@ -645,12 +645,11 @@ export function createSubscriptions(env,{now=()=>Date.now()}={}){
         FROM content_events e
         JOIN article_revisions r ON r.id=e.revision_id
         LEFT JOIN article_read_models m ON m.article_id=e.article_id
-        WHERE e.date_state='verified'
-          AND EXISTS(
+        WHERE EXISTS(
             SELECT 1 FROM event_sources es
             JOIN subscription_sources st ON st.source_id=es.source_id
               AND st.subscription_id=? AND st.removed_at IS NULL
-            WHERE es.event_id=e.id
+            WHERE es.event_id=e.id AND es.date_precision IN ('day','minute')
           )
         ORDER BY e.ready_at DESC,e.id DESC LIMIT ${maxFeedItems}`)
         .bind(subscription.id).all();
@@ -683,7 +682,7 @@ export function createSubscriptions(env,{now=()=>Date.now()}={}){
           title:event.title,
           summary:event.summary,
           readyAt:event.readyAt,
-          link:new URL(`/api/articles/${event.articleId}/revisions/${event.revisionId}`,baseUrl).href,
+          link:new URL(`/articles/${event.articleId}?revision=${event.revisionId}`,baseUrl).href,
         })),
       });
       headers.set('Content-Type','application/rss+xml; charset=utf-8');
