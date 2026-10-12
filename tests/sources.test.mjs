@@ -29,6 +29,7 @@ const firecrawlPlugin={
         globalThis.SOURCES_SCRAPES=calls;
         globalThis.SOURCES_FAIL_LIST='';
         globalThis.SOURCES_EXTRA_DATES=false;
+        globalThis.SOURCES_BACKFILL_DATES=false;
         globalThis.SOURCES_FAULT_NEXT_LIST_COMMIT=false;
         globalThis.SOURCES_FAIL_BATCH=false;
         globalThis.SOURCES_FAIL_BEFORE_BATCH=false;
@@ -36,9 +37,18 @@ const firecrawlPlugin={
         const base64=value=>btoa(String.fromCharCode(...new TextEncoder().encode(value)));
         const list=(url,page)=>{
           const origin=new URL(url).origin;
+          const articles=[{url:sharedArticleUrl,title:'共享通知',publishedAt:null}];
+          if(globalThis.SOURCES_EXTRA_DATES)articles.push(
+            {url:origin+'/info/2026/2.htm',title:'共享通知',publishedAt:'2026-10-12 09:30'},
+            {url:origin+'/info/2026/3.htm',title:'日级通知',publishedAt:'2026-10-12'},
+          );
+          if(globalThis.SOURCES_BACKFILL_DATES)articles.push(
+            {url:origin+'/info/2025/4.htm',title:'一年外通知',publishedAt:'2025-09-30'},
+            {url:origin+'/info/2026/4.htm',title:'一年内通知',publishedAt:'2026-04-01'},
+          );
           return {
             title:'通知列表',
-            articles:[{url:sharedArticleUrl,title:'共享通知',publishedAt:null},...(globalThis.SOURCES_EXTRA_DATES?[{url:origin+'/info/2026/2.htm',title:'共享通知',publishedAt:'2026-10-12 09:30'},{url:origin+'/info/2026/3.htm',title:'日级通知',publishedAt:'2026-10-12'}]:[])],
+            articles,
             next:page===1?[url.replace(/\\.htm$/,'-2.htm')]:[],
           };
         };
@@ -82,7 +92,7 @@ const firecrawlPlugin={
   },
 };
 
-async function fixture({versioned=false,notifications=false,discoveryPages=2}={}){
+async function fixture({versioned=false,notifications=false,discoveryPages=2,env={}}={}){
   const bundle=await build({
     stdin:{
       contents:`
@@ -114,7 +124,7 @@ async function fixture({versioned=false,notifications=false,discoveryPages=2}={}
               return instance(id);
             }
             const task=await globalThis.SOURCES_ENV.DB.prepare('SELECT kind FROM tasks WHERE id=?').bind(params.taskId).first();
-            const Workflow=task?.kind==='discover'?DiscoveryWorkflow:CaptureWorkflow;
+            const Workflow=['discover','backfill'].includes(task?.kind)?DiscoveryWorkflow:CaptureWorkflow;
             const execution=new Workflow(globalThis.SOURCES_ENV).run({instanceId:id,payload:params},step);
             instances.set(id,{status:'running',error:null,execution});
             execution.then(()=>{instances.get(id).status='complete';})
@@ -155,6 +165,7 @@ async function fixture({versioned=false,notifications=false,discoveryPages=2}={}
           async fetch(request,rawEnv){
             const env=prepareEnv(rawEnv),url=new URL(request.url);
             if(url.pathname==='/fixture/extra-dates'){globalThis.SOURCES_EXTRA_DATES=true;return Response.json({ok:true});}
+            if(url.pathname==='/fixture/backfill-dates'){globalThis.SOURCES_BACKFILL_DATES=true;return Response.json({ok:true});}
             if(url.pathname==='/fixture/recover'){
               clockOffset=3600000;
               return Response.json(await createTaskRuntime(env,{now:runtimeNow}).recover());
@@ -184,6 +195,11 @@ async function fixture({versioned=false,notifications=false,discoveryPages=2}={}
               const source=await env.DB.prepare('SELECT * FROM sources WHERE id=?').bind(url.searchParams.get('sourceId')).first();
               if(!source)return Response.json({error:'missing source'},404);
               return Response.json(await issueGrant(env,{id:source.id,url:source.url},crypto.randomUUID(),'000000000000000000000000'));
+            }
+            if(url.pathname==='/fixture/submit-backfill'){
+              const command=await request.json();
+              return Response.json(await createSources(env,{now:runtimeNow})
+                .submitBackfill(command.sourceId,{requestId:command.requestId,windowDays:command.windowDays}));
             }
             if(url.pathname==='/fixture/advance-schedule'){
               const {advanceMs}=await request.json();
@@ -253,7 +269,8 @@ async function fixture({versioned=false,notifications=false,discoveryPages=2}={}
     serviceBindings:feedServiceBindings,
     bindings:{...provider.bindings,ADMIN_TOKEN:'test-admin-token',BASE_URL:'https://feed.test',BRIDGE_SECRET:'test-bridge-secret',
       FEED_AUTH_RPC_CLIENT_ID:'feed-rpc-client',FEED_AUTH_RPC_CLIENT_SECRET:'feed-rpc-secret',
-      ARCHIVE_VERSIONS_ENABLED:String(versioned),ARCHIVE_READS_ENABLED:String(versioned),SOURCE_MANAGEMENT_ENABLED:'true',CRAWL_ENABLED:'true',TASK_RUNTIME_ENABLED:'true',PDF_OCR_ENABLED:'false',MAX_DISCOVERY_PAGES_PER_RUN:String(discoveryPages)},
+      ARCHIVE_VERSIONS_ENABLED:String(versioned),ARCHIVE_READS_ENABLED:String(versioned),SOURCE_MANAGEMENT_ENABLED:'true',CRAWL_ENABLED:'true',TASK_RUNTIME_ENABLED:'true',PDF_OCR_ENABLED:'false',MAX_DISCOVERY_PAGES_PER_RUN:String(discoveryPages),
+      MAX_LIVE_DISCOVERY_TASKS_PER_RUN:String(env.liveBudget??20),MAX_BACKFILL_TASKS_PER_RUN:String(env.backfillBudget??5),DEFAULT_BACKFILL_WINDOW_DAYS:String(env.backfillWindowDays??365)},
     d1Databases:['DB'],r2Buckets:['ARCHIVE'],
     queueProducers:{FEED_JOBS:{queueName:'feed-jobs'},FEED_EVENTS:{queueName:'feed-events'}},
     queueConsumers:{'feed-jobs':{maxBatchSize:1,maxConcurrency:10,maxRetries:3,deadLetterQueue:'feed-jobs-dlq'},'feed-events':{maxBatchSize:1,maxConcurrency:10,maxRetries:3,deadLetterQueue:'feed-events-dlq'}},
@@ -273,6 +290,7 @@ async function fixture({versioned=false,notifications=false,discoveryPages=2}={}
   for(const name of ['0010_subscription_editing.sql','0013_notification_matching.sql']){
     await applyMigration(db,await readFile(`migrations/${name}`,'utf8'));
   }
+  await applyMigration(db,await readFile('migrations/0015_history_backfill.sql','utf8'));
   return {mf,db,provider,gate,commitGate(kind,{arm,release,sourceId}={}){
     if(arm)Object.assign(commits[kind],{hold:true,held:false,sourceId});
     if(release)commits[kind].release?.();
@@ -375,6 +393,191 @@ test('two discovered columns share one notification and capture while all finite
     assert.equal((await mf.dispatchFetch('https://feed.test/api/articles')).status,401);
     provider.setAccess(false);
     assert.equal((await read('/api/articles')).status,403);
+  }finally{await mf.dispose();}
+});
+
+test('history backfill uses a durable one-year cursor without creating mail candidates',async()=>{
+  const {mf,db,read,provider}=await fixture({versioned:true,notifications:true});
+  try{
+    const site=await request(mf,'/internal/sites',{method:'POST',body:{name:'历史补抓站点',origin:'https://a.test'}});
+    const sourceId=await createVerifiedSource(mf,site.data.site.id,'https://a.test/list.htm');
+    const cookie=await login(mf,provider);
+    const subscription=await userRequest(mf,cookie,'/api/subscriptions',{
+      method:'POST',
+      body:{requestId:'history-backfill-subscription',name:'历史栏目',sourceIds:[sourceId],emailMode:'immediate'},
+    });
+    assert.equal(subscription.status,201,JSON.stringify(subscription));
+    await mf.dispatchFetch('https://feed.test/fixture/backfill-dates');
+
+    const started=await request(mf,`/internal/sources/${sourceId}/backfill`,{
+      method:'POST',body:{requestId:'history-backfill-start'},
+    });
+    assert.equal(started.status,202,JSON.stringify(started));
+    assert.equal(started.data.source.backfill.state,'running');
+    assert.equal(started.data.source.backfill.windowDays,365);
+    assert.equal(started.data.source.backfill.windowStart,'2025-10-12');
+
+    await waitFor(async()=>{
+      const tasks=(await request(mf,'/internal/capture-tasks')).data.tasks;
+      assert.equal(tasks.filter(task=>task.kind==='backfill').length,2,JSON.stringify(tasks));
+      assert.equal(tasks.filter(task=>task.kind==='capture').length,2,JSON.stringify(tasks));
+      assert.ok(tasks.filter(task=>['backfill','capture'].includes(task.kind)).every(task=>task.state==='succeeded'),JSON.stringify(tasks));
+    });
+    await waitFor(async()=>assert.equal((await request(mf,`/internal/sources/${sourceId}/discoveries`)).data.discoveries.length,2));
+
+    const discoveries=(await request(mf,`/internal/sources/${sourceId}/discoveries`)).data.discoveries;
+    assert.ok(discoveries.every(row=>row.discoveryClass==='backfill'));
+    assert.deepEqual(discoveries.map(row=>row.datePrecision).sort(),['day','unknown']);
+    const firstSeen=new Map(discoveries.map(row=>[row.articleId,row.firstSeenAt]));
+    const progress=(await request(mf,`/internal/sources/${sourceId}`)).data.source.backfill;
+    assert.equal(progress.state,'completed');
+    assert.equal(progress.processedArticles,2);
+    assert.equal(progress.seenPages,2);
+    assert.equal(progress.remainingUrls,0);
+
+    const reading=await(await read(`/api/articles?source=${sourceId}`)).json();
+    assert.equal(reading.total,2);
+    const events=(await request(mf,'/internal/notification-events')).data.events;
+    assert.equal(events.length,2);
+    assert.ok(events.every(event=>event.historyOnly===true));
+    assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM user_deliveries').first()).n,0);
+
+    let unknownEventId=null;
+    for(const event of events){
+      const detail=(await request(mf,`/internal/notification-events/${event.id}`)).data;
+      if(detail.sources.some(source=>source.datePrecision==='unknown'))unknownEventId=event.id;
+    }
+    assert.ok(unknownEventId);
+    const verified=await request(mf,`/internal/notification-events/${unknownEventId}/date-verification`,{
+      method:'POST',
+      body:{requestId:'history-backfill-date',sourceId,verifiedBy:'feed-admin',
+        datePrecision:'day',publishedDay:'2026-03-01',evidence:{method:'source-page'}},
+    });
+    assert.equal(verified.status,202,JSON.stringify(verified));
+    await mf.dispatchFetch('https://feed.test/fixture/drain-matches');
+    const corrected=(await request(mf,`/internal/notification-events/${unknownEventId}`)).data;
+    assert.equal(corrected.sources.find(source=>source.sourceId===sourceId).datePrecision,'day');
+    assert.equal(corrected.matches.filter(match=>match.subscriptionId===subscription.data.subscription.id).length,1);
+    assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM user_deliveries').first()).n,0);
+    assert.ok(corrected.matches.some(match=>match.reason==='历史导入或迁移基线不补发邮件'));
+
+    const replay=await request(mf,`/internal/sources/${sourceId}/backfill`,{
+      method:'POST',body:{requestId:'history-backfill-start'},
+    });
+    assert.equal(replay.status,202,JSON.stringify(replay));
+    assert.equal(replay.data.source.backfill.state,'completed');
+    const replayDiscoveries=(await request(mf,`/internal/sources/${sourceId}/discoveries`)).data.discoveries;
+    assert.deepEqual(replayDiscoveries.map(row=>[row.articleId,row.firstSeenAt]).sort(),
+      [...firstSeen].map(([articleId,seen])=>[articleId,seen]).sort());
+  }finally{await mf.dispose();}
+});
+
+test('pausing a persisted backfill prevents paid work and resume retries the same task',async()=>{
+  const {mf,db}=await fixture({versioned:true});
+  try{
+    const site=await request(mf,'/internal/sites',{method:'POST',body:{name:'暂停恢复站点',origin:'https://a.test'}});
+    const sourceId=await createVerifiedSource(mf,site.data.site.id,'https://a.test/list.htm');
+    const submitted=await(await mf.dispatchFetch('https://feed.test/fixture/submit-backfill',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({sourceId,requestId:'pause-before-dispatch'}),
+    })).json();
+    assert.equal(submitted.task.state,'queued');
+    await db.prepare('UPDATE sources SET next_discovery_at=? WHERE id=?')
+      .bind(Date.now()+3_600_000,sourceId).run();
+    const before=(await(await mf.dispatchFetch('https://feed.test/fixture/scrapes')).json()).calls.length;
+
+    const paused=await request(mf,`/internal/sources/${sourceId}/backfill/pause`,{method:'POST'});
+    assert.equal(paused.status,200,JSON.stringify(paused));
+    await request(mf,'/internal/sources/schedule',{method:'POST'});
+    await waitFor(async()=>{
+      const task=(await request(mf,`/internal/capture-tasks/${submitted.task.id}`)).data.task;
+      assert.equal(task.state,'deferred',JSON.stringify(task));
+      assert.match(task.lastError,/Backfill is paused/i);
+    });
+    assert.equal((await(await mf.dispatchFetch('https://feed.test/fixture/scrapes')).json()).calls.length,before);
+
+    const resumed=await request(mf,`/internal/sources/${sourceId}/backfill/resume`,{method:'POST'});
+    assert.equal(resumed.status,202,JSON.stringify(resumed));
+    await waitFor(async()=>{
+      const task=(await request(mf,`/internal/capture-tasks/${submitted.task.id}`)).data.task;
+      assert.equal(task.state,'succeeded',JSON.stringify(task));
+      assert.equal(task.attemptNo,2);
+    });
+    await waitFor(async()=>{
+      const source=(await request(mf,`/internal/sources/${sourceId}`)).data.source;
+      assert.equal(source.backfill.state,'completed',JSON.stringify(source));
+    });
+    assert.equal((await request(mf,`/internal/sources/${sourceId}/discoveries`)).data.discoveries.length,1);
+    const source=(await request(mf,`/internal/sources/${sourceId}`)).data.source;
+    assert.equal(source.backfill.state,'completed');
+    assert.equal(source.backfill.processedArticles,1);
+  }finally{await mf.dispose();}
+});
+
+test('live discovery is scheduled before bounded and pausable history work',async()=>{
+  const {mf,db}=await fixture({versioned:true,discoveryPages:1,env:{liveBudget:1,backfillBudget:1}});
+  try{
+    const site=await request(mf,'/internal/sites',{method:'POST',body:{name:'调度预算站点',origin:'https://a.test'}});
+    const live=await createVerifiedSource(mf,site.data.site.id,'https://a.test/list-a.htm');
+    const first=await createVerifiedSource(mf,site.data.site.id,'https://a.test/list-b.htm');
+    const second=await createVerifiedSource(mf,site.data.site.id,'https://a.test/list.htm');
+    const firstStart=await request(mf,`/internal/sources/${first}/backfill`,{
+      method:'POST',body:{requestId:'backfill-window-30',windowDays:30},
+    });
+    const secondStart=await request(mf,`/internal/sources/${second}/backfill`,{
+      method:'POST',body:{requestId:'backfill-window-45',windowDays:45},
+    });
+    assert.equal(firstStart.status,202,JSON.stringify(firstStart));
+    assert.equal(secondStart.status,202,JSON.stringify(secondStart));
+    assert.equal(firstStart.data.source.backfill.windowDays,30);
+    assert.equal(secondStart.data.source.backfill.windowDays,45);
+    await waitFor(async()=>{
+      const tasks=(await request(mf,'/internal/capture-tasks')).data.tasks
+        .filter(task=>task.kind==='backfill'&&[first,second].includes(task.sourceId));
+      assert.equal(tasks.length,4,JSON.stringify(tasks));
+      assert.ok(tasks.every(task=>task.state==='succeeded'),JSON.stringify(tasks));
+    });
+
+    await db.prepare('UPDATE sources SET next_discovery_at=? WHERE id IN (?,?)')
+      .bind(Date.now()+3_600_000,first,second).run();
+    const cursor=JSON.stringify({nextUrls:['https://a.test/list-2.htm'],visited:['https://a.test/list.htm'],page:2,processedArticleIds:[]});
+    await db.prepare(`UPDATE sources SET backfill_state='running',backfill_cursor=?,backfill_next_at=0,
+        backfill_completed_at=NULL WHERE id IN (?,?)`).bind(cursor,first,second).run();
+
+    const scheduled=await request(mf,'/internal/sources/schedule',{method:'POST'});
+    assert.equal(scheduled.status,202,JSON.stringify(scheduled));
+    assert.equal(scheduled.data.scheduled.length,2);
+    const scheduledKinds=await Promise.all(scheduled.data.scheduled.map(taskId=>
+      request(mf,`/internal/capture-tasks/${taskId}`).then(result=>result.data.task.kind)));
+    assert.deepEqual(scheduledKinds,['discover','backfill']);
+    await waitFor(async()=>{
+      const tasks=await Promise.all(scheduled.data.scheduled.map(taskId=>
+        request(mf,`/internal/capture-tasks/${taskId}`).then(result=>result.data.task)));
+      assert.ok(tasks.every(task=>task.state==='succeeded'),JSON.stringify(tasks));
+    });
+
+    const selectedBackfill=scheduled.data.scheduled[1];
+    const selected=await db.prepare('SELECT source_id AS sourceId FROM tasks WHERE id=?').bind(selectedBackfill).first();
+    const waiting=[first,second].find(id=>id!==selected.sourceId);
+    const waitingSource=(await request(mf,`/internal/sources/${waiting}`)).data.source;
+    assert.equal(waitingSource.backfill.state,'running');
+    assert.equal(waitingSource.backfill.nextAt,0);
+
+    const paused=await request(mf,`/internal/sources/${waiting}/backfill/pause`,{method:'POST'});
+    assert.equal(paused.status,200,JSON.stringify(paused));
+    assert.equal(paused.data.source.backfill.state,'paused');
+    const pausedSchedule=await request(mf,'/internal/sources/schedule',{method:'POST'});
+    assert.deepEqual(pausedSchedule.data.scheduled,[]);
+
+    const resumed=await request(mf,`/internal/sources/${waiting}/backfill/resume`,{method:'POST'});
+    assert.equal(resumed.status,202,JSON.stringify(resumed));
+    assert.equal(resumed.data.source.backfill.state,'running');
+    const resumedSchedule=await request(mf,'/internal/sources/schedule',{method:'POST'});
+    assert.equal(resumedSchedule.data.scheduled.length,1);
+    const resumedTask=await db.prepare('SELECT kind,source_id AS sourceId FROM tasks WHERE id=?')
+      .bind(resumedSchedule.data.scheduled[0]).first();
+    assert.equal(resumedTask.kind,'backfill');
+    assert.equal(resumedTask.sourceId,waiting);
   }finally{await mf.dispose();}
 });
 

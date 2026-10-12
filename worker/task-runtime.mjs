@@ -67,7 +67,7 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
       if(message.attempt<task.attempt_no)return {state:task.state,acked:'stale-attempt'};
       if(message.attempt!==task.attempt_no)throw new SchemaError('Future task attempt');
       if(!activeStates.includes(task.state))return {state:task.state,acked:'terminal'};
-      if(!['capture','discover','ocr'].includes(task.kind))throw new SchemaError('Unsupported workflow kind');
+      if(!['capture','discover','backfill','ocr'].includes(task.kind))throw new SchemaError('Unsupported workflow kind');
       const instanceId=workflowInstanceId(task.id,message.attempt),timestamp=now();
       const workflowBinding=selectWorkflow(env,{workflow,workflows},task.kind);
       await env.DB.batch([
@@ -258,7 +258,9 @@ export async function finishCaptureTask(env,taskId,attemptNo,result,now=()=>Date
 }
 
 export async function finishDiscoveryTask(env,taskId,attemptNo,result,now=()=>Date.now()){
-  return finishTask(env,'discover',taskId,attemptNo,result,now);
+  const row=await env.DB.prepare('SELECT kind FROM tasks WHERE id=?').bind(taskId).first();
+  if(!['discover','backfill'].includes(row?.kind))throw new SchemaError('Discovery task kind is missing');
+  return finishTask(env,row.kind,taskId,attemptNo,result,now);
 }
 
 export async function finishOcrTask(env,taskId,attemptNo,result,now=()=>Date.now()){
@@ -292,7 +294,9 @@ export async function failCaptureTask(env,taskId,attemptNo,error,now=()=>Date.no
 }
 
 export async function failDiscoveryTask(env,taskId,attemptNo,error,now=()=>Date.now()){
-  return failTask(env,'discover',taskId,attemptNo,error,now);
+  const row=await env.DB.prepare('SELECT kind FROM tasks WHERE id=?').bind(taskId).first();
+  if(!['discover','backfill'].includes(row?.kind))throw new SchemaError('Discovery task kind is missing');
+  return failTask(env,row.kind,taskId,attemptNo,error,now);
 }
 
 export async function failOcrTask(env,taskId,attemptNo,error,now=()=>Date.now()){
@@ -346,7 +350,7 @@ function parseStartMessage(payload){
 function sameMessage(a,b){return ['v','type','outboxId','taskId','attempt'].every(key=>a[key]===b?.[key]);}
 function selectWorkflow(env,{workflow,workflows},kind){
   if(workflows?.[kind])return workflows[kind];
-  if(kind==='discover')return env.DISCOVERY;
+  if(kind==='discover'||kind==='backfill')return env.DISCOVERY;
   if(kind==='ocr')return env.ARCHIVE_OCR;
   return workflow??env.CAPTURE;
 }

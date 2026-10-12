@@ -26,6 +26,9 @@
 .feed-admin-section-heading p { margin: 0; color: var(--muted-foreground); font-size: var(--text-sm); line-height: 1.65; }
 .feed-admin-source-list { display: grid; gap: var(--space-4); }
 .feed-admin-evidence { margin-top: var(--space-5); padding-top: var(--space-5); border-top: 1px solid var(--border); }
+.feed-admin-backfill { display: grid; gap: var(--space-3); margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px dashed var(--border); }
+.feed-admin-backfill h3 { margin: 0; color: var(--foreground); font-size: var(--text-lg); font-weight: 650; }
+.feed-admin-backfill-controls { display: grid; grid-template-columns: minmax(7rem, 10rem) minmax(8rem, 12rem) auto; gap: var(--space-2); align-items: end; }
 .feed-admin-error-detail { display: block; margin-top: var(--space-2); overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--text-xs); }
 .feed-admin-server-error { margin: 0; color: var(--destructive); font-size: var(--text-sm); overflow-wrap: anywhere; }
 
@@ -994,6 +997,10 @@ body {
   }
 
   .feed-admin-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .feed-admin-backfill-controls {
     grid-template-columns: 1fr;
   }
 

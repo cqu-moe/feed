@@ -54,7 +54,21 @@ type Source = {
   validationTaskId: string | null;
   timezone: string;
   articleCount: number;
+  backfill: BackfillProgress;
   error: string | null;
+};
+
+type BackfillProgress = {
+  state: string;
+  windowDays: number | null;
+  windowStart: string | null;
+  nextAt: number;
+  startedAt: number | null;
+  completedAt: number | null;
+  seenPages: number;
+  processedArticles: number;
+  remainingUrls: number | null;
+  lastError: string | null;
 };
 
 type SourceForm = {
@@ -151,7 +165,25 @@ function parseSource(value: unknown): Source {
     validationTaskId: typeof value.validationTaskId === 'string' ? value.validationTaskId : null,
     timezone: typeof value.timezone === 'string' ? value.timezone : 'Asia/Shanghai',
     articleCount: integerValue(value.articleCount) ?? 0,
+    backfill: parseBackfillProgress(value.backfill),
     error: typeof value.error === 'string' && value.error ? value.error : null,
+  };
+}
+
+function parseBackfillProgress(value: unknown): BackfillProgress {
+  if (!isRecord(value)) throw new Error('历史补抓进度结构不匹配。');
+  const state = requiredString(value.state, '历史补抓状态');
+  return {
+    state,
+    windowDays: integerValue(value.windowDays),
+    windowStart: typeof value.windowStart === 'string' ? value.windowStart : null,
+    nextAt: integerValue(value.nextAt) ?? 0,
+    startedAt: integerValue(value.startedAt),
+    completedAt: integerValue(value.completedAt),
+    seenPages: integerValue(value.seenPages) ?? 0,
+    processedArticles: integerValue(value.processedArticles) ?? 0,
+    remainingUrls: integerValue(value.remainingUrls),
+    lastError: typeof value.lastError === 'string' && value.lastError ? value.lastError : null,
   };
 }
 
@@ -357,6 +389,25 @@ function validationLabel(state: string): string {
   return state || '未知状态';
 }
 
+function backfillLabel(state: string): string {
+  if (state === 'running') return '补抓进行中';
+  if (state === 'paused') return '已暂停';
+  if (state === 'completed') return '已完成';
+  if (state === 'failed') return '失败，可重启';
+  return '未启动';
+}
+
+function backfillWindowLabel(source: Source): string {
+  if (!source.backfill.windowDays) return '默认一年';
+  return `过去 ${source.backfill.windowDays} 天`;
+}
+
+function backfillRemainingLabel(source: Source): string {
+  if (source.backfill.state === 'completed') return '0 页';
+  if (source.backfill.remainingUrls === null) return '待下一页确认';
+  return `${source.backfill.remainingUrls} 页`;
+}
+
 function evidenceValue(source: Source, key: string): unknown {
   return source.validationJson?.[key];
 }
@@ -368,6 +419,95 @@ function sourceSiteName(source: Source, sites: Site[]): string {
 
 function safeFieldId(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, '-');
+}
+
+function BackfillControls({
+  source,
+  token,
+  onReplace,
+}: {
+  source: Source;
+  token: string;
+  onReplace: (source: Source) => void;
+}) {
+  const [windowDays, setWindowDays] = useState(String(source.backfill.windowDays ?? 365));
+  const [busy, setBusy] = useState(false);
+  const locked = source.backfill.state === 'running' || source.backfill.state === 'paused';
+
+  async function run(work: () => Promise<Source>) {
+    if (busy) return;
+    setBusy(true);
+    try {
+      onReplace(await work());
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function start() {
+    const days = Number(windowDays);
+    if (!Number.isSafeInteger(days) || days < 1 || days > 3650) return;
+    void run(async () => {
+      const result = await adminJson(`/internal/sources/${encodeURIComponent(source.id)}/backfill`, token, parseSourceResponse, {
+        method: 'POST',
+        body: JSON.stringify({ requestId: crypto.randomUUID(), windowDays: days }),
+      });
+      return result;
+    });
+  }
+
+  function pause() {
+    void run(async () => {
+      const result = await adminJson(`/internal/sources/${encodeURIComponent(source.id)}/backfill/pause`, token, parseSourceResponse, {
+        method: 'POST',
+      });
+      return result;
+    });
+  }
+
+  function resume() {
+    void run(async () => {
+      const result = await adminJson(`/internal/sources/${encodeURIComponent(source.id)}/backfill/resume`, token, parseSourceResponse, {
+        method: 'POST',
+      });
+      return result;
+    });
+  }
+
+  return <div className="feed-admin-backfill">
+    <div className="feed-admin-section-heading">
+      <h3>一年历史补抓</h3>
+      <p>{backfillLabel(source.backfill.state)}；历史只进入网页和 RSS，不生成新增邮件。</p>
+    </div>
+    <div className="feed-admin-backfill-controls">
+      <Label htmlFor={`backfill-window-${safeFieldId(source.id)}`}>窗口天数</Label>
+      <Input
+        id={`backfill-window-${safeFieldId(source.id)}`}
+        type="number"
+        min={1}
+        max={3650}
+        value={windowDays}
+        onChange={event => setWindowDays(event.target.value)}
+        disabled={busy || locked}
+      />
+      {source.backfill.state === 'paused' ? (
+        <Button type="button" onClick={resume} disabled={busy}>继续补抓</Button>
+      ) : source.backfill.state === 'running' ? (
+        <Button type="button" variant="outline" onClick={pause} disabled={busy}>暂停补抓</Button>
+      ) : (
+        <Button type="button" onClick={start} disabled={busy}>启动补抓</Button>
+      )}
+    </div>
+    <dl className="feed-source-meta">
+      <div><dt>历史窗口</dt><dd>{backfillWindowLabel(source)}</dd></div>
+      <div><dt>窗口起点</dt><dd>{source.backfill.windowStart ?? '未记录'}</dd></div>
+      <div><dt>已处理通知</dt><dd>{source.backfill.processedArticles}</dd></div>
+      <div><dt>已读取分页</dt><dd>{source.backfill.seenPages}</dd></div>
+      <div><dt>待处理分页</dt><dd>{backfillRemainingLabel(source)}</dd></div>
+      <div><dt>下次调度</dt><dd>{source.backfill.state === 'running' ? timestampLabel(source.backfill.nextAt) : '不调度'}</dd></div>
+    </dl>
+    {source.backfill.lastError && <p role="status" className="feed-admin-server-error">补抓失败原因：{source.backfill.lastError}</p>}
+  </div>;
 }
 
 export function AdminSourcesPage() {
@@ -434,6 +574,25 @@ export function AdminSourcesPage() {
     void poll();
     return () => { cancelled = true; clearTimeout(timer); };
   }, [token, selectedSource?.id, selectedSource?.validationTaskId]);
+
+  useEffect(() => {
+    const sourceId = selectedSource?.id;
+    if (!token || !sourceId || selectedSource?.backfill.state !== 'running') return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    async function poll() {
+      try {
+        const next = await adminJson(`/internal/sources/${encodeURIComponent(sourceId!)}`, token, parseSourceResponse);
+        if (cancelled) return;
+        setSources(prior => prior.map(item => item.id === next.id ? next : item));
+        if (next.backfill.state === 'running') timer = setTimeout(poll, 3000);
+      } catch {
+        if (!cancelled) timer = setTimeout(poll, 5000);
+      }
+    }
+    void poll();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [token, selectedSource?.id, selectedSource?.backfill.state]);
 
   function reportError(cause: unknown) {
     if (cause instanceof AdminRequestError && cause.status === 401) {
@@ -738,6 +897,7 @@ export function AdminSourcesPage() {
                       <div><dt>已关联通知</dt><dd>{source.articleCount}</dd></div>
                     </dl>
                     {source.error && <p role="status" className="feed-admin-server-error">{source.error}</p>}
+                    <BackfillControls source={source} token={token} onReplace={replaceSource} />
                     <div className="feed-card-actions">
                       <Button
                         type="button"

@@ -167,6 +167,76 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
       if(!task){const error=validationError('Source changed; reload before verification');error.status=409;throw error;}
       return {task,source:await this.readSource(id)};
     },
+
+    async submitBackfill(id,command={}){
+      if(!/^[A-Za-z0-9._:-]{8,100}$/.test(command?.requestId??''))throw validationError('requestId must contain 8-100 URI-safe characters');
+      if(command?.windowDays!==undefined&&(!Number.isSafeInteger(command.windowDays)||command.windowDays<1||command.windowDays>3650))
+        throw validationError('windowDays must be an integer from 1 to 3650');
+      const source=await this.find(id);
+      if(!source)return null;
+      if(!source.enabled||!source.siteEnabled||source.validationState!=='verified')
+        throw validationError('Backfill requires an enabled, verified source');
+      if(source.backfill.state!=='idle'&&source.backfill.state!=='failed'){
+        return {source:await this.readSource(id),task:source.backfill.state==='running'
+          ?await env.DB.prepare(`SELECT id,state FROM tasks WHERE source_id=? AND kind='backfill'
+              AND state IN ('queued','starting','running','deferred') ORDER BY created_at DESC,id LIMIT 1`).bind(id).first()
+          :null};
+      }
+      const at=timestamp(),windowDays=command.windowDays??source.backfill.windowDays
+        ??boundedInteger(env.DEFAULT_BACKFILL_WINDOW_DAYS,365,1,3650);
+      const runId=(await sha(`backfill-run:${id}:${command.requestId}`)).slice(0,16);
+      const windowStart=localDay(at-windowDays*86400000,source.timezone);
+      const checkpoint={nextUrls:sourceStartUrls(source),visited:[],processedArticleIds:[]};
+      const snapshot={...source,backfill:{...source.backfill,state:'running',windowDays,windowStart,runId}};
+      const built=await backfillTaskStatements(env,snapshot,{
+        page:1,checkpoint,runId,windowStart,
+      },{timestamp:at});
+      const committed=await env.DB.batch([
+        env.DB.prepare(`UPDATE sources SET backfill_state='running',backfill_window_days=?,backfill_window_start=?,
+            backfill_run_id=?,backfill_next_at=?,backfill_started_at=?,backfill_completed_at=NULL,
+            backfill_seen_pages=0,backfill_processed_articles=0,backfill_last_error=NULL,updated_at=?
+          WHERE id=? AND config_version=? AND enabled=1 AND backfill_state IN ('idle','failed')`)
+          .bind(windowDays,windowStart,runId,at+60000,at,at,id,source.configVersion),
+        ...built.statements,
+      ]);
+      if(!committed[0].meta?.changes){
+        const error=validationError('Backfill changed; reload before starting');error.status=409;throw error;
+      }
+      return {source:await this.readSource(id),task:await env.DB.prepare('SELECT id,state FROM tasks WHERE id=?').bind(built.taskId).first()};
+    },
+
+    async pauseBackfill(id){
+      const source=await this.find(id);
+      if(!source)return null;
+      if(!['running','failed'].includes(source.backfill.state)){
+        const error=validationError(`Backfill cannot pause from ${source.backfill.state}`);error.status=409;throw error;
+      }
+      await env.DB.prepare(`UPDATE sources SET backfill_state='paused',backfill_next_at=?,updated_at=?
+        WHERE id=? AND config_version=? AND backfill_state IN ('running','failed')`)
+        .bind(timestamp(),timestamp(),id,source.configVersion).run();
+      return {source:await this.readSource(id)};
+    },
+
+    async resumeBackfill(id){
+      const source=await this.find(id);
+      if(!source)return null;
+      if(source.backfill.state!=='paused'){
+        const error=validationError(`Backfill cannot resume from ${source.backfill.state}`);error.status=409;throw error;
+      }
+      const at=timestamp();
+      await env.DB.batch([
+        env.DB.prepare(`UPDATE tasks SET due_at=?,updated_at=?
+          WHERE source_id=? AND kind='backfill' AND state='deferred'`)
+          .bind(at,at,id),
+        env.DB.prepare(`UPDATE tasks SET state='deferred',due_at=?,updated_at=?
+          WHERE source_id=? AND kind='backfill' AND state IN ('failed','blocked','cancelled')`)
+          .bind(at,at,id),
+        env.DB.prepare(`UPDATE sources SET backfill_state='running',backfill_next_at=?,updated_at=?
+          WHERE id=? AND config_version=? AND backfill_state='paused'`)
+          .bind(at,at,id,source.configVersion),
+      ]);
+      return {source:await this.readSource(id)};
+    },
     async recordValidation(id,configVersion,evidence,{taskId,attemptNo}){
       const at=timestamp(),outcome={sourceId:id,mode:'validate',verified:true,evidence};
       const guard=`EXISTS(SELECT 1 FROM tasks WHERE id=? AND attempt_no=? AND state='running')`;
@@ -206,9 +276,11 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
     async scheduleDue({limit=20}={}){
       if(env.CRAWL_ENABLED!=='true'||env.TASK_RUNTIME_ENABLED!=='true'||env.SOURCE_MANAGEMENT_ENABLED!=='true')return {scheduled:[]};
       const at=timestamp(),size=boundedInteger(limit,20,1,100);
+      const liveBudget=Math.min(size,boundedInteger(env.MAX_LIVE_DISCOVERY_TASKS_PER_RUN,20,1,100));
+      const backfillBudget=Math.min(size,boundedInteger(env.MAX_BACKFILL_TASKS_PER_RUN,5,1,100));
       const rows=await env.DB.prepare(`${sourceSelect}
         WHERE s.enabled=1 AND st.enabled=1 AND s.validation_state='verified' AND s.next_discovery_at<=?
-        ORDER BY s.next_discovery_at,s.id LIMIT ?`).bind(at,size).all();
+        ORDER BY s.next_discovery_at,s.id LIMIT ?`).bind(at,liveBudget).all();
       const scheduled=[];const scheduledIds=[];
       for(const row of rows.results){
         try{
@@ -225,6 +297,38 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
           if(!/UNIQUE constraint failed: tasks.business_key/i.test(String(error)))throw error;
         }
       }
+      const backfillRows=await env.DB.prepare(`${sourceSelect}
+        WHERE s.enabled=1 AND st.enabled=1 AND s.validation_state='verified'
+          AND s.backfill_state='running' AND s.backfill_next_at<=?
+          AND NOT EXISTS(SELECT 1 FROM tasks pending_backfill
+            WHERE pending_backfill.source_id=s.id AND pending_backfill.kind='backfill'
+              AND pending_backfill.state IN ('queued','starting','running','deferred'))
+        ORDER BY s.backfill_next_at,s.id LIMIT ?`).bind(at,backfillBudget).all();
+      for(const row of backfillRows.results){
+        try{
+          const source=rowFromDb(row),checkpoint=source.backfillCursor??{nextUrls:sourceStartUrls(source),visited:[],processedArticleIds:[]};
+          const page=boundedInteger(Number(source.backfillCursor?.page),1,1,1000);
+          const built=await backfillTaskStatements(env,source,{
+            page,checkpoint,runId:source.backfill.runId,windowStart:source.backfill.windowStart,
+          },{timestamp:at});
+          const committed=await env.DB.batch([
+            env.DB.prepare(`UPDATE sources SET backfill_next_at=?,updated_at=?
+              WHERE id=? AND config_version=? AND backfill_state='running'
+                AND NOT EXISTS(SELECT 1 FROM tasks pending_backfill
+                  WHERE pending_backfill.source_id=sources.id AND pending_backfill.kind='backfill'
+                    AND pending_backfill.state IN ('queued','starting','running','deferred'))`)
+              .bind(at+60000,at,source.id,source.configVersion),
+            ...built.statements,
+          ]);
+          if(!committed[0].meta?.changes&&!committed[1].results?.length)continue;
+          if(committed[1].results?.length){
+            scheduled.push(built.taskId);
+            scheduledIds.push(built.taskId);
+          }
+        }catch(error){
+          if(!/UNIQUE constraint failed: tasks.business_key/i.test(String(error)))throw error;
+        }
+      }
       return {scheduled,taskIds:scheduledIds};
     },
 
@@ -232,21 +336,38 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
       if(!/^[a-f0-9]{24}$/.test(taskId??''))throw validationError('Invalid discovery task id');
       const task=await env.DB.prepare(`SELECT t.*,ta.result_json FROM tasks t
         JOIN task_attempts ta ON ta.task_id=t.id AND ta.attempt_no=t.attempt_no
-        WHERE t.id=? AND t.kind='discover' AND t.attempt_no=? AND t.state='running'`).bind(taskId,attemptNo).first();
+      WHERE t.id=? AND t.kind IN ('discover','backfill') AND t.attempt_no=? AND t.state='running'`).bind(taskId,attemptNo).first();
       if(!task)return {superseded:true};
       if(task.result_json)return JSON.parse(task.result_json);
       const context=JSON.parse(task.payload_json),source=context.source;
       if(context.mode==='validate')return verifySource(env,this,source.id,{source,taskId,attemptNo,scrape});
       if(source?.id!==task.source_id||source?.configVersion===undefined)throw validationError('Discovery source snapshot is invalid');
+      const isBackfill=context.mode==='backfill';
+      if(isBackfill){
+        const control=await env.DB.prepare('SELECT backfill_state FROM sources WHERE id=? AND config_version=?')
+          .bind(source.id,source.configVersion).first();
+        if(control?.backfill_state!=='running')
+          return {deferred:true,error:'Backfill is paused',retryAfterMs:12*60*60*1000};
+      }
       const checkpoint=context.checkpoint??{};
       let urls=Array.isArray(checkpoint.nextUrls)?checkpoint.nextUrls:[source.listUrl];
       const visited=new Set(Array.isArray(checkpoint.visited)?checkpoint.visited:[]);
+      const processedArticleIds=new Set(Array.isArray(checkpoint.processedArticleIds)?checkpoint.processedArticleIds:[]);
       const page=boundedInteger(context.page,1,1,1000);
       const currentUrl=urls.shift();
       if(typeof currentUrl!=='string'||visited.has(currentUrl))throw validationError('Discovery cursor is invalid');
-      const result=await savedDiscoveryPage(env,source,taskId,currentUrl,{
-        scrape,now,baselineCutoffAt:source.baselineCutoffAt??cutoffDate(timestamp()),
-      });
+      let result;
+      try{
+        result=await savedDiscoveryPage(env,source,taskId,currentUrl,{
+          scrape,now,
+          baselineCutoffAt:isBackfill?context.windowStart:(source.baselineCutoffAt??cutoffDate(timestamp())),
+        });
+      }catch(error){
+        if(isBackfill)await env.DB.prepare(`UPDATE sources SET backfill_last_error=?,updated_at=?
+          WHERE id=? AND config_version=? AND backfill_state='running'`)
+          .bind(cleanError(error),timestamp(),source.id,source.configVersion).run();
+        throw error;
+      }
       visited.add(currentUrl);
       const nextPageUrls=[...new Set([...urls,...result.next])].filter(url=>!visited.has(url));
       const candidates=result.articles.filter(row=>{
@@ -258,6 +379,7 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
       const activeTask={sql:'EXISTS(SELECT 1 FROM tasks active_task WHERE active_task.id=? AND active_task.attempt_no=? AND active_task.state=\'running\')',args:[taskId,attemptNo]};
       for(const row of candidates){
         const aid=await articleId(row.url);
+        processedArticleIds.add(aid);
         const captureBusinessKey=`capture:${aid}:discovery-initial`;
         const captureTaskId=(await sha(captureBusinessKey)).slice(0,24);
         statements.push(
@@ -265,17 +387,17 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
             SELECT ?,?,?,?,?,?,'pending' WHERE ${activeTask.sql} ON CONFLICT(url) DO NOTHING`)
             .bind(aid,source.id,row.url,row.title,row.precision==='unknown'?'unknown':row.publishedDay,new Date(result.observedAt).toISOString(),...activeTask.args),
           env.DB.prepare(`INSERT INTO article_sources(article_id,source_id,first_seen_at,last_seen_at,discovery_class,published_at,published_day,date_precision,source_timezone)
-            SELECT ?,?,?,?,'live',?,?,?,? WHERE ${activeTask.sql}
+            SELECT ?,?,?,?,?,?,?,?,? WHERE ${activeTask.sql}
             ON CONFLICT(article_id,source_id) DO UPDATE SET last_seen_at=excluded.last_seen_at`)
             .bind(aid,source.id,result.observedAt,result.observedAt,
-              row.precision==='minute'?row.publishedAt:null,row.precision==='unknown'?null:row.publishedDay,
+              isBackfill?'backfill':'live',row.precision==='minute'?row.publishedAt:null,row.precision==='unknown'?null:row.publishedDay,
               row.precision,source.timezone,...activeTask.args),
           env.DB.prepare(`INSERT INTO tasks(id,kind,business_key,source_id,article_id,payload_json,state,priority,due_at,attempt_no,created_at,updated_at)
             SELECT ?,'capture',?,?,?,?,'queued',80,?,1,?,? WHERE ${activeTask.sql}
               AND EXISTS(SELECT 1 FROM article_sources WHERE article_id=? AND source_id=?)
             ON CONFLICT(business_key) DO NOTHING`)
             .bind(captureTaskId,captureBusinessKey,source.id,aid,
-              JSON.stringify({source,discovery:{articleId:aid,configVersion:source.configVersion,page,scheduledSlot:context.scheduledSlot}}),
+              JSON.stringify({source,captureIntent:isBackfill?'backfill':'live',discovery:{articleId:aid,configVersion:source.configVersion,page,scheduledSlot:context.scheduledSlot,captureIntent:isBackfill?'backfill':'live'}}),
               at,at,at,...activeTask.args,aid,source.id),
           launchOutboxStatement(env,{id:await launchOutboxId(captureTaskId,1),taskId:captureTaskId,attempt:1,timestamp:at,
             guardSql:'kind=? AND '+activeTask.sql,guardArgs:['capture',...activeTask.args]}),
@@ -285,14 +407,24 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
         });
         statements.push(...association.statements);
       }
-      const continuation=nextPageUrls.length&&page<boundedInteger(env.MAX_DISCOVERY_PAGES_PER_RUN,2,1,10);
+      const continuation=!isBackfill&&nextPageUrls.length&&page<boundedInteger(env.MAX_DISCOVERY_PAGES_PER_RUN,2,1,10);
+      const hasBackfillContinuation=isBackfill&&nextPageUrls.length>0;
       const checkpointJson=JSON.stringify({
-        nextUrls:continuation?nextPageUrls:[],visited:[...visited],verifiedUpTo:currentUrl,page,
+        nextUrls:continuation||hasBackfillContinuation?nextPageUrls:[],visited:[...visited],verifiedUpTo:currentUrl,page,
+        processedArticleIds:[...processedArticleIds],
       });
-      if(continuation){
+      if(!isBackfill&&continuation){
         const continuationTask=await discoveryTaskStatements(env,source,{
           page:page+1,checkpoint:{nextUrls:nextPageUrls,visited:[...visited]},scheduledSlot:context.scheduledSlot,
         },{timestamp:at,advanceSource:false,taskGuard:activeTask});
+        statements.push(...continuationTask.statements);
+        statements.push(env.DB.prepare(`UPDATE tasks SET checkpoint_json=? WHERE id=? AND ${activeTask.sql} RETURNING id`)
+          .bind(JSON.stringify({continuationTaskId:continuationTask.taskId}),taskId,...activeTask.args));
+      }else if(isBackfill&&nextPageUrls.length){
+        const continuationTask=await backfillTaskStatements(env,source,{
+          page:page+1,checkpoint:{nextUrls:nextPageUrls,visited:[...visited],processedArticleIds:[...processedArticleIds]},
+          runId:context.runId,windowStart:context.windowStart,
+        },{timestamp:at,taskGuard:activeTask});
         statements.push(...continuationTask.statements);
         statements.push(env.DB.prepare(`UPDATE tasks SET checkpoint_json=? WHERE id=? AND ${activeTask.sql} RETURNING id`)
           .bind(JSON.stringify({continuationTaskId:continuationTask.taskId}),taskId,...activeTask.args));
@@ -301,14 +433,27 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
           .bind(checkpointJson,taskId,...activeTask.args));
       }
       const checkpointIndex=statements.length-1;
-      const outcome={sourceId:source.id,page,candidates:candidates.length,undated:result.undated,continuation:Boolean(continuation),checkpoint:JSON.parse(checkpointJson)};
+      const outcome={sourceId:source.id,mode:isBackfill?'backfill':'live',page,candidates:candidates.length,
+        undated:result.undated,continuation:Boolean(continuation||hasBackfillContinuation),checkpoint:JSON.parse(checkpointJson)};
       statements.push(env.DB.prepare(`UPDATE task_attempts SET result_json=COALESCE(result_json,?) WHERE task_id=? AND attempt_no=? AND ${activeTask.sql}`)
         .bind(JSON.stringify(outcome),taskId,attemptNo,...activeTask.args));
-      statements.push(env.DB.prepare(`UPDATE sources SET last_run_at=?,error=NULL,updated_at=? WHERE id=? AND config_version=? AND ${activeTask.sql}`)
-        .bind(new Date(at).toISOString(),at,source.id,source.configVersion,...activeTask.args));
+      statements.push(isBackfill
+        ?env.DB.prepare(`UPDATE sources SET last_run_at=?,error=NULL,backfill_cursor=?,backfill_seen_pages=backfill_seen_pages+1,
+            backfill_processed_articles=?,backfill_next_at=?,
+            backfill_state=CASE WHEN ? THEN 'completed' ELSE 'running' END,
+            backfill_completed_at=CASE WHEN ? THEN ? ELSE backfill_completed_at END,
+            backfill_last_error=NULL,updated_at=? WHERE id=? AND config_version=? AND backfill_state='running' AND ${activeTask.sql}`)
+          .bind(new Date(at).toISOString(),checkpointJson,processedArticleIds.size,at,
+            nextPageUrls.length?0:1,nextPageUrls.length?0:1,nextPageUrls.length?null:at,
+            at,source.id,source.configVersion,...activeTask.args)
+        :env.DB.prepare(`UPDATE sources SET last_run_at=?,error=NULL,updated_at=? WHERE id=? AND config_version=? AND ${activeTask.sql}`)
+          .bind(new Date(at).toISOString(),at,source.id,source.configVersion,...activeTask.args));
       let committed;
       try{committed=await env.DB.batch(statements);}
       catch(error){
+        if(isBackfill)await env.DB.prepare(`UPDATE sources SET backfill_last_error=?,updated_at=?
+          WHERE id=? AND config_version=? AND backfill_state='running'`)
+          .bind(cleanError(error),timestamp(),source.id,source.configVersion).run().catch(()=>{});
         const receipt=await env.DB.prepare('SELECT result_json FROM task_attempts WHERE task_id=? AND attempt_no=?').bind(taskId,attemptNo).first();
         if(receipt?.result_json)return JSON.parse(receipt.result_json);
         return {deferred:true,error:cleanError(error),savedPage:true};
@@ -346,6 +491,30 @@ async function discoveryTaskStatements(env,source,context,{timestamp,advanceSour
   return {taskId,statements};
 }
 
+async function backfillTaskStatements(env,source,context,{timestamp,taskGuard}){
+  const cursorHash=(await sha(JSON.stringify(context.checkpoint))).slice(0,16);
+  const businessKey=`backfill:${source.id}:${context.runId}:p${context.page}:${cursorHash}`;
+  const taskId=(await sha(businessKey)).slice(0,24);
+  const payload={source,mode:'backfill',page:context.page,checkpoint:context.checkpoint,
+    runId:context.runId,windowStart:context.windowStart};
+  const parentGuard=taskGuard?` AND ${taskGuard.sql}`:'';
+  const parentGuardArgs=taskGuard?[...taskGuard.args]:[];
+  return {
+    taskId,
+    statements:[
+      env.DB.prepare(`INSERT INTO tasks(id,kind,business_key,source_id,payload_json,state,priority,due_at,attempt_no,created_at,updated_at)
+        SELECT ?,'backfill',?,?,?,'queued',85,?,1,?,?
+        FROM sources WHERE id=? AND config_version=? AND enabled=1 AND backfill_state='running'
+          AND EXISTS(SELECT 1 FROM sites WHERE sites.id=sources.site_id AND sites.enabled=1)${parentGuard}
+        ON CONFLICT(business_key) DO NOTHING RETURNING id`)
+        .bind(taskId,businessKey,source.id,JSON.stringify(payload),timestamp,timestamp,timestamp,
+          source.id,source.configVersion,...parentGuardArgs),
+      launchOutboxStatement(env,{id:await launchOutboxId(taskId,1),taskId,attempt:1,timestamp,
+        guardSql:"kind='backfill'",guardArgs:[]}),
+    ],
+  };
+}
+
 function sourceStartUrls(source){
   const configured=source.config?.listUrls;
   if(Array.isArray(configured)&&configured.length)return [...new Set(configured.filter(url=>typeof url==='string'))];
@@ -354,6 +523,7 @@ function sourceStartUrls(source){
 
 function rowFromDb(row){
   const config=safeJson(row.config_json,{});
+  const cursor=safeJson(row.backfill_cursor,null);
   return {
     id:row.id,siteId:row.site_id,name:row.name,url:row.site_origin??row.url,listUrl:row.list_url??row.url,
     articlePattern:config.articlePattern,listUrls:config.listUrls??[row.list_url??row.url],
@@ -364,10 +534,17 @@ function rowFromDb(row){
     },
     configVersion:row.config_version,enabled:row.enabled===1,siteEnabled:row.site_enabled===1,
     refreshIntervalSec:row.refresh_interval_sec,nextDiscoveryAt:row.next_discovery_at,
-    baselineCutoffAt:row.baseline_cutoff_at,backfillCursor:safeJson(row.backfill_cursor,null),
+    baselineCutoffAt:row.baseline_cutoff_at,backfillCursor:cursor,
     validationState:row.validation_state,validationJson:safeJson(row.validation_json,null),
     validatedAt:row.validated_at,validationTaskId:row.validation_task_id,timezone:row.source_timezone,
     lastRunAt:row.last_run_at,error:row.error,
+    backfill:{
+      state:row.backfill_state,windowDays:row.backfill_window_days,windowStart:row.backfill_window_start,
+      runId:row.backfill_run_id,nextAt:row.backfill_next_at,startedAt:row.backfill_started_at,
+      completedAt:row.backfill_completed_at,seenPages:row.backfill_seen_pages,
+      processedArticles:row.backfill_processed_articles,lastError:row.backfill_last_error,
+      remainingUrls:Array.isArray(cursor?.nextUrls)?cursor.nextUrls.length:null,
+    },
   };
 }
 
@@ -377,6 +554,8 @@ function sourceFromStatic(source){
     config:{articlePattern:source.articlePattern,listUrls:source.listUrls},configVersion:1,enabled:true,siteEnabled:true,
     refreshIntervalSec:86400,nextDiscoveryAt:0,baselineCutoffAt:null,backfillCursor:null,
     validationState:'verified',validationJson:null,validatedAt:null,timezone:'Asia/Shanghai',lastRunAt:null,error:null,
+    backfill:{state:'idle',windowDays:null,windowStart:null,runId:null,nextAt:0,startedAt:null,
+      completedAt:null,seenPages:0,processedArticles:0,lastError:null,remainingUrls:null},
   };
 }
 
@@ -464,6 +643,15 @@ function safeJson(value,fallback){
 function boundedInteger(value,fallback,min,max){
   const n=Number(value);
   return Number.isSafeInteger(n)?Math.min(max,Math.max(min,n)):fallback;
+}
+
+function localDay(value,timezone){
+  try{
+    return new Intl.DateTimeFormat('en-CA',{timeZone:timezone,year:'numeric',month:'2-digit',day:'2-digit'})
+      .format(new Date(value));
+  }catch{
+    return new Date(value).toISOString().slice(0,10);
+  }
 }
 
 export function validationError(message){const error=new Error(message);error.name='ValidationError';return error;}

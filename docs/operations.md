@@ -476,4 +476,6 @@ node scripts/compare-ocr.mjs publish mistral-ocr-4-1
 
 `GET /internal/sources/:id/discoveries` 返回该栏目最近 100 条发现证据：首次/最近发现、live/backfill/migrated 分类、日期精度、原站日历日期、准确时间与时区。日级日期不补成零点，未知日期不补成当前日期；明确分钟时间按来源时区转换，夏令时歧义降为日级证据。后续推送仍要经过日期资格与版本完整性检查。
 
+验证并启用后的栏目可用 `POST /internal/sources/:id/backfill` 启动历史补抓，请求带 8–100 字符 `requestId`，可选 1–3650 天 `windowDays`；未提供时使用 `DEFAULT_BACKFILL_WINDOW_DAYS`（默认 365，可配置 1–3650）。一个 backfill Workflow 只处理一页，游标、去重后的通知进度、下一页任务和执行回执同批提交；`POST /internal/sources/:id/backfill/pause` 与 `/resume` 只改变持久控制状态，不删除任务、证据或首次发现时间。调度先处理到期 live，再按 `MAX_LIVE_DISCOVERY_TASKS_PER_RUN` 与 `MAX_BACKFILL_TASKS_PER_RUN` 的独立预算推进历史；预算未用完的到期源保持 due，不伪报完成。历史基线进入网页/RSS 但无新增邮件资格，未知日期仍待核实，后续核实为历史也不补发。
+
 本地验收：真实 Worker 管理及 BFF 阅读入口、Miniflare D1/R2/Queue、外部 Auth 与 Firecrawl Adapter；覆盖异步验证、重复请求、旧配置结果、分页原子恢复、多栏目身份、限流隔离、暂停阅读和日期精度。真实站点样本、云 Queue/Workflow 交接与生产开关验收属于 T17/T18，不能用这些本地结果替代。
