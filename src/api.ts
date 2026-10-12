@@ -352,7 +352,7 @@ export type SubscriptionList = {
   sites: SubscriptionSite[];
   sources: SubscriptionSourceOption[];
   outputChannels: {
-    rss: { enabled: false; reason: string };
+    rss: { enabled: true } | { enabled: false; reason: string };
     email: { enabled: false; reason: string };
   };
 };
@@ -440,7 +440,12 @@ function parseSubscriptionPolicy(value: unknown): SubscriptionPolicy {
   };
 }
 
-function parseOutputChannel(value: unknown, label: string): { enabled: false; reason: string } {
+function parseRssOutputChannel(value: unknown): { enabled: true } | { enabled: false; reason: string } {
+  if (isRecord(value) && value.enabled === true) return { enabled: true };
+  return parseDisabledOutputChannel(value, 'RSS');
+}
+
+function parseDisabledOutputChannel(value: unknown, label: string): { enabled: false; reason: string } {
   if (!isRecord(value) || value.enabled !== false || typeof value.reason !== 'string') {
     throw new Error(`${label}输出通道结构不匹配。`);
   }
@@ -471,8 +476,8 @@ export function parseSubscriptionList(value: unknown): SubscriptionList {
     sites: value.sites as SubscriptionSite[],
     sources: value.sources as SubscriptionSourceOption[],
     outputChannels: {
-      rss: parseOutputChannel(value.outputChannels.rss, 'RSS'),
-      email: parseOutputChannel(value.outputChannels.email, '邮件'),
+      rss: parseRssOutputChannel(value.outputChannels.rss),
+      email: parseDisabledOutputChannel(value.outputChannels.email, '邮件'),
     },
   };
 }
