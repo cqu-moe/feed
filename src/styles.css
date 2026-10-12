@@ -251,7 +251,7 @@ body {
 
 .feed-subscription-layout {
   display: grid;
-  grid-template-columns: minmax(0, 34rem) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: var(--space-5);
   align-items: start;
 }
@@ -261,11 +261,13 @@ body {
 .feed-subscription-options,
 .feed-subscription-site,
 .feed-subscription-field {
+  min-width: 0;
   display: grid;
   gap: var(--space-3);
 }
 
 .feed-subscription-form {
+  min-width: 0;
   position: sticky;
   top: var(--space-4);
 }
@@ -310,6 +312,8 @@ body {
 }
 
 .feed-subscription-check span {
+  min-width: 0;
+  overflow-wrap: anywhere;
   display: grid;
   gap: var(--space-1);
 }
@@ -328,8 +332,7 @@ body {
   gap: var(--space-4);
 }
 
-.feed-subscription-card p,
-.feed-subscription-created > p {
+.feed-subscription-card p {
   margin: var(--space-3) 0 0;
   color: var(--muted-foreground);
   font-size: var(--text-sm);
@@ -337,26 +340,28 @@ body {
 }
 
 .feed-subscription-token {
+  min-width: 0;
   display: grid;
   gap: var(--space-3);
   margin-top: var(--space-4);
   padding: var(--space-4);
-  border: 1px solid var(--warning);
+  border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  background: color-mix(in oklab, var(--warning) 10%, var(--surface));
+  background: var(--muted);
 }
 
 .feed-subscription-token > button {
   justify-self: start;
 }
 
-.feed-subscription-token code {
-  padding: var(--space-3);
-  border-radius: var(--radius-sm);
-  color: var(--foreground);
-  background: var(--background);
-  font-size: var(--text-xs);
-  overflow-wrap: anywhere;
+@media (max-width: 1024px) {
+  .feed-subscription-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .feed-subscription-form {
+    position: static;
+  }
 }
 
 .feed-subscription-empty {
@@ -934,7 +939,7 @@ body {
   }
 
   .feed-subscription-layout {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .feed-subscription-form {
@@ -966,7 +971,9 @@ body {
     grid-template-columns: 1fr;
   }
 
-  .feed-card-actions > *,
+  .feed-card-actions > button,
+  .feed-card-actions > a,
+  .feed-card-actions > p,
   .feed-detail-actions > *,
   .feed-pagination > *,
   .feed-revision-card > * {
