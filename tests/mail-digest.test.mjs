@@ -6,6 +6,32 @@ import {seedReadyEvent} from './helpers/notification-event.mjs';
 const morning=Date.parse('2026-10-12T04:00:00Z');
 const evening=Date.parse('2026-10-12T12:00:00Z');
 
+test('an already compiled digest keeps its message and sends after a temporary Auth outage',async()=>{
+  const sent=[];
+  const f=await subscriptionsFixture({clock:morning,mailHarness:{async fetch(request){
+    sent.push({key:request.headers.get('idempotency-key'),body:await request.json()});
+    return Response.json({id:'33333333-3333-4333-8333-333333333333'});
+  }}});
+  try{
+    await subscriptionsInvoke(f.mf,'change',{id:'digest-owner'},{requestId:'digest-auth-recovery',name:'每日通知',sourceIds:['jwc'],emailMode:'daily_digest'});
+    for(let i=0;i<2;i++){
+      const id=await seedReadyEvent(f.mf,{id:`e${i}`+'7'.repeat(22),sourceId:'jwc',firstSeenAt:morning+1,observedAt:morning+1,readyAt:morning+2,publishedAt:new Date(morning+1).toISOString(),datePrecision:'minute',title:`恢复后同批发送${i}`});
+      await notificationInvoke(f.mf,'enqueueEvent',id);await notificationInvoke(f.mf,'replayMatchOutbox');
+    }
+    await f.mailClock(evening);await f.mail('prepareDigests');
+    const initial=(await adminRequest(f.mf,'/internal/mail',undefined,{method:'GET'})).body.messages[0];
+    await f.setPolicyService({outage:true});await f.replayMail();assert.equal(sent.length,0);
+    assert.equal((await adminRequest(f.mf,'/internal/mail',undefined,{method:'GET'})).body.messages[0].state,'deferred');
+    await f.setPolicyService({outage:false});await f.mailClock(evening+120_000);await f.mail('recover');await f.replayMail();
+    assert.equal(sent.length,1);
+    assert.equal(sent[0].key,`feed-mail/${initial.id}`);
+    assert.match(sent[0].body.text,/恢复后同批发送0/);assert.match(sent[0].body.text,/恢复后同批发送1/);
+    const recovered=(await adminRequest(f.mf,'/internal/mail',undefined,{method:'GET'})).body.messages;
+    assert.equal(recovered.length,1);assert.equal(recovered[0].id,initial.id);assert.equal(recovered[0].state,'accepted');
+    await f.mailClock(evening+86400_000);await f.mail('recover');await f.replayMail({duplicate:true});assert.equal(sent.length,1);
+  }finally{await f.mf.dispose();}
+});
+
 test('a competing delivery claim cannot leave a digest containing an item it did not acquire',async()=>{
   const sent=[];
   const f=await subscriptionsFixture({clock:morning,mailHarness:{async fetch(request){sent.push(await request.json());return Response.json({id:'44444444-4444-4444-8444-444444444444'});}}});

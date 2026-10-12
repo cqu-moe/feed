@@ -179,7 +179,7 @@ export function createMail(env,{now=()=>Date.now(),provider=createResendProvider
           .bind(at+minute,at,id,at).run();
         return {id,state:'deferred'};
       }
-      const recovered=message.last_error==='auth_unavailable';
+      const recovered=message.kind==='immediate'&&message.last_error==='auth_unavailable';
       if(recovered||invalid>=0){
         const reason=assessment.suppressionReason??(recovered?'recovered_backlog':!assessment.eligible?'no_eligible_match':assessment.recipient!==payload.to?'recipient_changed':'mode_changed');
         const backlog=Boolean(assessments.some(item=>item.eligible)&&(assessment.suppressionReason||recovered));
