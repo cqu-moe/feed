@@ -204,6 +204,23 @@ body {
   background: color-mix(in oklab, var(--destructive) 10%, var(--surface));
 }
 
+.feed-source-state.is-warning {
+  color: var(--warning);
+  border-color: color-mix(in oklab, var(--warning) 40%, transparent);
+  background: color-mix(in oklab, var(--warning) 10%, var(--surface));
+}
+
+.feed-account-card {
+  max-width: 48rem;
+}
+
+.feed-account-note {
+  margin: var(--space-2) 0 0;
+  color: var(--muted-foreground);
+  font-size: var(--text-sm);
+  line-height: 1.65;
+}
+
 .feed-article-status-pending,
 .feed-article-status-processing {
   color: var(--warning);
@@ -213,6 +230,7 @@ body {
 
 .feed-article-card h2,
 .feed-source-card h2,
+.feed-account-card h2,
 .feed-attachment h3 {
   margin: var(--space-3) 0 0;
   color: var(--foreground);
@@ -244,7 +262,8 @@ body {
 }
 
 .feed-article-meta,
-.feed-source-meta {
+.feed-source-meta,
+.feed-account-meta {
   justify-content: flex-start;
   margin-top: var(--space-4);
   padding-top: var(--space-4);
@@ -252,19 +271,22 @@ body {
 }
 
 .feed-article-meta > div,
-.feed-source-meta > div {
+.feed-source-meta > div,
+.feed-account-meta > div {
   min-width: 9rem;
 }
 
 .feed-article-meta dt,
-.feed-source-meta dt {
+.feed-source-meta dt,
+.feed-account-meta dt {
   margin-bottom: var(--space-1);
   color: var(--muted-foreground);
   font-size: var(--text-xs);
 }
 
 .feed-article-meta dd,
-.feed-source-meta dd {
+.feed-source-meta dd,
+.feed-account-meta dd {
   margin: 0;
   color: var(--foreground);
   font-size: var(--text-sm);

@@ -1,4 +1,5 @@
 import { createRemoteJWKSet, customFetch, jwtVerify } from "jose";
+import { feedAccountStatus } from "./feed-auth-client.mjs";
 
 const SESSION_COOKIE = "__Host-feed_session";
 const LOGIN_COOKIE = "__Host-feed_login";
@@ -397,7 +398,7 @@ function unauthenticated(error) {
   return { authenticated: false, entitled: false, ...(error ? { error } : {}) };
 }
 
-export async function session(request, env) {
+export async function session(request, env, options = {}) {
   const cookieToken = parseCookies(request).get(SESSION_COOKIE);
   if (!cookieToken) return unauthenticated();
 
@@ -439,6 +440,9 @@ export async function session(request, env) {
         authenticated: true,
         entitled: false,
         user: credentials.user,
+        ...(options.includeAccount
+          ? { account: await feedAccountStatus(env, credentials.sub) }
+          : {}),
         error: "access_denied",
       };
     }
@@ -447,6 +451,9 @@ export async function session(request, env) {
       authenticated: true,
       entitled: true,
       user: credentials.user,
+      ...(options.includeAccount
+        ? { account: await feedAccountStatus(env, credentials.sub) }
+        : {}),
     };
   } catch (error) {
     if (error instanceof InvalidTokenError) {

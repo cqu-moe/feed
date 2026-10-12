@@ -11,6 +11,7 @@ import {
   useLoaderData,
   useNavigate,
   useRouteError,
+  useRouteLoaderData,
 } from 'react-router';
 import {
   AppShell,
@@ -23,10 +24,10 @@ import {
   Toaster,
   toast,
 } from '@cqu-moe/ui';
-import { House, RefreshCw } from 'lucide-react';
+import { House, RefreshCw, UserRound } from 'lucide-react';
 import { parseSession, requestJson, type Session } from './api';
 import { AccessDeniedState, LoginRequiredState, LogoutButton, safeNext } from './components';
-import { AccessPage, ArticleDetailPage, ArticlesPage, LoginPage, SourcesPage } from './pages';
+import { AccessPage, AccountPage, ArticleDetailPage, ArticlesPage, LoginPage, SourcesPage } from './pages';
 import '@cqu-moe/theme/styles.css';
 import '@cqu-moe/ui/styles.css';
 import './styles.css';
@@ -35,7 +36,14 @@ const PdfReader = lazy(() => import('./pdf-reader'));
 
 type RootLoader = { session: Session };
 
-async function loadSession(): Promise<RootLoader> {
+async function loadAuthenticatedSession(): Promise<RootLoader> {
+  const result = await requestJson('/api/session', parseSession);
+  if (!result.ok) throw new Response(null, { status: result.status });
+  if (!result.data.authenticated) throw redirect('/login');
+  return { session: result.data };
+}
+
+async function loadProtectedSession(): Promise<RootLoader> {
   const result = await requestJson('/api/session', parseSession);
   if (!result.ok) throw new Response(null, { status: result.status });
   if (!result.data.authenticated) throw redirect('/login');
@@ -50,7 +58,7 @@ async function loadLogin() {
   const result = await requestJson('/api/session', parseSession);
   if (!result.ok) return null;
   if (!result.data.authenticated) return null;
-  if (!result.data.entitled) throw redirect('/access');
+  if (!result.data.entitled) throw redirect('/account');
   throw redirect('/');
 }
 
@@ -99,6 +107,10 @@ function Layout() {
           <NavLink to="/sources">
             <RefreshCw aria-hidden="true" />
             采集状态
+          </NavLink>
+          <NavLink to="/account">
+            <UserRound aria-hidden="true" />
+            账户
           </NavLink>
         </>
       }
@@ -161,7 +173,7 @@ function NotFound() {
 const router = createBrowserRouter([
   {
     path: '/reader/:id/:filename',
-    loader: loadSession,
+    loader: loadProtectedSession,
     element: <Suspense fallback={<p role="status">正在加载 PDF 阅读器…</p>}><PdfReader /></Suspense>,
     errorElement: <RouteError />,
   },
@@ -179,13 +191,15 @@ const router = createBrowserRouter([
   },
   {
     path: '/',
-    loader: loadSession,
+    id: 'feed-root',
+    loader: loadAuthenticatedSession,
     element: <Layout />,
     errorElement: <RouteError />,
     children: [
       { index: true, element: <ArticlesPage /> },
       { path: 'articles/:id', element: <ArticleDetailPage /> },
       { path: 'sources', element: <SourcesPage /> },
+      { path: 'account', element: <AccountPage /> },
       { path: '*', element: <NotFound /> },
     ],
   },

@@ -47,7 +47,7 @@ export default {
       }
       const auth=await authRoute(request,env);if(auth)return auth;
       if(url.pathname.startsWith('/api/')){
-        const state=await session(request,env);
+        const state=await session(request,env,{includeAccount:url.pathname==='/api/session'});
         if(state.error==='unavailable')return json({error:'认证服务暂时不可用，请稍后重试'},503);
         if(url.pathname==='/api/session')return json(state);
         if(!state.authenticated)return json({error:'请先登录'},401);

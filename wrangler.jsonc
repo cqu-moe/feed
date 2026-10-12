@@ -26,7 +26,10 @@
   "d1_databases":[{"binding":"DB","database_name":"cqu-feed-mvp","database_id":"ba632f5c-c3b4-4f3c-ad57-1ac89895b02a","migrations_dir":"migrations"}],
   "r2_buckets":[{"binding":"ARCHIVE","bucket_name":"cqu-feed-archive"}],
   "ai":{"binding":"AI"},
-  "services":[{"binding":"AUTH","service":"cqu-moe-auth"}],
+  "services":[
+    {"binding":"AUTH","service":"cqu-moe-auth"},
+    {"binding":"AUTH_FEED_RPC","service":"cqu-moe-auth","entrypoint":"AuthService"}
+  ],
   "limits":{"cpu_ms":30000},
   "observability":{"enabled":true,"head_sampling_rate":0.1,"logs":{"enabled":true,"invocation_logs":false},"traces":{"enabled":true,"head_sampling_rate":0.1}}
 }
