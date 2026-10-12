@@ -155,7 +155,8 @@ async function fixture({versioned=false,notifications=false,discoveryPages=2,env
           const env={...rawEnv,DB:{prepare:sql=>wrap(database.prepare(sql),sql),async batch(statements){
             const entries=statements.map(statement=>statementInfo.get(statement));
             const association=entries.find(entry=>entry.sql.includes('INSERT INTO article_sources'));
-            const kind=entries.some(entry=>entry.sql.includes("backfill_state='running',backfill_window_days"))?'start':entries.some(entry=>entry.sql.includes('INSERT INTO content_events'))?'ready':association?'association':null;
+            const match=entries.some(entry=>entry.sql.includes('INSERT INTO notification_matches'));
+            const kind=entries.some(entry=>entry.sql.includes("backfill_state='running',backfill_window_days"))?'start':entries.some(entry=>entry.sql.includes('INSERT INTO content_events'))?'ready':match?'match':association?'association':null;
             if(kind)await rawEnv.TEST_COMMIT_GATE.fetch('https://gate.test/?kind='+kind+'&sourceId='+(association?.args[1]??''));
             if(globalThis.SOURCES_FAIL_BEFORE_BATCH){globalThis.SOURCES_FAIL_BEFORE_BATCH=false;throw new Error('Injected D1 unavailable before commit');}
             const result=await database.batch(entries.map(entry=>entry.statement));
@@ -244,7 +245,7 @@ async function fixture({versioned=false,notifications=false,discoveryPages=2,env
   });
   const provider=oauthProvider();
   const gate={url:null,held:false,release:null};
-  const commits={ready:{},association:{},start:{}};
+  const commits={ready:{},association:{},start:{},match:{}};
   const policyScript=`
     import {WorkerEntrypoint} from 'cloudflare:workers';
     export class AuthService extends WorkerEntrypoint{
@@ -850,7 +851,7 @@ test('discovery admission retention removes only old terminal or superseded perm
 });
 
 test('a later column association fans out an already ready shared event',async()=>{
-  const {mf,provider}=await fixture({versioned:true,notifications:true});
+  const {mf,provider,commitGate}=await fixture({versioned:true,notifications:true});
   try{
     const site=await request(mf,'/internal/sites',{method:'POST',body:{name:'晚到关联站点',origin:'https://a.test'}});
     const first=await createVerifiedSource(mf,site.data.site.id,'https://a.test/list-a.htm');
@@ -883,17 +884,28 @@ test('a later column association fans out an already ready shared event',async()
         datePrecision:'minute',publishedAt:new Date(Date.now()+60_000).toISOString(),evidence:{method:'source-page'}},
     });
     assert.equal(verified.status,202,JSON.stringify(verified));
-    const drained=await(await mf.dispatchFetch('https://feed.test/fixture/drain-matches')).json();
-    assert.equal(drained.pendingPages,0,JSON.stringify(drained));
+    commitGate('match',{arm:true});
+    const dispatched=await control(mf,'dispatch',{});
+    assert.ok(dispatched.length>0);
+    await waitFor(async()=>assert.equal(commitGate('match').held,true));
 
-    const detail=await userRequest(mf,cookie,`/api/subscriptions/${created.data.subscription.id}`);
-    assert.equal(detail.status,200,JSON.stringify(detail));
-    assert.deepEqual(detail.data.subscription.notificationMatches.map(match=>[match.eventId,match.status]),
-      [[eventId,'pending_immediate']]);
+    const inFlight=await userRequest(mf,cookie,`/api/subscriptions/${created.data.subscription.id}`);
+    assert.equal(inFlight.status,200,JSON.stringify(inFlight));
+    commitGate('match',{release:true});
+    let detail;
+    await waitFor(async()=>{
+      detail=await userRequest(mf,cookie,`/api/subscriptions/${created.data.subscription.id}`);
+      assert.equal(detail.status,200,JSON.stringify(detail));
+      assert.deepEqual(detail.data.subscription.notificationMatches.map(match=>[match.eventId,match.status]),
+        [[eventId,'pending_immediate']]);
+    });
     const after=(await request(mf,`/internal/notification-events/${eventId}`)).data;
     assert.equal(after.sources.find(source=>source.sourceId===second).datePrecision,'minute');
     assert.equal(after.delivery.kind,'immediate');
-  }finally{await mf.dispose();}
+  }finally{
+    commitGate('match',{release:true});
+    await mf.dispose();
+  }
 });
 
 test('concurrent readiness and discovery retain the new column in either commit order',async()=>{
