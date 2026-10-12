@@ -395,7 +395,7 @@ node scripts/compare-ocr.mjs publish mistral-ocr-4-1
 
 样本验证通过 `POST /internal/sources/:id/verify` 提交 `{requestId}`，立即返回 HTTP 202 和持久任务 ID。相同配置版本与 requestId 的重试复用原任务；服务端检查列表、最多一页分页、正文、附件文件签名与原貌快照。无分页的列表明确记录 `paginationMode=absent`。旧配置的验证结果不能批准新配置；验证成功后仍须管理员单独启用。页面会轮询状态，离开页面不取消任务。
 
-每五分钟扫描到期栏目，将配置快照与启动 outbox 同批持久化。一个 DiscoveryWorkflow 处理一页，并在同一事务中记录来源关联、单篇采集任务、下一页任务与执行回执。每轮默认最多两页（`MAX_DISCOVERY_PAGES_PER_RUN` 可配置 1–10），完整历史补抓由 T14 独立负责。数据库响应丢失时从回执及 outbox 恢复，已提交页面不重新收费抓取。不同栏目遇到同 canonical URL 时共享通知身份及首次采集任务，但保留各自发现证据；不同 URL 不按标题合并。
+每五分钟扫描到期栏目，将配置快照与启动 outbox 同批持久化。一个 DiscoveryWorkflow 处理一页，先将列表原始报告与解析结果保存为任务独占的 R2 日志，再在同一事务中记录来源关联、单篇采集任务、下一页任务与执行回执。每轮默认最多两页（`MAX_DISCOVERY_PAGES_PER_RUN` 可配置 1–10），完整历史补抓由 T14 独立负责。数据库提交前失败会持久延期并复用 R2 日志；提交响应丢失时从回执及 outbox 恢复，已保存页面不重新调用抓取，首次发现时间仍使用原列表结果时间。不同栏目遇到同 canonical URL 时共享通知身份及首次采集任务，但保留各自发现证据；不同 URL 不按标题合并。
 
 `GET /internal/sources/:id/discoveries` 返回该栏目最近 100 条发现证据：首次/最近发现、live/backfill/migrated 分类、日期精度、原站日历日期、准确时间与时区。日级日期不补成零点，未知日期不补成当前日期；明确分钟时间按来源时区转换，夏令时歧义降为日级证据。后续推送仍要经过日期资格与版本完整性检查。
 

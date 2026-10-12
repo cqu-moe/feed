@@ -28,7 +28,7 @@ function listPage(input) {
   return {articles,next:[...new Set(next)],title:document.title};
 }
 
-export async function discoverList(env,source,url,{scrape:scrapeDependency=scrape,baselineCutoffAt}={}){
+export async function discoverList(env,source,url,{scrape:scrapeDependency=scrape,baselineCutoffAt,now=()=>Date.now()}={}){
   const target=canonicalUrl(url),origin=new URL(source.url).origin;
   if(target.origin!==origin)throw new Error('Unexpected list origin');
   const pattern=source.config?.articlePattern??source.articlePattern;
@@ -56,7 +56,7 @@ export async function discoverList(env,source,url,{scrape:scrapeDependency=scrap
     next:[...new Set((page.next??[]).map(value=>{
       const nextUrl=canonicalUrl(value);return nextUrl.origin===origin?nextUrl.href:null;
     }).filter(Boolean))],
-    baselineCutoff:baselineCutoffAt,
+    baselineCutoff:baselineCutoffAt,observedAt:Number(now()),rawPage:page,providerMetadata:data.metadata??{},
   };
 }
 

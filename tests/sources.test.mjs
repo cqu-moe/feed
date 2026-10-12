@@ -31,6 +31,8 @@ const firecrawlPlugin={
         globalThis.SOURCES_EXTRA_DATES=false;
         globalThis.SOURCES_FAULT_NEXT_LIST_COMMIT=false;
         globalThis.SOURCES_FAIL_BATCH=false;
+        globalThis.SOURCES_FAIL_BEFORE_BATCH=false;
+        globalThis.SOURCES_FAULT_BEFORE_COMMIT=false;
         const base64=value=>btoa(String.fromCharCode(...new TextEncoder().encode(value)));
         const list=(url,page)=>{
           const origin=new URL(url).origin;
@@ -64,6 +66,7 @@ const firecrawlPlugin={
           const path=new URL(url).pathname;
           const page=/\\/list(?:-[ab])?(?:-2)?\\.htm$/.test(path)?(path.includes('-2')?2:1):0;
           const value=page?list(url,page):body(url);
+          if(page&&globalThis.SOURCES_FAULT_BEFORE_COMMIT){globalThis.SOURCES_FAULT_BEFORE_COMMIT=false;globalThis.SOURCES_FAIL_BEFORE_BATCH=true;}
           if(page&&globalThis.SOURCES_FAULT_NEXT_LIST_COMMIT){
             globalThis.SOURCES_FAULT_NEXT_LIST_COMMIT=false;
             globalThis.SOURCES_FAIL_BATCH=true;
@@ -127,6 +130,7 @@ async function fixture(){
           const actualQueue=rawEnv.FEED_JOBS;
           const database=rawEnv.DB;
           const env={...rawEnv,DB:{prepare:sql=>database.prepare(sql),async batch(statements){
+            if(globalThis.SOURCES_FAIL_BEFORE_BATCH){globalThis.SOURCES_FAIL_BEFORE_BATCH=false;throw new Error('Injected D1 unavailable before commit');}
             const result=await database.batch(statements);
             if(globalThis.SOURCES_FAIL_BATCH){globalThis.SOURCES_FAIL_BATCH=false;throw new Error('Injected lost D1 commit response');}
             return result;
@@ -140,6 +144,13 @@ async function fixture(){
           async fetch(request,rawEnv){
             const env=prepareEnv(rawEnv),url=new URL(request.url);
             if(url.pathname==='/fixture/extra-dates'){globalThis.SOURCES_EXTRA_DATES=true;return Response.json({ok:true});}
+            if(url.pathname==='/fixture/recover'){
+              clockOffset=3600000;
+              return Response.json(await createTaskRuntime(env,{now:runtimeNow}).recover());
+            }
+            if(url.pathname==='/fixture/fault-before-commit'){
+              globalThis.SOURCES_FAULT_BEFORE_COMMIT=true;return Response.json({armed:true});
+            }
             if(url.pathname==='/fixture/fault-commit'){
               globalThis.SOURCES_FAULT_NEXT_LIST_COMMIT=true;
               return Response.json({armed:true});
@@ -341,6 +352,31 @@ test('a lost discovery commit response resumes the saved continuation without ch
     const scrapes=(await(await mf.dispatchFetch('https://feed.test/fixture/scrapes')).json()).calls;
     assert.equal(scrapes.filter(url=>url==='https://a.test/list.htm').length,2); // one validation + one discovery
     assert.equal(scrapes.filter(url=>url==='https://a.test/list-2.htm').length,2);
+    assert.equal((await(await read(`/api/articles?source=${id}`)).json()).total,1);
+  }finally{await mf.dispose();}
+});
+
+test('a saved list survives D1 failure before commit and retries without fetching that paid page again',async()=>{
+  const {mf,read}=await fixture();
+  try{
+    const site=await request(mf,'/internal/sites',{method:'POST',body:{name:'持久列表',origin:'https://a.test'}});
+    const id=await createVerifiedSource(mf,site.data.site.id,'https://a.test/list.htm');
+    await mf.dispatchFetch('https://feed.test/fixture/fault-before-commit',{method:'POST'});
+    const scheduled=await request(mf,'/internal/sources/schedule',{method:'POST'});
+    const taskId=scheduled.data.scheduled[0];
+    await waitFor(async()=>{
+      const task=(await request(mf,`/internal/capture-tasks/${taskId}`)).data.task;
+      assert.equal(task.state,'deferred',JSON.stringify(task));
+    });
+    assert.equal((await request(mf,`/internal/sources/${id}/discoveries`)).data.discoveries.length,0);
+    await mf.dispatchFetch('https://feed.test/fixture/recover',{method:'POST'});
+    await waitFor(async()=>{
+      const task=(await request(mf,`/internal/capture-tasks/${taskId}`)).data.task;
+      assert.equal(task.state,'succeeded',JSON.stringify(task));
+      assert.equal(task.attemptNo,2);
+    });
+    const scrapes=(await(await mf.dispatchFetch('https://feed.test/fixture/scrapes')).json()).calls;
+    assert.equal(scrapes.filter(url=>url==='https://a.test/list.htm').length,2); // sample check + original discovery, never retry scrape
     assert.equal((await(await read(`/api/articles?source=${id}`)).json()).total,1);
   }finally{await mf.dispose();}
 });

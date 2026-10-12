@@ -1,5 +1,5 @@
 import staticSources from './sources.json';
-import {discoverList} from './discovery.mjs';
+import {savedDiscoveryPage} from './discovery-journal.mjs';
 import {verifySource} from './source-validation.mjs';
 import {launchOutboxId,launchOutboxStatement} from './task-statements.mjs';
 import {articleId,cleanError,cutoffDate,sha} from './utils.mjs';
@@ -238,7 +238,7 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
       const page=boundedInteger(context.page,1,1,1000);
       const currentUrl=urls.shift();
       if(typeof currentUrl!=='string'||visited.has(currentUrl))throw validationError('Discovery cursor is invalid');
-      const result=await discoverList(env,source,currentUrl,{
+      const result=await savedDiscoveryPage(env,source,taskId,currentUrl,{
         scrape,now,baselineCutoffAt:source.baselineCutoffAt??cutoffDate(timestamp()),
       });
       visited.add(currentUrl);
@@ -257,11 +257,11 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
         statements.push(
           env.DB.prepare(`INSERT INTO articles(id,source_id,url,title,published_at,discovered_at,status)
             SELECT ?,?,?,?,?,?,'pending' WHERE ${activeTask.sql} ON CONFLICT(url) DO NOTHING`)
-            .bind(aid,source.id,row.url,row.title,row.precision==='unknown'?'unknown':row.publishedDay,new Date(at).toISOString(),...activeTask.args),
+            .bind(aid,source.id,row.url,row.title,row.precision==='unknown'?'unknown':row.publishedDay,new Date(result.observedAt).toISOString(),...activeTask.args),
           env.DB.prepare(`INSERT INTO article_sources(article_id,source_id,first_seen_at,last_seen_at,discovery_class,published_at,published_day,date_precision,source_timezone)
             SELECT ?,?,?,?,'live',?,?,?,? WHERE ${activeTask.sql}
             ON CONFLICT(article_id,source_id) DO UPDATE SET last_seen_at=excluded.last_seen_at`)
-            .bind(aid,source.id,at,at,
+            .bind(aid,source.id,result.observedAt,result.observedAt,
               row.precision==='minute'?row.publishedAt:null,row.precision==='unknown'?null:row.publishedDay,
               row.precision,source.timezone,...activeTask.args),
           env.DB.prepare(`INSERT INTO tasks(id,kind,business_key,source_id,article_id,payload_json,state,priority,due_at,attempt_no,created_at,updated_at)
@@ -296,7 +296,13 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
         .bind(JSON.stringify(outcome),taskId,attemptNo,...activeTask.args));
       statements.push(env.DB.prepare(`UPDATE sources SET last_run_at=?,error=NULL,updated_at=? WHERE id=? AND config_version=? AND ${activeTask.sql}`)
         .bind(new Date(at).toISOString(),at,source.id,source.configVersion,...activeTask.args));
-      const committed=await env.DB.batch(statements);
+      let committed;
+      try{committed=await env.DB.batch(statements);}
+      catch(error){
+        const receipt=await env.DB.prepare('SELECT result_json FROM task_attempts WHERE task_id=? AND attempt_no=?').bind(taskId,attemptNo).first();
+        if(receipt?.result_json)return JSON.parse(receipt.result_json);
+        return {deferred:true,error:cleanError(error),savedPage:true};
+      }
       if(!committed[checkpointIndex].results?.length)return {superseded:true};
       return outcome;
     },
