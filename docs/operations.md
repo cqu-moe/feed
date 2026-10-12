@@ -43,7 +43,7 @@ Workers secrets：
 
 | Secret | 用途 |
 | --- | --- |
-| `FIRECRAWL_API_KEY` | 可选；当前未配置，使用 Firecrawl keyless 入口，可能受 IP 限流 |
+| `FIRECRAWL_API_KEY` | 已确认生产 Worker 存在同名 Secret；未读取值，真实付费调用有效性待隔离验收。未配置时回退 keyless 入口 |
 | `BRIDGE_SECRET` | 给 Firecrawl 页面签发 5 分钟源站 origin 绑定 HMAC capability |
 | `MISTRAL_API_KEY` | 私有 R2 正文 PDF 的 Mistral OCR；与验证码 Workers AI 分开计费 |
 | `ADMIN_TOKEN` | `/internal/*` 管理 Bearer token |

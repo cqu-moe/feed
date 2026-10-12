@@ -55,10 +55,10 @@ URL 规范化仅删除已知追踪参数、统一可证明等价的形式，保�
 | 表 | 核心字段 | 约束与主要索引 |
 | --- | --- | --- |
 | `feed_accounts` | `auth_sub, mail_enabled, preference_revision` | PK `auth_sub`；不复制用户密码、主邮箱或长期权益事实 |
-| `subscriptions` | `id, owner_sub, name, requested_enabled, priority, email_mode, activated_at, deleted_at?, rss_token_hash, rss_token_generation, rss_revoked_at?` | `rss_token_hash` 唯一且非空；索引 `(owner_sub,deleted_at,priority,created_at,id)`；`email_mode=off/immediate/daily_digest` |
+| `subscriptions` | `id, owner_sub, name, requested_enabled, priority, email_mode, activated_at, deleted_at?, rss_token_hash, rss_token_ciphertext, rss_token_generation, rss_revoked_at?` | `rss_token_hash` 唯一且非空；索引 `(owner_sub,deleted_at,priority,created_at,id)`；`email_mode=off/immediate/daily_digest` |
 | `subscription_sources` | `id, subscription_id, source_id, effective_from, removed_at?` | 部分唯一索引 `(subscription_id,source_id) WHERE removed_at IS NULL`；索引 `(source_id,removed_at,subscription_id)` |
 
-RSS 凭证直接属于订阅：天然每订阅一个，不再增加 RSS 数量配额或聚合关系。生成至少 256 bit 随机 token，仅存 hash，创建/轮换时只返回一次明文 URL；用户以后需要取回链接时可以轮换。日志、追踪和 Referer 不记录 token。
+RSS 凭证直接属于订阅：天然每订阅一个，不再增加 RSS 数量配额或聚合关系。生成至少 256 bit 随机 token，保存 hash 用于 RSS 校验，并用 Worker secret 加密保存 token。登录后的订阅所有者可在设置中持续查看和复制当前链接；只有显式重置才改变凭证。密文绑定订阅 ID、所有者及凭证代次，使用独立用途标识，不能挪用会话密文。创建重试或刷新可返回同一有效链接，撤销后的链接不作为有效链接展示。日志、追踪和 Referer 不记录 token。
 
 栏目目标用加入区间而非覆盖式列表：删除后再加入同一栏目产生新行和新 `effective_from`。选择站点时一次性展开当前栏目并保存这些行；后续新栏目不匹配。RSS 可查看当前目标内的完整历史，不受邮件生效时间限制；邮件按对应目标的加入时间判断。
 
@@ -72,8 +72,8 @@ RSS 凭证直接属于订阅：天然每订阅一个，不再增加 RSS 数量�
 
 ```sql
 INSERT INTO subscriptions (id, owner_sub, name, requested_enabled, priority,
-  email_mode, activated_at, rss_token_hash, rss_token_generation, created_at)
-SELECT :id, :owner, :name, 1, 0, 'daily_digest', :now, :rss_hash, 1, :now
+  email_mode, activated_at, rss_token_hash, rss_token_ciphertext, rss_token_generation, created_at)
+SELECT :id, :owner, :name, 1, 0, 'daily_digest', :now, :rss_hash, :rss_ciphertext, 1, :now
 WHERE (SELECT COUNT(*) FROM subscriptions
        WHERE owner_sub = :owner AND deleted_at IS NULL) < :limit_value;
 
