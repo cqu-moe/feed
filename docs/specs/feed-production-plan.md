@@ -4,7 +4,7 @@
 
 ## 已发布的 GitHub Issues
 
-总规格与 18 个子 Issue 均保持 Open，并带 ready-for-agent 标签。2026-10-12 已逐项读回核对正文、124 条验收标准、18 个原生父子关系和 25 条原生阻塞关系；依赖图无环，覆盖规格全部 53 条用户故事。此记录证明规格和任务发布完成，不表示任务已实现。
+发布时，总规格与 18 个子 Issue 均为 Open，并带 ready-for-agent 标签。2026-10-12 已逐项读回核对正文、124 条验收标准、18 个原生父子关系和 25 条原生阻塞关系；依赖图无环，覆盖规格全部 53 条用户故事。此记录证明规格和任务发布完成，不表示任务已实现。
 
 | 计划编号 | GitHub Issue | 原生 Blocked by |
 | --- | --- | --- |
@@ -27,7 +27,7 @@
 | T17 | [#18 在隔离云环境演练正式版完整用户旅程](https://github.com/cqu-moe/feed/issues/18) | [#13](https://github.com/cqu-moe/feed/issues/13)、[#14](https://github.com/cqu-moe/feed/issues/14)、[#15](https://github.com/cqu-moe/feed/issues/15)、[#16](https://github.com/cqu-moe/feed/issues/16)、[#17](https://github.com/cqu-moe/feed/issues/17) |
 | T18 | [#19 灰度切换正式版并验证生产回滚](https://github.com/cqu-moe/feed/issues/19) | [#18](https://github.com/cqu-moe/feed/issues/18) |
 
-当前可启动：[T01 / #2](https://github.com/cqu-moe/feed/issues/2) 与 [T02 / #3](https://github.com/cqu-moe/feed/issues/3)。其他任务只在自己的 blocker 全部完成后启动。
+发布时首批可启动：[T01 / #2](https://github.com/cqu-moe/feed/issues/2) 与 [T02 / #3](https://github.com/cqu-moe/feed/issues/3)。其他任务只在自己的 blocker 全部完成后启动。当前实现与验收进度见[实现记录](../implementation-status.md)及 GitHub Issue 状态。
 
 ## 已确认的测试 Seam
 

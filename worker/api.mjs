@@ -1,19 +1,19 @@
 import {json} from './utils.mjs';
-import sources from './sources.json';
+import {createSources} from './sources.mjs';
 import {serveObject,serveSnapshot} from './storage.mjs';
 const columns=`a.id,a.title,a.source_id AS sourceId,s.name AS sourceName,a.url,a.published_at AS publishedAt,a.captured_at AS capturedAt,a.status,a.attachment_count AS attachmentCount,a.excerpt`;
 export async function apiRoute(request,env){
-  const url=new URL(request.url),path=url.pathname;
+  const url=new URL(request.url),path=url.pathname,configuredSources=createSources(env).all();
   if(!['GET','HEAD'].includes(request.method))return json({error:'Method not allowed'},405);
   if(path==='/api/sources'){
     const rows=await env.DB.prepare('SELECT s.*, (SELECT COUNT(*) FROM articles a WHERE a.source_id=s.id) AS articleCount FROM sources s').all();
-    return json({sources:sources.map(s=>{const row=rows.results.find(r=>r.id===s.id);return {id:s.id,name:s.name,url:s.url,lastRunAt:row?.last_run_at??null,articleCount:row?.articleCount??0,error:row?.error??null};})});
+    return json({sources:configuredSources.map(s=>{const row=rows.results.find(r=>r.id===s.id);return {id:s.id,name:s.name,url:s.url,lastRunAt:row?.last_run_at??null,articleCount:row?.articleCount??0,error:row?.error??null};})});
   }
   if(path==='/api/articles'){
     const q=(url.searchParams.get('q')??'').trim().slice(0,100),source=url.searchParams.get('source')??'';
     const page=Math.min(500,Math.max(1,parseInt(url.searchParams.get('page')??'1')||1)),pageSize=20;
     const where=[],bind=[];
-    if(source){if(!sources.some(s=>s.id===source))return json({error:'未知来源'},400);where.push('a.source_id=?');bind.push(source);}
+    if(source){if(!configuredSources.some(s=>s.id===source))return json({error:'未知来源'},400);where.push('a.source_id=?');bind.push(source);}
     let join='';
     if(q){
       if([...q].length>=3){join=' JOIN article_search f ON f.id=a.id';where.push('article_search MATCH ?');bind.push('"'+q.replace(/"/g,'""')+'"');}

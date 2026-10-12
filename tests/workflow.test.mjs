@@ -26,6 +26,7 @@ const workflowPlugin={
         const failures=${JSON.stringify(failures)};
         export const calls=[];
         globalThis.WORKFLOW_CALLS=calls;
+        export const createCollector=()=>collectArticle;
         export async function collectArticle(env,_source,article){
           calls.push(article.id);
           const kind=globalThis.WORKFLOW_ERROR;
