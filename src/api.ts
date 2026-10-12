@@ -3,10 +3,35 @@ export type SessionUser = {
   email?: string;
 };
 
+export type SubscriptionLimit =
+  | { kind: 'limited'; value: number }
+  | { kind: 'unlimited' }
+  | { kind: 'missing' };
+
+export type AccountEmail =
+  | { status: 'verified'; address: string }
+  | { status: 'unverified' }
+  | { status: 'blocked' };
+
+export type AvailableSessionAccount = {
+  status: 'available';
+  access: boolean;
+  subscriptionLimit: SubscriptionLimit;
+  email: AccountEmail;
+};
+
+export type UnavailableSessionAccount = {
+  status: 'auth_unavailable' | 'unavailable';
+  reason?: string;
+};
+
+export type SessionAccount = AvailableSessionAccount | UnavailableSessionAccount;
+
 export type Session = {
   authenticated: boolean;
   entitled: boolean;
   user?: SessionUser;
+  account?: SessionAccount;
 };
 
 export type Source = {
@@ -148,6 +173,54 @@ export function parseSession(value: unknown): Session {
     authenticated: value.authenticated,
     entitled: value.entitled,
     user: parseUser(value.user),
+    account: value.account === undefined ? undefined : parseAccount(value.account),
+  };
+}
+
+function parseSubscriptionLimit(value: unknown): SubscriptionLimit {
+  if (!isRecord(value)) throw new Error('会话接口结构不匹配。');
+  if (value.kind === 'unlimited' || value.kind === 'missing') return { kind: value.kind };
+  if (
+    value.kind === 'limited' &&
+    typeof value.value === 'number' &&
+    Number.isSafeInteger(value.value) &&
+    value.value >= 0
+  ) {
+    return { kind: 'limited', value: value.value };
+  }
+  throw new Error('会话接口结构不匹配。');
+}
+
+function parseAccountEmail(value: unknown): AccountEmail {
+  if (!isRecord(value)) throw new Error('会话接口结构不匹配。');
+  if (value.status === 'unverified' || value.status === 'blocked') return { status: value.status };
+  if (value.status === 'verified' && typeof value.address === 'string' && value.address) {
+    return { status: 'verified', address: value.address };
+  }
+  throw new Error('会话接口结构不匹配。');
+}
+
+function parseAccount(value: unknown): SessionAccount {
+  if (!isRecord(value)) throw new Error('会话接口结构不匹配。');
+  if (value.status === 'auth_unavailable' || value.status === 'unavailable') {
+    return {
+      status: value.status,
+      ...(typeof value.reason === 'string' ? { reason: value.reason } : {}),
+    };
+  }
+  if (
+    value.status !== 'available' ||
+    typeof value.access !== 'boolean' ||
+    !isRecord(value.subscriptionLimit) ||
+    !isRecord(value.email)
+  ) {
+    throw new Error('会话接口结构不匹配。');
+  }
+  return {
+    status: 'available',
+    access: value.access,
+    subscriptionLimit: parseSubscriptionLimit(value.subscriptionLimit),
+    email: parseAccountEmail(value.email),
   };
 }
 

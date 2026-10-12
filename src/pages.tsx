@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { Link, useParams, useSearchParams } from 'react-router';
+import { Link, useParams, useSearchParams, useRouteLoaderData } from 'react-router';
 import {
   Alert,
   AlertDescription,
@@ -24,6 +24,7 @@ import {
   ExternalLink,
   FileText,
   Search,
+  UserRound,
 } from 'lucide-react';
 import {
   parseArticleDetail,
@@ -32,6 +33,9 @@ import {
   requestJson,
   type ArticleDetailResponse,
   type ArticleList,
+  type Session,
+  type SessionAccount,
+  type AvailableSessionAccount,
   type Source,
 } from './api';
 import {
@@ -108,6 +112,88 @@ export function AccessPage() {
         <AccessDeniedState title="需要 feed.access 权益" />
       </main>
     </div>
+  );
+}
+
+function subscriptionLimitLabel(account: AvailableSessionAccount) {
+  const limit = account.subscriptionLimit;
+  if (limit.kind === 'unlimited') return '无限';
+  if (limit.kind === 'missing') return '未配置（按 0 个执行）';
+  return `${limit.value} 个`;
+}
+
+function accountStateLabel(account: SessionAccount) {
+  if (account.status !== 'available') {
+    if (account.status === 'auth_unavailable') return 'Auth 暂不可用';
+    if (account.reason === 'AUTH_DATA_INVALID') return '权益数据异常';
+    if (account.reason === 'SUBJECT_UNAVAILABLE') return '用户当前不可用';
+    if (account.reason === 'INVALID_CLIENT' || account.reason === 'CLIENT_NOT_ALLOWED') return '服务身份配置异常';
+    return '账户状态暂不可用';
+  }
+  return account.access ? '订阅能力可用' : '缺少访问权益';
+}
+
+function accountEmailLabel(account: AvailableSessionAccount) {
+  if (account.email.status === 'verified') return account.email.address;
+  if (account.email.status === 'unverified') return '未验证（暂不投递邮件）';
+  return '无访问权益（不显示邮箱）';
+}
+
+export function AccountPage() {
+  const { session } = useRouteLoaderData('feed-root') as { session: Session };
+  const account = session.account;
+  const availableAccount = account?.status === 'available' ? account : undefined;
+  const stateClass = availableAccount
+    ? availableAccount.access
+      ? 'is-ok'
+      : 'is-error'
+    : 'is-warning';
+
+  return (
+    <>
+      <PageHeader
+        title="账户与订阅"
+        description="这里显示 Auth 当前授予的 Feed 访问能力、订阅额度和邮件投递状态。"
+      />
+      <article className="feed-card feed-account-card">
+        <div className="feed-source-heading">
+          <div>
+            <h2>{session.user?.name ?? session.user?.email ?? '当前账号'}</h2>
+            <p className="feed-account-note">
+              订阅功能正式开放前，额度只代表 Auth 当前授权，不会自动创建订阅。
+            </p>
+          </div>
+          <span
+            className={`feed-source-state ${stateClass}`}
+          >
+            {account ? accountStateLabel(account) : '账户状态暂不可用'}
+          </span>
+        </div>
+        {availableAccount ? (
+          <dl className="feed-source-meta feed-account-meta">
+            <div>
+              <dt>通知存档访问</dt>
+              <dd>{availableAccount.access ? '已开通' : '未开通'}</dd>
+            </div>
+            <div>
+              <dt>订阅额度</dt>
+              <dd>{subscriptionLimitLabel(availableAccount)}</dd>
+            </div>
+            <div>
+              <dt>邮件投递</dt>
+              <dd>{accountEmailLabel(availableAccount)}</dd>
+            </div>
+          </dl>
+        ) : (
+          <Alert variant={account?.status === 'auth_unavailable' ? 'default' : 'destructive'}>
+            <AlertTitle>{account?.status === 'auth_unavailable' ? 'Auth 暂不可用' : '暂时无法确认账户状态'}</AlertTitle>
+            <AlertDescription>
+              当前配置和已采集内容会保留；请在服务恢复后重新打开此页面，不会把本次故障当作撤权。
+            </AlertDescription>
+          </Alert>
+        )}
+      </article>
+    </>
   );
 }
 

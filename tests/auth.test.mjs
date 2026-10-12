@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { build } from 'esbuild';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
+import { createFeedAuthClient, feedAccountStatus } from '../worker/feed-auth-client.mjs';
 
 const feedOrigin = 'https://feed.test';
 const authOrigin = 'https://auth.test';
@@ -28,7 +29,9 @@ before(async () => {
               return new Response('Not found', { status: 404 });
             }
 
-            const state = await session(request, env);
+            const state = await session(request, env, {
+              includeAccount: url.pathname === '/api/session',
+            });
             if (state.error === 'unavailable') {
               return Response.json({ error: state.error }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
             }
@@ -61,9 +64,19 @@ before(async () => {
     stdin: {
       contents: `
         import { exportJWK, generateKeyPair, SignJWT } from 'jose';
+        import { WorkerEntrypoint } from 'cloudflare:workers';
 
         const encoder = new TextEncoder();
-        const state = { feedAccess: true, outage: false, codeCounter: 0, tokenCounter: 0 };
+        const state = {
+          feedAccess: true,
+          feedLimit: { kind: 'limited', value: 10 },
+          feedEmailStatus: 'verified',
+          feedRpcOutage: false,
+          feedRpcResult: 'normal',
+          outage: false,
+          codeCounter: 0,
+          tokenCounter: 0,
+        };
         const codes = new Map();
         const tokens = new Map();
         let keyPairPromise;
@@ -97,6 +110,46 @@ before(async () => {
 
         function json(body, status = 200) {
           return Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
+        }
+
+        export class AuthService extends WorkerEntrypoint {
+          async getFeedPolicy(request) {
+            if (request.contractVersion !== 1 || request.clientId !== 'feed-rpc-client') {
+              return { ok: false, code: request.contractVersion === 1 ? 'INVALID_CLIENT' : 'UNSUPPORTED_VERSION', retryable: false, requestId: 'test' };
+            }
+            return {
+              ok: true,
+              contractVersion: 1,
+              checkedAt: Date.now(),
+              data: { access: state.feedAccess, subscriptionLimit: state.feedLimit },
+            };
+          }
+
+          async getFeedRecipient(request) {
+            if (state.feedRpcOutage) throw new Error('feed rpc unavailable');
+            if (state.feedRpcResult === 'malformed') {
+              return {
+                ok: true,
+                contractVersion: 1,
+                checkedAt: Date.now(),
+                data: { policy: { access: true } },
+              };
+            }
+            if (state.feedRpcResult === 'client_not_allowed') {
+              return { ok: false, code: 'CLIENT_NOT_ALLOWED', retryable: false, requestId: 'test-config' };
+            }
+            const policy = await this.getFeedPolicy(request);
+            if (!policy.ok) return policy;
+            return {
+              ...policy,
+              data: {
+                policy: policy.data,
+                recipient: state.feedEmailStatus === 'verified'
+                  ? { status: 'verified', email: 'verified@401.moe' }
+                  : { status: state.feedEmailStatus },
+              },
+            };
+          }
         }
 
         export default {
@@ -204,6 +257,7 @@ before(async () => {
     format: 'esm',
     platform: 'browser',
     target: 'es2022',
+      external: ['cloudflare:workers'],
   });
 
   miniflare = new Miniflare(convertV4MiniflareOptions({
@@ -220,9 +274,14 @@ before(async () => {
           FEED_AUTH_CLIENT_ID: clientId,
           FEED_AUTH_CLIENT_SECRET: clientSecret,
           FEED_SESSION_ENCRYPTION_KEY: encryptionKey,
+          FEED_AUTH_RPC_CLIENT_ID: 'feed-rpc-client',
+          FEED_AUTH_RPC_CLIENT_SECRET: 'feed-rpc-secret',
         },
         d1Databases: ['DB'],
-        serviceBindings: { AUTH: 'auth' },
+        serviceBindings: {
+          AUTH: 'auth',
+          AUTH_FEED_RPC: { name: 'auth', entrypoint: 'AuthService' },
+        },
       },
       {
         name: 'auth',
@@ -267,6 +326,21 @@ async function setProviderState(changes) {
   });
   assert.equal(response.status, 200);
   return response.json();
+}
+
+async function createFeedSession() {
+  const login = await miniflare.dispatchFetch(`${feedOrigin}/auth/login`, { redirect: 'manual' });
+  assert.equal(login.status, 303);
+  const loginCookie = cookie(login, '__Host-feed_login');
+  const authorize = new URL(login.headers.get('Location'));
+  const authorization = await authWorker.fetch(authorize.href, { redirect: 'manual' });
+  const callbackUrl = new URL(authorization.headers.get('Location'), feedOrigin);
+  const callback = await miniflare.dispatchFetch(callbackUrl.href, {
+    redirect: 'manual',
+    headers: { Cookie: `__Host-feed_login=${loginCookie}` },
+  });
+  assert.equal(callback.status, 303);
+  return cookie(callback, '__Host-feed_session');
 }
 
 test('OAuth BFF binds login transactions and enforces live entitlement', async () => {
@@ -371,4 +445,177 @@ test('OAuth BFF binds login transactions and enforces live entitlement', async (
     headers: { Cookie: `__Host-feed_session=${sessionCookie}` },
   });
   assert.equal(afterLogout.status, 401);
+});
+
+test('trusted session exposes Auth feed policy and verified email state', async () => {
+  await setProviderState({
+    feedAccess: true,
+    feedLimit: { kind: 'limited', value: 10 },
+    feedEmailStatus: 'verified',
+    feedRpcOutage: false,
+    feedRpcResult: 'normal',
+    outage: false,
+  });
+  const sessionCookie = await createFeedSession();
+  const response = await miniflare.dispatchFetch(`${feedOrigin}/api/session`, {
+    headers: { Cookie: `__Host-feed_session=${sessionCookie}` },
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    authenticated: true,
+    entitled: true,
+    user: { id: 'user-uu', name: 'UU', email: 'uu@401.moe' },
+    account: {
+      status: 'available',
+      access: true,
+      subscriptionLimit: { kind: 'limited', value: 10 },
+      email: { status: 'verified', address: 'verified@401.moe' },
+    },
+  });
+});
+
+test('session account state distinguishes quota, email, access, and RPC availability', async () => {
+  await setProviderState({
+    feedAccess: true,
+    feedEmailStatus: 'verified',
+    feedRpcOutage: false,
+    feedRpcResult: 'normal',
+    outage: false,
+  });
+  const sessionCookie = await createFeedSession();
+  const account = async () => {
+    const response = await miniflare.dispatchFetch(`${feedOrigin}/api/session`, {
+      headers: { Cookie: `__Host-feed_session=${sessionCookie}` },
+    });
+    assert.equal(response.status, 200);
+    return (await response.json()).account;
+  };
+
+  for (const [limit, expected] of [
+    [{ kind: 'missing' }, { kind: 'missing' }],
+    [{ kind: 'limited', value: 0 }, { kind: 'limited', value: 0 }],
+    [{ kind: 'unlimited' }, { kind: 'unlimited' }],
+  ]) {
+    await setProviderState({ feedLimit: limit });
+    assert.deepEqual(await account(), {
+      status: 'available',
+      access: true,
+      subscriptionLimit: expected,
+      email: { status: 'verified', address: 'verified@401.moe' },
+    });
+  }
+
+  await setProviderState({ feedEmailStatus: 'unverified' });
+  assert.deepEqual(await account(), {
+    status: 'available',
+    access: true,
+    subscriptionLimit: { kind: 'unlimited' },
+    email: { status: 'unverified' },
+  });
+
+  await setProviderState({ feedAccess: false });
+  assert.deepEqual(await account(), {
+    status: 'available',
+    access: false,
+    subscriptionLimit: { kind: 'unlimited' },
+    email: { status: 'blocked' },
+  });
+
+  await setProviderState({ feedAccess: true, feedRpcOutage: true });
+  assert.deepEqual(await account(), {
+    status: 'auth_unavailable',
+    reason: 'AUTH_UNAVAILABLE',
+  });
+
+  await setProviderState({ feedRpcOutage: false, feedRpcResult: 'malformed' });
+  assert.deepEqual(await account(), {
+    status: 'unavailable',
+    reason: 'AUTH_DATA_INVALID',
+  });
+
+  await setProviderState({ feedRpcResult: 'client_not_allowed' });
+  assert.deepEqual(await account(), {
+    status: 'unavailable',
+    reason: 'CLIENT_NOT_ALLOWED',
+  });
+});
+
+test('protected APIs stay lightweight and adapter configuration failures are explicit', async () => {
+  await setProviderState({
+    feedAccess: true,
+    feedLimit: { kind: 'limited', value: 1 },
+    feedEmailStatus: 'verified',
+    feedRpcOutage: true,
+    feedRpcResult: 'normal',
+    outage: false,
+  });
+  const sessionCookie = await createFeedSession();
+  const protectedResponse = await miniflare.dispatchFetch(`${feedOrigin}/api/files/article/attachment-1.pdf`, {
+    headers: { Cookie: `__Host-feed_session=${sessionCookie}` },
+  });
+  assert.equal(protectedResponse.status, 200);
+  assert.equal(await protectedResponse.text(), 'saved-pdf');
+
+  const sessionResponse = await miniflare.dispatchFetch(`${feedOrigin}/api/session`, {
+    headers: { Cookie: `__Host-feed_session=${sessionCookie}` },
+  });
+  assert.equal(sessionResponse.status, 200);
+  assert.deepEqual((await sessionResponse.json()).account, {
+    status: 'auth_unavailable',
+    reason: 'AUTH_UNAVAILABLE',
+  });
+
+  assert.deepEqual(await feedAccountStatus({}, 'user-uu'), {
+    status: 'unavailable',
+    reason: 'CLIENT_NOT_ALLOWED',
+  });
+  assert.deepEqual(await feedAccountStatus({
+    AUTH_FEED_RPC: {},
+    FEED_AUTH_RPC_CLIENT_ID: 'feed-rpc-client',
+  }, 'user-uu'), {
+    status: 'unavailable',
+    reason: 'CLIENT_NOT_ALLOWED',
+  });
+
+  assert.deepEqual(await feedAccountStatus({
+    AUTH_FEED_RPC: {
+      async getFeedRecipient() {
+        return null;
+      },
+    },
+    FEED_AUTH_RPC_CLIENT_ID: 'feed-rpc-client',
+    FEED_AUTH_RPC_CLIENT_SECRET: 'feed-rpc-secret',
+  }, 'user-uu'), {
+    status: 'unavailable',
+    reason: 'AUTH_DATA_INVALID',
+  });
+
+  const checkedAt = Date.now();
+  const normalizedClient = createFeedAuthClient({
+    AUTH_FEED_RPC: {
+      async getFeedRecipient() {
+        return {
+          ok: true,
+          contractVersion: 1,
+          checkedAt,
+          debug: 'upstream-only-field',
+          data: {
+            policy: { access: true, subscriptionLimit: { kind: 'limited', value: 1 } },
+            recipient: { status: 'verified', email: 'verified@401.moe' },
+          },
+        };
+      },
+    },
+    FEED_AUTH_RPC_CLIENT_ID: 'feed-rpc-client',
+    FEED_AUTH_RPC_CLIENT_SECRET: 'feed-rpc-secret',
+  });
+  assert.deepEqual(await normalizedClient.getRecipient('user-uu'), {
+    ok: true,
+    contractVersion: 1,
+    checkedAt,
+    data: {
+      policy: { access: true, subscriptionLimit: { kind: 'limited', value: 1 } },
+      recipient: { status: 'verified', email: 'verified@401.moe' },
+    },
+  });
 });
