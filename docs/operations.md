@@ -21,7 +21,7 @@
 
 | 变量 | 当前值 | 作用 |
 | --- | --- | --- |
-| `BASE_URL` | `https://cqu-feed.user-unauthorized.workers.dev` | OAuth 回调、桥接 URL 和安全 Origin 判断 |
+| `BASE_URL` | `https://feed.cqu.moe` | OAuth 回调、桥接 URL 和安全 Origin 判断 |
 | `AUTH_BASE_URL` | `https://auth.cqu.moe` | OAuth/JWKS/userinfo/introspection 基础地址 |
 | `MAX_FIRECRAWL_PER_DAY` | `120` | D1 全局硬额度，按自然日计数 |
 | `MAX_OCR_PER_DAY` | `100` | D1 全局硬额度，按自然日计数 |
@@ -133,8 +133,8 @@ pnpm build && pnpm deploy:ci
 部署后做只读检查：
 
 ```sh
-curl https://cqu-feed.user-unauthorized.workers.dev/health
-FEED_URL=https://cqu-feed.user-unauthorized.workers.dev \
+curl https://feed.cqu.moe/health
+FEED_URL=https://feed.cqu.moe \
 FEED_ADMIN_TOKEN='<redacted>' \
 node scripts/manage.mjs auth-check
 ```
@@ -234,15 +234,15 @@ CREATE VIRTUAL TABLE article_search USING fts5(
 现有脚本：
 
 ```sh
-FEED_URL=https://cqu-feed.user-unauthorized.workers.dev \
+FEED_URL=https://feed.cqu.moe \
 FEED_ADMIN_TOKEN='<redacted>' \
 node scripts/manage.mjs status
 
-FEED_URL=https://cqu-feed.user-unauthorized.workers.dev \
+FEED_URL=https://feed.cqu.moe \
 FEED_ADMIN_TOKEN='<redacted>' \
 node scripts/manage.mjs run
 
-FEED_URL=https://cqu-feed.user-unauthorized.workers.dev \
+FEED_URL=https://feed.cqu.moe \
 FEED_ADMIN_TOKEN='<redacted>' \
 node scripts/manage.mjs auth-check
 ```

@@ -25,7 +25,7 @@
 
 运行时 secrets 留在 Worker 的 Variables and secrets，不复制到 GitHub。Build variables 与 Worker 运行时变量分别管理；Node/pnpm 版本放在 Build variables。
 
-`wrangler.jsonc` 同步保留已有 `feed.cqu.moe` Custom Domain。当前线上 `BASE_URL` 与 OAuth 回调仍使用 workers.dev origin；接入 Git Connector 时沿用该配置。
+`wrangler.jsonc` 同步保留已有 `feed.cqu.moe` Custom Domain。`BASE_URL` 与 OAuth 回调使用 `https://feed.cqu.moe`；Auth client 必须允许 `https://feed.cqu.moe/auth/callback`。
 
 日常部署通过提交并 push 到 main 触发 Git Connector。`pnpm deploy` 保留为需要手动部署时的命令，也会先迁移；常规发布使用 Git Connector。
 

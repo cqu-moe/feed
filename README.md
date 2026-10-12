@@ -2,7 +2,7 @@
 
 重大通知存档是一个运行在 Cloudflare 上的重庆大学通知采集、私有备份、统一阅读和搜索服务。MVP 覆盖教务处、国际处、土木学院、学工部和新闻网 5 个栏目；访问统一走 auth.cqu.moe，并且账号必须拥有 `feed.access` 权益。
 
-已部署到 [Feed](https://cqu-feed.user-unauthorized.workers.dev/)。2026-10-11 首次补抓已归档 33 篇通知、63 个附件、33 份原貌 HTML 和截图；真实账号已完成登录与中文搜索验证。详细验收与限制见 [docs/acceptance.md](docs/acceptance.md)。
+已部署到 [Feed](https://feed.cqu.moe/)。2026-10-11 首次补抓已归档 33 篇通知、63 个附件、33 份原貌 HTML 和截图；真实账号已完成登录与中文搜索验证。详细验收与限制见 [docs/acceptance.md](docs/acceptance.md)。
 
 ## 功能
 
@@ -33,7 +33,7 @@ Cloudflare Cron
 
 ## 日常使用
 
-1. 打开 Feed 入口。当前 `wrangler.jsonc` 配置的 `BASE_URL` 是 `https://cqu-feed.user-unauthorized.workers.dev`。
+1. 打开 Feed 入口。当前 `wrangler.jsonc` 配置的 `BASE_URL` 是 `https://feed.cqu.moe`。
 2. 点击登录，跳转到 auth.cqu.moe。
 3. 使用拥有 `feed.access` 权益的账号完成授权。
 4. 在“通知”页搜索、筛选来源和翻页；URL 会保留 `q`、`source`、`page`。
