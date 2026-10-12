@@ -370,11 +370,11 @@ export function SubscriptionsPage() {
       />
       {state.kind === 'success' && (
         <Alert>
-          <AlertTitle>{state.data.outputChannels.rss.enabled ? 'RSS 已开放' : '输出通道尚未开放'}</AlertTitle>
+          <AlertTitle>{state.data.outputChannels.rss.enabled ? '订阅输出状态' : '输出通道尚未开放'}</AlertTitle>
           <AlertDescription>
             {state.data.outputChannels.rss.enabled
-              ? '私有 RSS 会输出标题、摘要和版本链接；正文与附件仍需登录。邮件投递尚未开放。'
-              : '订阅配置和私有 RSS 链接可以保存，RSS 内容和邮件投递将在开放后生效。'}
+              ? '私有 RSS 会输出标题、摘要和版本链接；正文与附件仍需登录。邮件按订阅设置发送，暂停与投递状态见通知记录。'
+              : '订阅配置和私有 RSS 链接可以保存，输出开放后生效。'}
           </AlertDescription>
         </Alert>
       )}

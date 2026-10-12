@@ -1,3 +1,4 @@
+import {createMail,handleMailMessage} from './notification-mail.mjs';
 import {cleanError,sha} from './utils.mjs';
 import {createSources} from './sources.mjs';
 import {reconcileRevision} from './archive-reconcile.mjs';
@@ -186,7 +187,8 @@ export async function handleFeedJobs(batch,env,dependencies={}){
   const runtime=createTaskRuntime(env,dependencies);
   for(const message of batch.messages){
     try{
-      if(['check-ready','event-ready','match-source','source-associated'].includes(message.body?.type))
+      if(message.body?.type==='send-mail')await handleMailMessage(message.body,env,dependencies);
+      else if(['check-ready','event-ready','match-source','source-associated'].includes(message.body?.type))
         await handleFeedEvent(env,message,dependencies);
       else await runtime.startJob(message.body);
       message.ack();
@@ -208,7 +210,11 @@ async function handleFeedEvent(env,message,dependencies={}){
     if(result.notFound)throw new SchemaError('Ready revision is missing');
     return result;
   }
-  if(payload.type==='match-source')return createNotifications(env,{now:dependencies.now}).processMatchTask(payload);
+  if(payload.type==='match-source'){
+    const result=await createNotifications(env,{now:dependencies.now}).processMatchTask(payload);
+    if(env.MAIL_ENABLED==='true')await createMail(env,dependencies).preparePending();
+    return result;
+  }
   if(payload.type==='source-associated')return createNotifications(env,{now:dependencies.now}).reconcileSourceAssociation(payload);
   const event=await env.DB.prepare('SELECT id,revision_id FROM content_events WHERE id=?').bind(payload.eventId).first();
   if(!event||event.revision_id!==payload.revisionId)throw new SchemaError('Content event is missing');
