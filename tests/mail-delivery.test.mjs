@@ -73,7 +73,9 @@ test('signed durable webhooks reconcile unknown submissions and out-of-order bou
     response=await f.mf.dispatchFetch('https://feed.test/webhooks/resend',requests.get('evt_delivered_1'));
     assert.equal(response.status,200,await response.text());
     await f.db.prepare('DROP TRIGGER fail_receipt_apply').run();
-    await f.mail('recover');
+    await f.mail('recoverDisabled');
+    const recoveredWhileDisabled=await adminRequest(f.mf,'/internal/mail',undefined,{method:'GET'});
+    assert.equal(recoveredWhileDisabled.body.messages[0].state,'delivered');
     response=await f.mf.dispatchFetch('https://feed.test/webhooks/resend',requests.get('evt_delivered_1'));
     assert.equal(response.status,200);
     response=await sendHook('email.sent','evt_accepted_older');assert.equal(response.status,200);

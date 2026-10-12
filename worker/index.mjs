@@ -28,7 +28,7 @@ export default {
     if(controller.cron==='*/5 * * * *'&&env.TASK_RUNTIME_ENABLED==='true'){
       jobs.push(sources.scheduleDue(),createTaskRuntime(env).recover());
     }
-    if(controller.cron==='*/5 * * * *'&&env.MAIL_ENABLED==='true'){
+    if(controller.cron==='*/5 * * * *'&&(env.MAIL_ENABLED==='true'||env.RESEND_WEBHOOK_SECRET)){
       jobs.push(createMail(env).recover().then(()=>createTaskRuntime(env).dispatchDueOutbox()));
     }
     ctx.waitUntil(Promise.all(jobs));

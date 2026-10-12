@@ -27,6 +27,7 @@ export async function subscriptionsFixture({ editingMigration = true, clock, not
           const {method,args=[],at}=await request.json();
           if(at!==undefined)mailClock=at;
           if(method==='clock')return Response.json({at:mailClock});
+          if(method==='recoverDisabled')return Response.json(await createMail({...env,MAIL_ENABLED:'false'},{now:()=>mailClock}).recover());
           if(method==='replay'){
             const rows=await env.DB.prepare("SELECT payload_json FROM outbox WHERE topic='feed-mail' AND (state='queued' OR ?=1) ORDER BY created_at,id").bind(args[0]?.duplicate?1:0).all();
             let acked=0,retried=0;

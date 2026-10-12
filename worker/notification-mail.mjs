@@ -213,12 +213,12 @@ export function createMail(env,{now=()=>Date.now(),provider=createResendProvider
   }
 
   async function recover(){
-    if(!enabled())return {disabled:true};
     const receipts=await env.DB.prepare(`SELECT id FROM mail_webhook_receipts WHERE state='pending' AND next_attempt_at<=? AND attempts<6
       ORDER BY received_at,id LIMIT ?`).bind(now(),limit).all();
     for(const receipt of receipts.results){
       try{await applyReceipt(receipt.id);}catch{await deferReceipt(receipt.id);}
     }
+    if(!enabled())return {disabled:true,receipts:receipts.results.length};
     const prepared=await preparePending();
     const rows=await env.DB.prepare(`SELECT id,attempts FROM mail_messages WHERE state IN ('prepared','deferred','submitting','submission_unknown')
       AND next_attempt_at<=? AND (lease_until IS NULL OR lease_until<=?)
