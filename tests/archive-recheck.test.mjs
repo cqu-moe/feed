@@ -1,15 +1,81 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import {build} from 'esbuild';
 
 import {
   adminRequest,
   feedJobsInvoke,
   subscriptionsFixture,
   subscriptionsInvoke,
+  staticSiteId,
 } from './helpers/subscriptions-fixture.mjs';
 import { seedReadyEvent } from './helpers/notification-event.mjs';
 
 const start = Date.parse('2026-10-12T08:00:00.000Z');
+
+async function seedDue(f,id,additionalSourceIds=[]){
+  const at=Date.now()-86400_000;
+  await seedReadyEvent(f.mf,{id,sourceId:'jwc',additionalSourceIds,firstSeenAt:at,observedAt:at,readyAt:at,publishedAt:new Date(at).toISOString(),datePrecision:'minute'});
+  await f.db.prepare('UPDATE articles SET latest_ready_revision_id=?,latest_observed_revision_id=? WHERE id=?').bind(id,id,id).run();
+}
+async function recheckFacts(db){
+  return db.prepare(`SELECT (SELECT COUNT(*) FROM tasks WHERE kind='recheck') tasks,
+    (SELECT COUNT(*) FROM outbox WHERE topic='feed-jobs') outboxes,
+    (SELECT COUNT(*) FROM articles WHERE next_recheck_at>0) advanced`).first();
+}
+
+test('global crawl pause blocks new archive rechecks through the actual Cron entrypoint',async()=>{
+  const f=await subscriptionsFixture({recheckMigration:true,recheckVars:{CRAWL_ENABLED:'false'}});
+  try{
+    await seedDue(f,'101010101010101010101010');
+    assert.equal((await f.mf.dispatchFetch('https://feed.test/__test/scheduled')).status,200);
+    assert.deepEqual(await recheckFacts(f.db),{tasks:0,outboxes:0,advanced:0});
+  }finally{await f.mf.dispose();}
+});
+
+test('a pause or configuration change before atomic admission creates no recheck and does not advance its due date',async()=>{
+  const bundle=await build({entryPoints:['worker/archive-recheck.mjs'],bundle:true,write:false,format:'esm',platform:'node'});
+  const {createArchiveRecheck}=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text+'\n//# sourceURL=recheck-admission-test.mjs').toString('base64'));
+  for(const change of ['pause','reconfigure']){
+    const f=await subscriptionsFixture({recheckMigration:true});
+    try{
+      await seedDue(f,'202020202020202020202020');
+      let changed=false;
+      const db={prepare:sql=>f.db.prepare(sql),async batch(statements){
+        if(!changed){
+          changed=true;
+          assert.equal((await adminRequest(f.mf,'/internal/sources/jwc',{enabled:false},{method:'PATCH'})).status,200);
+          if(change==='reconfigure'){
+            const edited=await adminRequest(f.mf,'/internal/sources/jwc',{name:'changed configuration',refreshIntervalSec:3600},{method:'PATCH'});
+            assert.equal(edited.status,200,JSON.stringify(edited.body));
+            // Fault seam: sample revalidation finishes before the earlier admission commits.
+            await f.db.prepare("UPDATE sources SET validation_state='verified',enabled=1 WHERE id='jwc'").run();
+          }
+        }
+        return f.db.batch(statements);
+      }};
+      const result=await createArchiveRecheck({DB:db,SOURCE_MANAGEMENT_ENABLED:'true',CRAWL_ENABLED:'true',TASK_RUNTIME_ENABLED:'true',ARCHIVE_VERSIONS_ENABLED:'true'}).scheduleDue();
+      assert.deepEqual(result.scheduled,[]);
+      assert.deepEqual(await recheckFacts(f.db),{tasks:0,outboxes:0,advanced:0});
+    }finally{await f.mf.dispose();}
+  }
+});
+
+test('a shared archive uses another eligible associated source when its original source is paused',async()=>{
+  const f=await subscriptionsFixture({recheckMigration:true});
+  try{
+    await f.db.prepare(`INSERT INTO sources(id,name,url,site_id,list_url,config_json,enabled,validation_state)
+      VALUES ('secondary','secondary','https://jwc.cqu.edu.cn/',?,'https://jwc.cqu.edu.cn/second.htm',?,1,'verified')`)
+      .bind(staticSiteId,JSON.stringify({articlePattern:'^/info/\\d+/\\d+\\.htm$'})).run();
+    await seedDue(f,'303030303030303030303030',['secondary']);
+    assert.equal((await adminRequest(f.mf,'/internal/sources/jwc',{enabled:false},{method:'PATCH'})).status,200);
+    const scheduled=await adminRequest(f.mf,'/internal/rechecks',{limit:1});
+    assert.equal(scheduled.body.scheduled.length,1);
+    assert.equal((await f.db.prepare("SELECT source_id FROM tasks WHERE kind='recheck'").first()).source_id,'secondary');
+    assert.deepEqual(await recheckFacts(f.db),{tasks:1,outboxes:1,advanced:1});
+    assert.deepEqual((await adminRequest(f.mf,'/internal/rechecks',{limit:1})).body.scheduled,[]);
+  }finally{await f.mf.dispose();}
+});
 
 test('bounded recheck admission schedules ready articles by configured age tiers and deduplicates replay', async () => {
   const { mf, db } = await subscriptionsFixture({
@@ -23,7 +89,7 @@ test('bounded recheck admission schedules ready articles by configured age tiers
   try {
     const now = Date.now();
     const recent = await seedReadyEvent(mf, {
-      id: 'aaaaaaaaaaaaaaaaaaaaaaaa',
+      id: '111111111111111111111111',
       sourceId: 'jwc',
       firstSeenAt: now - 3_600_000,
       observedAt: now - 3_600_000,
@@ -33,7 +99,7 @@ test('bounded recheck admission schedules ready articles by configured age tiers
       title: '近期归档通知',
     });
     const old = await seedReadyEvent(mf, {
-      id: 'bbbbbbbbbbbbbbbbbbbbbbbb',
+      id: '222222222222222222222222',
       sourceId: 'jwc',
       firstSeenAt: now - 40 * 86_400_000,
       observedAt: now - 3_600_000,

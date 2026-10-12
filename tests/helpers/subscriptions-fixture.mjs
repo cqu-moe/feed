@@ -115,6 +115,12 @@ export async function subscriptionsFixture({ editingMigration = true, clock, not
           const {revisionId}=await request.json();
           return Response.json(await reconcileRevision(env,revisionId));
         }
+        if(new URL(request.url).pathname==='/__test/scheduled'){
+          const pending=[];
+          await worker.scheduled({cron:'*/5 * * * *'},env,{waitUntil(promise){pending.push(promise);}});
+          await Promise.all(pending);
+          return Response.json({completed:true});
+        }
         if(new URL(request.url).pathname==='/__test/recheck-source'){
           if(request.method==='POST'){
             const body=await request.json();

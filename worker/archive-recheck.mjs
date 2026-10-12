@@ -2,7 +2,9 @@ import {sha} from './utils.mjs';
 import {createSources} from './sources.mjs';
 import {launchOutboxId,launchOutboxStatement} from './task-statements.mjs';
 
-const idPattern=/^[a-f0-9]{24}$/;
+const eligibleSource=`s.enabled=1 AND st.enabled=1 AND s.validation_state='verified'
+  AND (s.id=a.source_id OR EXISTS(SELECT 1 FROM article_sources als WHERE als.article_id=a.id AND als.source_id=s.id))
+  AND substr(a.url,1,length(st.origin)+1)=st.origin||'/'`;
 
 export function createArchiveRecheck(env,{now=()=>Date.now()}={}){
   const timestamp=()=>{
@@ -15,21 +17,35 @@ export function createArchiveRecheck(env,{now=()=>Date.now()}={}){
 
   return {
     async scheduleDue({limit=20}={}){
+      if(env.CRAWL_ENABLED!=='true'||env.TASK_RUNTIME_ENABLED!=='true'||env.ARCHIVE_VERSIONS_ENABLED!=='true')
+        return {scheduled:[],duplicate:false};
       const at=timestamp(),pageSize=boundedInteger(limit,20,1,100);
       const managed=env.SOURCE_MANAGEMENT_ENABLED==='true';
-      const rows=await env.DB.prepare(`SELECT a.id,a.source_id,a.next_recheck_at AS due_at,r.observed_at,r.published_at
+      const rows=await env.DB.prepare(`SELECT a.id,a.url,a.source_id,a.next_recheck_at AS due_at,r.observed_at,r.published_at
         FROM articles a
         JOIN article_revisions r ON r.id=a.latest_ready_revision_id AND r.article_id=a.id
-        ${managed?'JOIN sources s ON s.id=a.source_id JOIN sites st ON st.id=s.site_id':''}
         WHERE a.latest_ready_revision_id IS NOT NULL AND a.next_recheck_at<=?
-          ${managed?' AND s.enabled=1 AND st.enabled=1 AND s.validation_state=\'verified\'':''}
+          ${managed?`AND EXISTS(SELECT 1 FROM sources s JOIN sites st ON st.id=s.site_id WHERE ${eligibleSource})`:''}
         ORDER BY a.next_recheck_at,a.id LIMIT ?`).bind(at,pageSize).all();
       if(!rows.results.length)return {scheduled:[],duplicate:false};
 
       const statements=[];
       for(const row of rows.results){
-        const source=await createSources(env).find(row.source_id);
-        if(!source)throw new Error(`Recheck source ${row.source_id} is unavailable`);
+        const candidates=managed?(await env.DB.prepare(`SELECT s.id FROM articles a JOIN sources s
+          JOIN sites st ON st.id=s.site_id WHERE a.id=? AND ${eligibleSource}
+          ORDER BY s.id=a.source_id DESC,s.id`).bind(row.id).all()).results:[{id:row.source_id}];
+        let source=null;
+        for(const candidate of candidates){
+          const current=await createSources(env).find(candidate.id);
+          if(!current||(managed&&(!current.enabled||!current.siteEnabled||current.validationState!=='verified')))continue;
+          const url=new URL(row.url);
+          if(url.origin!==new URL(current.url).origin||!new RegExp(current.config?.articlePattern??current.articlePattern).test(url.pathname))continue;
+          source=current;break;
+        }
+        if(!source)continue;
+        const gate=managed?`AND EXISTS(SELECT 1 FROM sources s JOIN sites st ON st.id=s.site_id
+          WHERE s.id=? AND s.config_version=? AND ${eligibleSource})`:'';
+        const gateArgs=managed?[source.id,source.configVersion]:[];
         const age=articleAgeMs(row,at);
         const interval=age<=recentAfterMs?recentIntervalMs:oldIntervalMs;
         const nextDue=at+interval,businessKey=`recheck:${row.id}:${row.due_at}`;
@@ -38,15 +54,17 @@ export function createArchiveRecheck(env,{now=()=>Date.now()}={}){
         statements.push(
           env.DB.prepare(`INSERT INTO tasks(id,kind,business_key,source_id,article_id,payload_json,state,priority,due_at,attempt_no,created_at,updated_at)
             SELECT ?,'recheck',?,?,?,?,'queued',70,?,1,?,?
-            FROM articles WHERE id=? AND latest_ready_revision_id IS NOT NULL AND next_recheck_at=?
+            FROM articles a WHERE id=? AND url=? AND latest_ready_revision_id IS NOT NULL AND next_recheck_at=? ${gate}
             ON CONFLICT(business_key) DO NOTHING RETURNING id`)
-            .bind(taskId,businessKey,row.source_id,row.id,JSON.stringify(payload),at,at,at,row.id,row.due_at),
+            .bind(taskId,businessKey,source.id,row.id,JSON.stringify(payload),at,at,at,row.id,row.url,row.due_at,...gateArgs),
           launchOutboxStatement(env,{id:await launchOutboxId(taskId,1),taskId,attempt:1,timestamp:at,
             guardSql:'kind=?',guardArgs:['recheck']}),
-          env.DB.prepare(`UPDATE articles SET next_recheck_at=? WHERE id=? AND latest_ready_revision_id IS NOT NULL AND next_recheck_at=?`)
-            .bind(nextDue,row.id,row.due_at),
+          env.DB.prepare(`UPDATE articles AS a SET next_recheck_at=? WHERE id=? AND url=? AND latest_ready_revision_id IS NOT NULL AND next_recheck_at=?
+            ${gate} AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=? AND t.kind='recheck' AND t.article_id=a.id AND t.source_id=?)`)
+            .bind(nextDue,row.id,row.url,row.due_at,...gateArgs,taskId,source.id),
         );
       }
+      if(!statements.length)return {scheduled:[],duplicate:false};
       const committed=await env.DB.batch(statements);
       const scheduled=[];
       for(let index=0;index<committed.length;index+=3){
