@@ -33,6 +33,20 @@ test('global crawl pause blocks new archive rechecks through the actual Cron ent
   }finally{await f.mf.dispose();}
 });
 
+test('incompatible old archives cannot keep later eligible archives outside every bounded recheck page',async()=>{
+  const f=await subscriptionsFixture({recheckMigration:true});
+  try{
+    for(let i=0;i<20;i++){
+      const id=String(i).padStart(24,'0');await seedDue(f,id);
+      await f.db.prepare('UPDATE articles SET url=? WHERE id=?').bind(`https://jwc.cqu.edu.cn/old/${id}.htm`,id).run();
+    }
+    const eligible='999999999999999999999999';await seedDue(f,eligible);
+    for(let i=0;i<3;i++)assert.equal((await adminRequest(f.mf,'/internal/rechecks',{})).status,202);
+    assert.deepEqual((await f.db.prepare("SELECT article_id FROM tasks WHERE kind='recheck'").all()).results,[{article_id:eligible}]);
+    assert.equal((await f.db.prepare("SELECT COUNT(*) AS n FROM articles WHERE next_recheck_at=0").first()).n,20);
+  }finally{await f.mf.dispose();}
+});
+
 test('a pause or configuration change before atomic admission creates no recheck and does not advance its due date',async()=>{
   const bundle=await build({entryPoints:['worker/archive-recheck.mjs'],bundle:true,write:false,format:'esm',platform:'node'});
   const {createArchiveRecheck}=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text+'\n//# sourceURL=recheck-admission-test.mjs').toString('base64'));

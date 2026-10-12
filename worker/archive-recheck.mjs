@@ -21,13 +21,14 @@ export function createArchiveRecheck(env,{now=()=>Date.now()}={}){
         return {scheduled:[],duplicate:false};
       const at=timestamp(),pageSize=boundedInteger(limit,20,1,100);
       const managed=env.SOURCE_MANAGEMENT_ENABLED==='true';
+      const cursor=await env.DB.prepare('SELECT due_at,article_id,generation FROM archive_recheck_cursor WHERE id=1').first();
       const rows=await env.DB.prepare(`SELECT a.id,a.url,a.source_id,a.next_recheck_at AS due_at,r.observed_at,r.published_at
         FROM articles a
         JOIN article_revisions r ON r.id=a.latest_ready_revision_id AND r.article_id=a.id
         WHERE a.latest_ready_revision_id IS NOT NULL AND a.next_recheck_at<=?
+          AND (a.next_recheck_at>? OR (a.next_recheck_at=? AND a.id>?))
           ${managed?`AND EXISTS(SELECT 1 FROM sources s JOIN sites st ON st.id=s.site_id WHERE ${eligibleSource})`:''}
-        ORDER BY a.next_recheck_at,a.id LIMIT ?`).bind(at,pageSize).all();
-      if(!rows.results.length)return {scheduled:[],duplicate:false};
+        ORDER BY a.next_recheck_at,a.id LIMIT ?`).bind(at,cursor.due_at,cursor.due_at,cursor.article_id,pageSize).all();
 
       const statements=[];
       for(const row of rows.results){
@@ -64,10 +65,15 @@ export function createArchiveRecheck(env,{now=()=>Date.now()}={}){
             .bind(nextDue,row.id,row.url,row.due_at,...gateArgs,taskId,source.id),
         );
       }
-      if(!statements.length)return {scheduled:[],duplicate:false};
+      // Scan progress is separate from the due date: incompatible archives remain
+      // due but cannot monopolize every bounded page. Wrap after the current tail.
+      const last=rows.results.length===pageSize?rows.results.at(-1):null;
+      const taskStatements=statements.length;
+      statements.push(env.DB.prepare(`UPDATE archive_recheck_cursor SET due_at=?,article_id=?,generation=generation+1
+        WHERE id=1 AND generation=?`).bind(last?.due_at??0,last?.id??'',cursor.generation));
       const committed=await env.DB.batch(statements);
       const scheduled=[];
-      for(let index=0;index<committed.length;index+=3){
+      for(let index=0;index<taskStatements;index+=3){
         const inserted=committed[index].results?.map(result=>result.id)??[];
         scheduled.push(...inserted);
       }
