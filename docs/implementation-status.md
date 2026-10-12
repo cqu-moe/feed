@@ -27,4 +27,6 @@
 - 首版邮件供应商已由用户确定为 Resend，要求后期可替换；决定见 [T11 选型记录](https://github.com/cqu-moe/feed/issues/12#issuecomment-6117297565)。独立 Adapter 负责供应商 API 和 webhook 协议，Notifications 保留业务去重、快照与恢复规则。
 - 隔离验收收件人已获用户授权；Resend 已创建专用发件域 `feed.cqu.moe`，四条 DNS 记录已在 Cloudflare 保存（DNS only，TTL 300），Resend 已确认域和四条记录全部 verified。正式权益默认值和费用上限尚待确定；这些条件不阻止不依赖它们的代码实现，但不能用 mock 关闭云端验收任务。
 
-此文件随实际合并和验证更新；未部署正式版，未迁移生产数据，未发送验收邮件。
+已向用户指定的验收邮箱发送一封发件域测试邮件，Resend 返回 `delivered`（收件服务器已接收）。本次通过 Resend Connector 验证供应商通路，不经过 Feed Queue，不作为 T11/T17 的应用内投递验收。
+
+此文件随实际合并和验证更新；未部署正式版，未迁移生产数据。
