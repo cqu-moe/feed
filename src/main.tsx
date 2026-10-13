@@ -26,7 +26,7 @@ import {
 } from '@cqu-moe/ui';
 import { BellPlus, House, RefreshCw, UserRound } from 'lucide-react';
 import { parseSession, requestJson, type Session } from './api';
-import { AccessDeniedState, LoginRequiredState, LogoutButton, safeNext } from './components';
+import { AccessDeniedState, FeedBrand, LoginRequiredState, LogoutButton, safeNext } from './components';
 import { AccessPage, AccountPage, ArticleDetailPage, ArticlesPage, LoginPage, SourcesPage } from './pages';
 import { AdminTasksPage } from './admin-tasks';
 import { AdminSourcesPage } from './admin-sources';
@@ -94,7 +94,7 @@ function Layout() {
 
   return (
     <AppShell
-      brand="重大通知存档"
+      brand={<FeedBrand />}
       utilities={
         <div className="feed-shell-utilities">
           <LogoutButton session={session} busy={loggingOut} onLogout={logout} />
