@@ -51,7 +51,7 @@ test('worker event properties use a strict field allowlist', () => {
     },
   ).properties;
   assert.deepEqual(Object.keys(properties).sort(), [
-    '$process_person_profile',
+    '$geoip_disable', '$process_person_profile',
     'actor_type',
     'environment',
     'event_id',

@@ -149,6 +149,7 @@ export function buildFeedWorkerEvent(env, event, distinctId, properties = {}) {
     if (validProperty(key, source[key])) captured[key] = source[key];
   }
   captured.$process_person_profile = false;
+  captured.$geoip_disable = true;
   return { distinctId, event, properties: captured };
 }
 
