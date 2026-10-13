@@ -521,7 +521,7 @@ node scripts/compare-ocr.mjs publish textin-xparse-auto
 
 ## 正式版邮件（T11）
 
-启用前应用 0014 迁移，配置独立 `FEED_MAIL` Queue 与 DLQ、`MAIL_FROM`，并通过 Worker secrets 设置 `RESEND_API_KEY` 和 `RESEND_WEBHOOK_SECRET`。API key 需支持发送和邮件查询；发件域须在 Resend 验证。Webhook 地址为当前环境的 `/webhooks/resend`，使用该 endpoint 自己的签名密钥。不得把密钥写入 Git、请求日志或操作记录。`MAIL_ENABLED` 默认 false，不会因合入代码自动发信。
+启用前应用 0014 迁移，配置独立 `FEED_MAIL` Queue 与 DLQ、`MAIL_FROM`，并通过 Worker secrets 设置 `RESEND_API_KEY` 和 `RESEND_WEBHOOK_SECRET`。生产使用仅限 `feed.cqu.moe` 的 Sending access API key；发件域须在 Resend 验证。签名 webhook 更新受理、送达和退信事实，不需要 Full access。主动 `GET /emails/:id` 对账不在该 Key 权限内：遇到结果不明时保持原投递状态，在 Resend 后台核对，不自动重发。Full access 仅用于隔离验收或管理端配置，不注入正式 Feed Worker。Webhook 地址为当前环境的 `/webhooks/resend`，使用该 endpoint 自己的签名密钥。不得把密钥写入 Git、请求日志或操作记录。`MAIL_ENABLED` 默认 false，不会因合入代码自动发信。
 
 匹配完成后准备及时邮件；Cron 每五分钟恢复遗漏准备、持久延期、超时提交及已落盘但尚未处理的回调，再分发 outbox。`MAIL_PREPARE_LIMIT` 每轮默认20、上限50，`MAX_MAIL_ATTEMPTS` 默认6、上限10。定时器和 Queue 同时触发也共用 delivery 条件占用。每代 outbox 的投递次数也受同一上限约束；快照读取等提交前故障耗尽 Queue 重试后，不会被 Cron 无限重新入队，而是保留消息与占用、停止自动恢复，显示待人工处理。关闭发送时，保留 webhook 签名密钥仍会继续恢复已落盘回执；该流程不准备或提交新邮件。
 
@@ -544,3 +544,7 @@ node scripts/compare-ocr.mjs publish textin-xparse-auto
 默认按冻结的源站发布日期区分30天内近期通知与旧通知，日期不可用才回退观察时间；近期每7天、旧通知每30天复查。三个秒级参数分别为 `RECHECK_RECENT_AFTER_SEC`、`RECHECK_RECENT_INTERVAL_SEC`、`RECHECK_OLD_INTERVAL_SEC`。这些默认值不是已批准的生产容量或费用参数，上线前仍需按实测预算确认。
 
 共享通知优先选原来源，否则选按ID排序的有效关联来源，要求站点、栏目、验证状态、文章origin和路径均相容。任务与outbox提交时再次校验来源配置版本和启用状态；只有对应任务已持久化才推进文章的下次复查时间。`0017_archive_recheck.sql` 的独立扫描游标记录批次位置，扫到末尾后循环；路径已不相容的旧通知保持到期，但不会长期阻挡后面的有效记录。游标与任务在同一D1批次提交，故障重试继续使用相同业务身份。
+
+## 正式 Auth 后台客户端
+
+浏览器 OAuth 客户端继续沿用 `cqu-feed`。后台独立客户端仅允许 `getFeedPolicy`、`getFeedRecipient`，metadata subsystem 为 `feed`，不授予浏览器 grant、scope 或 redirect URI。运行时凭据为 `FEED_AUTH_RPC_CLIENT_ID` / `FEED_AUTH_RPC_CLIENT_SECRET`；RSS 链接加密沿用会话加密密钥，按实现读取。权益仅合并到指定用户，不能替换其他子系统权益。
