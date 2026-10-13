@@ -344,7 +344,7 @@ async function handleFeedEvent(env,message,dependencies={}){
   if(!outbox||outbox.dedupe_key!==feedEventDedupeKey(payload)||JSON.stringify(payload)!==outbox.payload_json)
     throw new SchemaError('Message does not match its persisted outbox');
   if(payload.type==='check-ready'){
-    const result=await reconcileRevision(env,payload.revisionId);
+    const result=await reconcileRevision(env,payload.revisionId,dependencies.lifecycle);
     if(result.notFound)throw new SchemaError('Ready revision is missing');
     return result;
   }

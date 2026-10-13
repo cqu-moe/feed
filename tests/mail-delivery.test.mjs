@@ -5,6 +5,57 @@ import {subscriptionsFixture,subscriptionsInvoke,notificationInvoke,adminRequest
 import {seedReadyEvent} from './helpers/notification-event.mjs';
 
 const start=Date.parse('2026-10-12T04:00:00Z');
+
+async function telemetryEvents(fixture){
+  const response=await fixture.mf.dispatchFetch('https://feed.test/__test/telemetry');
+  const body=await response.json();
+  assert.equal(body.loaded,true);
+  return body.events;
+}
+
+test('mail telemetry separates provider acceptance from verified delivery',async()=>{
+  const sent=[];
+  const f=await subscriptionsFixture({clock:start,telemetryHarness:true,mailHarness:{async fetch(request){
+    if(request.method==='GET')return Response.json({
+      id:'88888888-8888-4888-8888-888888888888',to:['reader@example.test'],last_event:'delivered',tags:sent[0].body.tags,
+    });
+    const body=await request.json();
+    sent.push({key:request.headers.get('idempotency-key'),body});
+    return Response.json({id:'88888888-8888-4888-8888-888888888888'});
+  }}});
+  try{
+    await subscriptionsInvoke(f.mf,'change',{id:'mail-owner'},{requestId:'mail-telemetry-create',name:'及时通知',sourceIds:['jwc'],emailMode:'immediate'});
+    const eventId=await seedReadyEvent(f.mf,{id:'f55555555555555555555555',sourceId:'jwc',firstSeenAt:start+1,observedAt:start+1,readyAt:start+2,publishedAt:new Date(start+1).toISOString(),datePrecision:'minute'});
+    await notificationInvoke(f.mf,'enqueueEvent',eventId);await notificationInvoke(f.mf,'replayMatchOutbox');
+    await f.mailClock(start+120_000);await f.mail('preparePending');await f.replayMail();
+    const view=await adminRequest(f.mf,'/internal/mail',undefined,{method:'GET'});
+    const messageId=view.body.messages[0].id;
+    let events=(await telemetryEvents(f)).filter(event=>event.event==='feed_delivery_finalized');
+    assert.equal(events.length,1);
+    assert.equal(events[0].properties.state,'accepted');
+    assert.equal(events[0].properties.outcome,'unverified');
+    assert.equal(events[0].properties.provider_submission,true);
+    assert.equal(events[0].properties.delivered,false);
+    assert.equal(events[0].properties.operation_id,messageId);
+    assert.equal(events[0].properties.attempt_id,`${messageId}:1`);
+    assert.equal(events[0].properties.owner_sub,'mail-owner');
+
+    const reconciled=await adminRequest(f.mf,`/internal/mail/${messageId}/reconcile`,{});
+    assert.equal(reconciled.status,200,JSON.stringify(reconciled));
+    assert.equal(reconciled.body.state,'delivered');
+    events=(await telemetryEvents(f)).filter(event=>event.event==='feed_delivery_finalized');
+    assert.equal(events.length,2);
+    assert.equal(events[1].properties.outcome,'success');
+    assert.equal(events[1].properties.state,'delivered');
+    assert.equal(events[1].properties.delivered,true);
+    assert.equal(events[1].properties.operation_id,messageId);
+    assert.equal(events[1].properties.attempt_id,`${messageId}:1`);
+    assert.equal(JSON.stringify(events).includes('reader@example.test'),false);
+    assert.equal(JSON.stringify(events).includes(sent[0].body.subject),false);
+    assert.equal(JSON.stringify(events).includes(sent[0].body.text),false);
+  }finally{await f.mf.dispose();}
+});
+
 test('a suppression committed at the final submission boundary prevents a provider call',async()=>{
   let submissions=0;
   const f=await subscriptionsFixture({clock:start,mailHarness:{async fetch(){submissions++;return Response.json({id:'77777777-7777-4777-8777-777777777777'});}}});

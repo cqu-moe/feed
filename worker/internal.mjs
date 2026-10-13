@@ -10,7 +10,7 @@ import {createArchiveMigration,MigrationConflictError,MigrationNotFoundError,Mig
 import {createOperations,OperationsError} from './operations.mjs';
 import {createArchiveRecheck} from './archive-recheck.mjs';
 
-export async function internalRoute(request,env){
+export async function internalRoute(request,env,ctx){
   const url=new URL(request.url);
   if(!await requireAdmin(request,env))return json({error:'Unauthorized'},401);
   if(url.pathname==='/internal/operations/diagnostics'&&request.method==='GET'){
@@ -51,16 +51,16 @@ export async function internalRoute(request,env){
   if(url.pathname==='/internal/mail/digests/prepare'&&request.method==='POST')return json(await createMail(env).prepareDigests(),202);
   const mailReconcile=/^\/internal\/mail\/([a-f0-9]{24})\/reconcile$/.exec(url.pathname);
   if(mailReconcile&&request.method==='POST'){
-    const result=await createMail(env).reconcile(mailReconcile[1]);
+    const result=await createMail(env,{lifecycle:ctx}).reconcile(mailReconcile[1]);
     return result?json(result):json({error:'Mail message not found'},404);
   }
   if(['/internal/mail/prepare','/internal/mail/recover'].includes(url.pathname)&&request.method==='POST'){
-    const mail=createMail(env);
+    const mail=createMail(env,{lifecycle:ctx});
     return json(await (url.pathname.endsWith('/prepare')?mail.preparePending():mail.recover()),202);
   }
   if(url.pathname==='/internal/archive-migration/articles'){
     if(request.method!=='GET')return json({error:'Method not allowed'},405);
-    try{return json(await createArchiveMigration(env).articles({after:url.searchParams.get('after'),
+    try{return json(await createArchiveMigration(env,{lifecycle:ctx}).articles({after:url.searchParams.get('after'),
       limit:url.searchParams.has('limit')?Number(url.searchParams.get('limit')):20}));}
     catch(error){
       if(error instanceof MigrationValidationError)return json({error:error.message},400);
@@ -68,7 +68,7 @@ export async function internalRoute(request,env){
     }
   }
   if(url.pathname==='/internal/archive-migration'){
-    const migration=createArchiveMigration(env);
+    const migration=createArchiveMigration(env,{lifecycle:ctx});
     if(request.method==='GET'){
       const status=await migration.status();
       return status?json(status):json({error:'Migration not submitted'},404);
@@ -85,7 +85,7 @@ export async function internalRoute(request,env){
     return json({error:'Method not allowed'},405);
   }
   if(url.pathname==='/internal/archive-migration/process'&&request.method==='POST'){
-    const migration=createArchiveMigration(env);
+    const migration=createArchiveMigration(env,{lifecycle:ctx});
     try{return json(await migration.process(await readJson(request)),202);}
     catch(error){
       if(error instanceof MigrationValidationError)return json({error:error.message},400);
@@ -95,7 +95,7 @@ export async function internalRoute(request,env){
   }
   if(url.pathname==='/internal/archive-migration/repair'){
     if(request.method!=='POST')return json({error:'Method not allowed'},405);
-    const migration=createArchiveMigration(env);
+    const migration=createArchiveMigration(env,{lifecycle:ctx});
     try{return json(await migration.repair(await readJson(request)),202);}
     catch(error){
       if(error instanceof MigrationValidationError)return json({error:error.message},400);

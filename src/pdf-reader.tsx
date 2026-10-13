@@ -3,6 +3,7 @@ import { useParams, useSearchParams } from 'react-router';
 import { Button, PageState } from '@cqu-moe/ui';
 import { ChevronLeft, ChevronRight, Download, Minus, Plus } from 'lucide-react';
 import { Document, Page, pdfjs } from 'react-pdf';
+import { captureFeedEvent } from './telemetry';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
 
@@ -38,6 +39,12 @@ export default function PdfReader() {
   const [scale, setScale] = useState(1);
   const [pages, setPages] = useState(0);
   const [page, setPage] = useState(requestedPage);
+  const openOperation = useRef<{ id: string; attemptId: string; startedAt: number }>({
+    id: crypto.randomUUID(),
+    attemptId: crypto.randomUUID(),
+    startedAt: performance.now(),
+  });
+  const openCompleted = useRef(false);
 
   useEffect(() => {
     const element = container.current;
@@ -53,6 +60,11 @@ export default function PdfReader() {
   useEffect(() => {
     setPage(pages ? clampPage(requestedPage, pages) : requestedPage);
   }, [articleId, revisionId, filename, requestedPage, pages]);
+
+  useEffect(() => {
+    openOperation.current = { id: crypto.randomUUID(), attemptId: crypto.randomUUID(), startedAt: performance.now() };
+    openCompleted.current = false;
+  }, [articleId, revisionId, filename]);
 
   const valid = /^[a-f0-9]{24}$/.test(articleId)
     && (revisionId === undefined || /^[A-Za-z0-9_-]+$/.test(revisionId))
@@ -133,6 +145,25 @@ export default function PdfReader() {
           options={options}
           onLoadSuccess={({ numPages }) => {
             setPages(numPages);
+            if (!openCompleted.current && window.self === window.top) {
+              const operation = openOperation.current;
+              captureFeedEvent('feed_item_opened', {
+                operation: 'pdf_read',
+                flow: 'reading',
+                stage: 'opened',
+                outcome: 'success',
+                operation_id: operation.id,
+                attempt_id: operation.attemptId,
+                article_id: articleId,
+                revision_id: revisionId ?? null,
+                content_kind: 'pdf',
+                ocr_used: false,
+                revision_state: 'ready',
+                duration_ms: Math.max(0, Math.round(performance.now() - operation.startedAt)),
+                duration_basis: 'content_request_to_readable_response',
+              });
+              openCompleted.current = true;
+            }
             const target = clampPage(requestedPage, numPages);
             setPage(target);
             if (target !== requestedPage) {

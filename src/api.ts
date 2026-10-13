@@ -1,4 +1,5 @@
 export type SessionUser = {
+  id: string;
   name?: string;
   email?: string;
 };
@@ -203,7 +204,9 @@ export async function requestJson<T>(
 function parseUser(value: unknown): SessionUser | undefined {
   if (value === undefined || value === null) return undefined;
   if (!isRecord(value)) throw new Error('用户信息结构不匹配。');
+  if (typeof value.id !== 'string' || !value.id) throw new Error('用户信息结构不匹配。');
   return {
+    id: value.id,
     name: stringOrNull(value.name) ?? undefined,
     email: stringOrNull(value.email) ?? undefined,
   };
