@@ -1,6 +1,6 @@
 # 正式版隔离验收（T17）
 
-日期：2026-10-13，Asia/Shanghai。此页记录真实隔离环境；历史 MVP 证据见 [acceptance.md](acceptance.md)。T17 真实20:00摘要仍待完成；用户已于同日授权直接正式上线，T18执行进度见 [正式发布记录](release-production.md)。
+日期：2026-10-13，Asia/Shanghai。此页记录真实隔离环境；历史 MVP 证据见 [acceptance.md](acceptance.md)。T17 真实20:00摘要已于20:01送达并由用户截图确认；用户已于同日授权直接正式上线，T18执行进度见 [正式发布记录](release-production.md)。
 
 ## 范围与资源
 
@@ -49,7 +49,7 @@
 | --- | --- | --- |
 | Firecrawl | 15调用；账户credits 1000→985 | 官方credit-usage只读接口与Feed usage一致；消耗已有额度。 |
 | TextIn | 3次单页识别；有效套餐余量1992→1989 | 官方package查询与每日/月预留3页一致；finance余额/待支付均0，预付费。日/月是同一消耗的两个统计维度。 |
-| Resend | Auth验证码1封、Feed更新2封 | Feed更新有provider delivered与真实收件证据；20:00摘要尚未发送。 |
+| Resend | Auth验证码1封、Feed更新2封、摘要1封 | Feed更新2封、20:00摘要1封均有delivered与真实收件证据。 |
 | Cloudflare | 2业务Worker、1合成源、2 D1、1 R2、6 Queue、5 Feed Workflow | 临时邮件故障Worker已删除并回读404；已核对Analytics增量与账户累计用量，见下表；不是最终账单。 |
 
 官方查询口径：[Firecrawl credit-usage](https://github.com/firecrawl/firecrawl-docs/blob/main/api-reference/v2-openapi.json)、[TextIn套餐余量](https://www.textin.com/document/open_api_package)、[TextIn余额](https://www.textin.com/document/open_api_balance)。已有套餐计数不等同于单价；没有伪造人民币账单。此前账户欠费弹窗金额不归因于本次验收。
@@ -90,15 +90,24 @@ Cloudflare只读Analytics快照于02:40–02:52取得；账户累计从2026-10-0
 
 09:06北京时间实际读回：健康200，诊断200，`ocrPagesToday=0`（UTC当日）、`ocrPagesThisMonth=3`、累计`paidOcrPages=3`、`paidVendorCalls=15`；任务/缺项/未知邮件均为0。邮件账本仍只有此前2封immediate，均delivered、attempts1。原始回执为`.private/t17-receipts/independent-review-final-{health,diagnostics,mail}.json`，CI回执为`review-ci-run-final.json`。没有把本地混合PDF回归称为新增真实供应商验收；今晚真实定时摘要仍待验。
 
-## 尚未完成
+## 真实20:00摘要（已通过）
 
-- 2026-10-13北京时间20:00的真实定时摘要及收件核对。目前实际摘要准备入口prepared0，符合未到窗口；有1条新通知候选和1条邮箱恢复积压，预期合并一封且不重复之前已送达版本。
-- 今晚摘要后补齐增量用量。Cloudflare当前计量已核对，最终美元账单尚未出；不需要等整月出账才推进验收，但不能捏造最终金额。
-- 两栏目、三通知、一个账号的演练不证明大规模吞吐；容量、生产预算与正式默认额度仍待确定。
-- T18生产迁移比对、正式凭据、范围与预算的实际执行验收。上线已获授权，详见 [production-rollout.md](production-rollout.md)。
+用户在本会话提供收件箱截图：2026-10-13 20:01收到《每日摘要 · 2026-10-13》，收件人仍为指定地址。隔离D1记录显示：
 
-T17 [#18](https://github.com/cqu-moe/feed/issues/18) 与 T18 [#19](https://github.com/cqu-moe/feed/issues/19) 保持打开。原始收据位于集成worktree的Git忽略目录 `.private/t17-receipts/`；私有RSS、凭据和会话不进入Git或Issue。
+- 摘要消息 `aba4181c48d3ceeb64709010`，20:00:47提交，20:01:02送达，`delivered`、`attempts=1`。
+- 正好2项：更新事件 `b2e1d16fb2cd0e793aa15f44`（邮箱验证恢复后的积压）和新通知事件 `7e5ec32e0ca8993adadf1f9e`。与截图中的两条合成通知一致。
+- 两条真实签名回执于20:01:07和20:01:13处理完成；摘要窗口为真实20:00、状态closed、分片数1。没有修改时钟或伪造回执。
+- 此前两封即时邮件仍各attempts1；所有mail_items重复event数0，共4个user delivery均delivered。任务积压、缺项、未知邮件结果均0。
+- Firecrawl调用仍15次、TextIn仍3页；今晚没有新增抓取/OCR。原始回执为`.private/t17-receipts/digest-evening-{mail,ledger,diagnostics}.json`，用户截图不复制到Git。
 
-## 等待20:00的运行状态
+### 晚间增量计量
 
-上述最新隔离部署启用正常每5分钟邮件恢复Cron，MAIL开启；CRAWL、TASK_RUNTIME、PDF_OCR均关闭。Cloudflare负责在真实20:00窗口准备和发送摘要；不是在本机改时钟触发。09:06回读仍只有此前2封已送达邮件。本会话20:10自动跟进提醒`feed-key`会核对真实收件、更新证据、关闭隔离Cron/邮件，并在Resend临时Key用完后提醒撤销。用户后续已授权直接正式上线，提醒已更新为每日正式监控并补齐T17真实摘要，不再重复请求上线批准。T17完成后停隔离任务并提醒撤销临时Key，继续生产监控。
+20:05读取：隔离Queue累计138次操作（events81/jobs48/mail9；此前135），R2累计PutObject205/GetObject209/HeadObject220/HeadBucket30/PutBucket1；最新存储快照197个对象、4,540,364字节（快照时间19:40，早于摘要）。Workflow成功数未增加，仍为旧PDF6、采集8、发现5、归档OCR2，保留此前1次发现失败记录。
+
+Worker/D1首次晚间Analytics查询遇到Cloudflare五分钟限流；遵守冷却后20:12单次重试成功。累计Feed/Auth/合成源请求分别593/228/73，这三项返回errors均0；Feed D1读取22,853行、写入2,251行，Auth D1读取82,134行、写入762行。查询窗口从10月12日UTC起，计量可能延迟，不是最终美元账单；隔离50元预算不与正式100元/月混算。错误及成功回执均保留，未把缺失结果填0。
+
+## 收尾与范围边界
+
+本次必需的隔离业务验收均已通过。20:08已部署关停配置，20:09读回MAIL/CRAWL/TASK_RUNTIME/PDF_OCR均为false、Cron为空；版本`9cfdcb6e-f738-4d76-b4e7-508a4ab839a9`，部署`ac503d93-1974-4313-9394-0400bfd5b73f`。三封已送达邮件仍保留原状态，未新增投递。关停配置dry-run通过；文档收尾前完整203项测试、构建、设计检查和Worker打包通过。T17 Issue #18据此完成。所有D1/R2原件、版本及投递事实保留，不删除账本。临时Resend Key已可撤销；此前Firecrawl/TextIn临时Key若尚未撤销可一并撤销，新的正式Sending Key继续保留。
+
+正式发布及待观察项独立记录在 [T18发布记录](release-production.md) 和 [Issue #19](https://github.com/cqu-moe/feed/issues/19)：首个正式发现窗口、持续费用监控和生产回滚演练继续跟进。两栏目、三通知、一个账号的隔离演练不证明大规模吞吐；生产月预算和初始额度已单独确定，不再视为T17未决项。

@@ -29,7 +29,7 @@
 | T13 / #14 | 本地验收完成 | 签名候选 `82e0cdc`，独立复审 PASS 后签名合并 `c34a600`；134 tests/build/design/dry-run 通过，独立 6 项回归及 7 项游标、并发与控制探针通过。全部存档分级复查、暂停与配置屏障、共享栏目及有界扫描公平性已验收 |
 | T14 / #15 | 本地验收完成 | 签名候选 `af78e9e`，独立审查后签名合并 `fa580df`；158 tests/build/design/dry-run 通过。历史补抓窗口、分页上限、持久准入、公平恢复及配置屏障已验收；真实 Worker 界面验证参数重置、配置变更清除旧结果及终态刷新 |
 | T15 / #16 | 本地验收完成 | 签名候选 `ed34fe7`，集成 `c966910`；主体及 T14 兼容性经独立审查，最后的受控时钟修复由主代理核对。169 tests/build/design/dry-run 通过，真实 Worker 管理 UI 已验收 |
-| T17 / #18 | 待真实20:00摘要 | 合成多源、迁移、TextIn、不可变版本、权益、RSS及即时邮件已实测；独立复核三项发现已修复，三路复审及203项测试、远端CI通过，真实20:00摘要待验。详见[隔离验收记录](acceptance-production.md) |
+| T17 / #18 | 隔离业务验收通过 | 合成多源、迁移、TextIn、不可变版本、权益、RSS及即时邮件已实测；独立复核三项发现已修复，三路复审及203项测试、远端CI通过，真实20:00摘要已送达，2项合并、attempts1、无重复。详见[隔离验收记录](acceptance-production.md) |
 | T18 / #19 | 已授权，发布中 | 正式月预算100元，Resend Sending access；Auth与Feed先暂停任务发布，迁移与真实账号验收见[正式发布记录](release-production.md) |
 
 ## 会话中的规格调整
@@ -45,10 +45,10 @@
 
 ## 隔离验收进展（T17）
 
-- 资源统一使用 `t17-20261013` 后缀；Feed/Auth迁移、独立D1/R2、三条业务Queue/DLQ和Workflow部署均已完成。五个真实种子来源与站点暂停，本次仅用合成样本。当前CRAWL/TASK_RUNTIME/PDF_OCR关闭，MAIL和每5分钟Cron仅用于真实20:00摘要；未导出生产学生名单。
+- 资源统一使用 `t17-20261013` 后缀；Feed/Auth迁移、独立D1/R2、三条业务Queue/DLQ和Workflow部署均已完成。五个真实种子来源与站点暂停，本次仅用合成样本。20:01真实摘要已验证，随后关闭隔离MAIL和Cron；CRAWL/TASK_RUNTIME/PDF_OCR保持关闭；未导出生产学生名单。
 - Auth 配套发件人提交 `bd40fdf` 已部署至隔离 Worker，部署版本 `053cf08d-d8d1-48a6-b9df-3e89ed61d984`；[对应远端 CI](https://github.com/cqu-moe/auth/actions/runs/38276294687) 已通过。
 - 唯一隔离账号经正常浏览器注册、实际邮箱 OTP 验证及密码加 TOTP 强认证，已配置 `feed.access=1`、`feed.sub_limit=3`，BFF 与后台 RPC 客户端彼此独立。临时开放注册后已恢复邀请制；未复制生产会话或修改生产用户。
-- Auth验证邮件与两封Feed更新均由Resend和实际收件确认；响应丢失演练保持同一邮件attempt1并由真实回执收敛。Firecrawl15credits、TextIn3页，成本和完整业务证据见隔离验收记录。隔离费用上限仍为人民币50元，抓取/OCR临时Key已提醒可撤销，Resend在今晚摘要确认后提醒撤销。
+- Auth验证邮件与两封Feed更新均由Resend和实际收件确认；响应丢失演练保持同一邮件attempt1并由真实回执收敛。Firecrawl15credits、TextIn3页，成本和完整业务证据见隔离验收记录。隔离费用上限仍为人民币50元，抓取/OCR临时Key已提醒可撤销，20:01摘要确认后Resend临时Key也可撤销，正式Sending Key保留。
 
 ## 云端前置配置与核对
 
