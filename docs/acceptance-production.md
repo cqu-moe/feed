@@ -67,6 +67,8 @@ Cloudflare只读Analytics快照于02:40–02:52取得；账户累计从2026-10-0
 
 已查请求、CPU、行数、Queue操作、R2操作/存储及Workflow步骤均低于现有公开包含额度。未新增套餐，以上维度当前没有显示越过包含额度；不据此保证整月增量费用为0，也不把Workflow storageRate当作已结算GB-month。[Workers定价](https://developers.cloudflare.com/workers/platform/pricing/)、[D1定价](https://developers.cloudflare.com/d1/platform/pricing/)、[R2定价](https://developers.cloudflare.com/r2/pricing/)、[Queues定价](https://developers.cloudflare.com/queues/platform/pricing/)、[Workflows定价](https://developers.cloudflare.com/workflows/reference/pricing/)。
 
+计量请求和结果分别保留：`.private/t17-{resource-cost,account-cost,queues-cost}.graphql`、`t17-cloud-usage.mjs`及`t17-receipts/`对应JSON。Queue身份映射来自同次验收的`.private/t17-current-queues.txt`：jobs=`46e107ca7af743ba98e1f14918b2e2c3`、events=`c8e0c27c4203472baa828062a8ddccb2`、mail=`b76f12c75e3749a28a6bc3e30f426673`。统计中另一个`aa1da47e6eff4193a888b740cd2bf58b`的66次属于`schedule-sync`，不计入T17的135次；三个T17 DLQ也在原列表中，查询未返回它们的操作行。
+
 隔离抓取上限16次/UTC日，正文OCR5页/UTC日、20页/月；任务尝试3次，启动交接2次，任务退避60–600秒，邮件最多3次。近期复查600秒、旧通知900秒仅为短时演练值，不能直接用于全量生产。暂停抓取后不会继续进行周期性付费采集。Firecrawl/TextIn临时Key可撤销；Resend需完成摘要验收后撤销。
 
 ## 云端发现并修复的问题
@@ -78,12 +80,19 @@ Cloudflare只读Analytics快照于02:40–02:52取得；账户累计从2026-10-0
 - `785739a`：OCR运维指标将日/月processed_pages相加，导致实际3页显示6页；修改为累计月统计，既有诊断测试以双维度数据复现红灯后通过。供应商没有重复扣费。
 - `021fe31`：读取PDF原件中断时兼容指纹漏了MVP占位文本，会把未变通知判为实质更新；在已批准的Archive故障注入边界复现红灯，补齐失败路径后12项迁移回归通过，真实正文修改负控仍为substantive。未为此追加付费抓取或OCR。
 
-源码 `785739aff056952faa6fb56e6adb468f6c13a7f8` 的197项测试与[远端CI38292016688](https://github.com/cqu-moe/feed/actions/runs/38292016688)成功，实际运维API和界面均显示OCR3页。最后PDF读取失败修复的源码为 `021fe3124894b2e7f11fc5358b56bfddc9d4efdb`：本地198项测试、构建、设计检查和Worker dry-run通过；[对应CI38293926243](https://github.com/cqu-moe/feed/actions/runs/38293926243)成功。最终隔离部署 `6436672c-0c52-4666-8cf9-db110e23fd35` 已健康200，诊断确认没有新增付费抓取/OCR。原始失败CI与红灯日志保留，不用后续成功覆盖历史证据。
+源码 `785739aff056952faa6fb56e6adb468f6c13a7f8` 的197项测试与[远端CI38292016688](https://github.com/cqu-moe/feed/actions/runs/38292016688)成功，实际运维API和界面均显示OCR3页。随后PDF读取失败修复的源码为 `021fe3124894b2e7f11fc5358b56bfddc9d4efdb`：本地198项测试、构建、设计检查和Worker dry-run通过；[对应CI38293926243](https://github.com/cqu-moe/feed/actions/runs/38293926243)成功。当时隔离部署 `6436672c-0c52-4666-8cf9-db110e23fd35` 健康200，诊断确认没有新增付费抓取/OCR。原始失败CI与红灯日志保留，不用后续成功覆盖历史证据。
+
+## 独立复核与最新部署
+
+2026-10-13上午对逐任务审查后的云端修复做独立复核，范围、模型和完整闭环见[独立复核记录](reviews/t17-independent-review.md)。Standards发现1项P2（旧journal重放），Spec发现1项P1（混合PDF历史表示），GLM5.3证据核对发现1项P2（跨UTC日/月诊断旧计数）；三项均已在`d56a1e317ebc884318cba5187091060445be35a3`修复，并由原审查代理独立复审关闭，无新增发现。
+
+本地完整203项测试、构建、设计检查和Worker dry-run通过；[远端CI38329786882](https://github.com/cqu-moe/feed/actions/runs/38329786882)对同一SHA成功，远端同样203/203。Main重新构建集成目录并用T17专用配置预检，然后部署隔离版本`68d10467-cee8-4318-bfa0-435101a160cf`；没有新增迁移或付费抓取/OCR。
+
+09:06北京时间实际读回：健康200，诊断200，`ocrPagesToday=0`（UTC当日）、`ocrPagesThisMonth=3`、累计`paidOcrPages=3`、`paidVendorCalls=15`；任务/缺项/未知邮件均为0。邮件账本仍只有此前2封immediate，均delivered、attempts1。原始回执为`.private/t17-receipts/independent-review-final-{health,diagnostics,mail}.json`，CI回执为`review-ci-run-final.json`。没有把本地混合PDF回归称为新增真实供应商验收；今晚真实定时摘要仍待验。
 
 ## 尚未完成
 
 - 2026-10-13北京时间20:00的真实定时摘要及收件核对。目前实际摘要准备入口prepared0，符合未到窗口；有1条新通知候选和1条邮箱恢复积压，预期合并一封且不重复之前已送达版本。
-- 最新修复尚未取得独立子代理复核（子代理额度耗尽，不能把Main检查称为独立复核）。
 - 今晚摘要后补齐增量用量。Cloudflare当前计量已核对，最终美元账单尚未出；不需要等整月出账才推进验收，但不能捏造最终金额。
 - 两栏目、三通知、一个账号的演练不证明大规模吞吐；容量、生产预算与正式默认额度仍待确定。
 - T18生产备份/迁移比对、正式凭据、灰度范围、预算及上线授权。详见 [production-rollout.md](production-rollout.md)。
@@ -92,4 +101,4 @@ T17 [#18](https://github.com/cqu-moe/feed/issues/18) 与 T18 [#19](https://githu
 
 ## 等待20:00的运行状态
 
-上述最终隔离部署启用正常每5分钟邮件恢复Cron，MAIL开启；CRAWL、TASK_RUNTIME、PDF_OCR均关闭。Cloudflare负责在真实20:00窗口准备和发送摘要；不是在本机改时钟触发。02:44回读仍只有此前2封已送达邮件。已创建本会话20:10自动跟进提醒 `feed-key`，核对真实收件、更新证据、关闭隔离Cron/邮件，并在Resend临时Key用完后提醒撤销；完成后暂停该提醒。
+上述最新隔离部署启用正常每5分钟邮件恢复Cron，MAIL开启；CRAWL、TASK_RUNTIME、PDF_OCR均关闭。Cloudflare负责在真实20:00窗口准备和发送摘要；不是在本机改时钟触发。09:06回读仍只有此前2封已送达邮件。本会话20:10自动跟进提醒`feed-key`会核对真实收件、更新证据、关闭隔离Cron/邮件，并在Resend临时Key用完后提醒撤销。用户要求已写入提醒：独立复核和真实摘要两道门槛都通过后，再用内置提问工具提交具体正式上线方案确认；此前不操作生产。完成后暂停提醒。
