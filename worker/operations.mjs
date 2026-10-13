@@ -170,6 +170,7 @@ export function createOperations(env,{now=()=>Date.now()}={}){
   }
 
   async function metricsSnapshot(at){
+    const ocrDay=new Date(at).toISOString().slice(0,10),ocrMonth=ocrDay.slice(0,7);
     const [oldest,readyLatency,counts,paid,artifacts]=await Promise.all([
       env.DB.prepare(`SELECT * FROM (
           SELECT id,'queued_outbox' AS scope,available_at AS oldest_at FROM outbox
@@ -198,8 +199,11 @@ export function createOperations(env,{now=()=>Date.now()}={}){
       env.DB.prepare(`SELECT
           (SELECT COALESCE(SUM(used),0) FROM usage WHERE kind IN ('firecrawl','ocr')) AS paidVendorCalls,
           (SELECT COALESCE(SUM(processed_pages),0) FROM pdf_ocr_usage WHERE length(period)=7) AS paidOcrPages,
-          (SELECT COALESCE(day_pages,0) FROM pdf_ocr_budget WHERE id=1) AS ocrPagesToday,
-          (SELECT COALESCE(month_pages,0) FROM pdf_ocr_budget WHERE id=1) AS ocrPagesThisMonth`).first(),
+          (SELECT COALESCE(CASE WHEN day=? THEN day_pages ELSE 0 END,0)
+            FROM pdf_ocr_budget WHERE id=1) AS ocrPagesToday,
+          (SELECT COALESCE(CASE WHEN month=? THEN month_pages ELSE 0 END,0)
+            FROM pdf_ocr_budget WHERE id=1) AS ocrPagesThisMonth`)
+        .bind(ocrDay,ocrMonth).first(),
       env.DB.prepare(`SELECT COUNT(*) AS referenced FROM (
           SELECT object_hash AS artifact_hash FROM revision_requirements WHERE object_hash IS NOT NULL
           UNION SELECT result_hash FROM derived_outputs WHERE result_hash IS NOT NULL

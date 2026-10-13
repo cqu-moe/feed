@@ -1,6 +1,7 @@
 import {sha} from './utils.mjs';
 import {readingExcerpt} from './reading.mjs';
 import {fingerprintContent} from './archive-fingerprint.mjs';
+import {pdfPages,PDF_TEXT_UNAVAILABLE} from './pdf-text.mjs';
 import {adoptExistingOcrStatements,ocrTaskStatements,withOcrIdentity} from './archive-ocr.mjs';
 import {applyOcrEntries,flattenOcrEntries,validateOcrProjection} from './archive-ocr-view.mjs';
 
@@ -33,13 +34,14 @@ export async function commitCaptureRevision(env,capture,context){
   // form a complete candidate, but may not fill unknown old bytes with new files.
   const unchanged=previous?.state==='ready'&&previous.raw_fingerprint===capture.rawFingerprint;
   const revisionId=unchanged?previous.id:(await sha(`revision:${taskId}`)).slice(0,24);
-  // MVP body.txt includes native PDF text or its unavailable marker. Compare
-  // against that same representation without rewriting the immutable baseline.
-  const comparableFingerprint=previousReady?.fingerprint_version==='migration-body-files-v1'
-    ?capture.migrationSemanticFingerprint??await fingerprintContent({title:capture.title,body:capture.body,
-      files:requirements.filter(row=>row.kind==='attachment'||row.kind==='body_pdf')})
-    :capture.semanticFingerprint;
-  const changeKind=!previousReady?'baseline':previousReady.semantic_fingerprint===comparableFingerprint?'presentation_only':'substantive';
+  const fileIdentity=requirements.filter(row=>row.kind==='attachment'||row.kind==='body_pdf');
+  // Both historical MVP representations are valid: native text from every mixed
+  // PDF page, or the pre-OCR unavailable marker. Never rewrite either baseline.
+  const comparableFingerprints=previousReady?.fingerprint_version==='migration-body-files-v1'
+    ?await migrationComparisonFingerprints(env,capture,fileIdentity)
+    :new Set([capture.semanticFingerprint]);
+  const changeKind=!previousReady?'baseline':comparableFingerprints.has(previousReady.semantic_fingerprint)
+    ?'presentation_only':'substantive';
   const blocked=requirements.some(row=>row.required&&row.state==='failed');
   const statements=capture.objects.map(object=>env.DB.prepare(`INSERT INTO artifact_objects(sha256,r2_key,byte_size,media_type,verified_at)
     SELECT ?,?,?,?,? WHERE ${guard} ON CONFLICT(sha256) DO NOTHING`)
@@ -102,6 +104,33 @@ function captureResult(capture,revisionId,state,outcome){
   return {id:capture.articleId,revisionId,revisionState:state,status:state==='ready'?'complete':'partial',outcome,
     attachments:capture.requirements.filter(row=>row.kind==='attachment'||row.kind==='body_pdf').length,
     creditsUsed:capture.creditsUsed};
+}
+
+async function migrationComparisonFingerprints(env,capture,files){
+  const fingerprints=new Set([await fingerprintContent({title:capture.title,body:capture.body,files})]);
+  if(capture.migrationSemanticFingerprint)fingerprints.add(capture.migrationSemanticFingerprint);
+  const body=await savedRawBody(env,capture);
+  let migrationBody=body;
+  for(const requirement of files.filter(row=>row.kind==='body_pdf')){
+    const object=capture.objects.find(item=>item.sha256===requirement.objectHash);
+    if(!object)throw new Error('Saved body PDF evidence is missing from the capture');
+    const stored=await env.ARCHIVE.get(object.r2Key);
+    if(!stored)throw new Error('Saved body PDF is unavailable');
+    const analysis=await pdfPages(await stored.arrayBuffer());
+    const nativeText=analysis.pages.filter(page=>!page.needsOcr).map(page=>page.text.trim())
+      .filter(Boolean).join('\n\n');
+    migrationBody+='\n\n'+(nativeText||PDF_TEXT_UNAVAILABLE);
+  }
+  fingerprints.add(await fingerprintContent({title:capture.title,body:migrationBody,files}));
+  return fingerprints;
+}
+
+async function savedRawBody(env,capture){
+  const object=capture.objects.find(item=>item.sha256===capture.sourceBodyHash);
+  if(!object)throw new Error('Saved raw body evidence is missing from the capture');
+  const stored=await env.ARCHIVE.get(object.r2Key);
+  if(!stored)throw new Error('Saved raw body is unavailable');
+  return stored.text();
 }
 
 const revisionColumns=`r.id,r.article_id AS articleId,r.revision_no AS revisionNo,r.title,r.state,r.observed_at AS observedAt,

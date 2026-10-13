@@ -49,6 +49,7 @@ async function fixture({bindings={}}={}){
       import {handleFeedJobs} from './worker/task-runtime.mjs';
       globalThis.OPERATIONS_QUEUE_SENDS={};
       globalThis.OPERATIONS_WORKFLOW_STATUS='waiting';
+      globalThis.OPERATIONS_NOW=${now};
       let statusBarrier=0,statusWaiters=[];
       globalThis.OPERATIONS_QUEUE_MODE='normal';
       const workflow={
@@ -86,6 +87,10 @@ async function fixture({bindings={}}={}){
             FEED_MAIL:wrap(rawEnv,'FEED_MAIL')};
           const url=new URL(request.url);
           if(url.pathname==='/fixture/queue-sends')return Response.json(globalThis.OPERATIONS_QUEUE_SENDS);
+          if(url.pathname==='/fixture/clock'){
+            if(request.method==='POST')globalThis.OPERATIONS_NOW=Date.parse((await request.json()).at);
+            return Response.json({at:new Date(globalThis.OPERATIONS_NOW).toISOString()});
+          }
           if(url.pathname==='/fixture/queue-mode'){
             globalThis.OPERATIONS_QUEUE_MODE=(await request.json()).mode;
             return Response.json({ok:true});
@@ -97,6 +102,12 @@ async function fixture({bindings={}}={}){
               statusBarrier=body.barrier??0;
             }
             return Response.json({status:globalThis.OPERATIONS_WORKFLOW_STATUS});
+          }
+          if(url.pathname==='/internal/operations/diagnostics'){
+            const nativeDateNow=Date.now;
+            Date.now=()=>globalThis.OPERATIONS_NOW;
+            try{return await worker.fetch(request,env);}
+            finally{Date.now=nativeDateNow;}
           }
           return worker.fetch(request,env);
         },
@@ -141,6 +152,8 @@ async function seed(db){
     db.prepare(`INSERT INTO usage(day,kind,used) VALUES ('2026-10-12','archive_bytes',268435456)`),
     db.prepare(`INSERT INTO pdf_ocr_usage(period,reserved_pages,processed_pages,estimated_usd)
       VALUES ('2026-10',5,5,0.25),('2026-10-11',2,2,0.10),('2026-10-12',3,3,0.15)`),
+    db.prepare(`INSERT INTO pdf_ocr_budget(id,day,month,day_pages,month_pages) VALUES (1,?,?,3,5)`)
+      .bind(new Date(now).toISOString().slice(0,10),new Date(now).toISOString().slice(0,7)),
     db.prepare(`INSERT INTO artifact_objects(sha256,r2_key,byte_size,media_type,verified_at)
       VALUES (?,?,1,'application/octet-stream',?)`).bind(hashes.artifact,'objects/test',old),
     db.prepare(`INSERT INTO tasks(id,kind,business_key,source_id,article_id,payload_json,state,due_at,attempt_no,created_at,updated_at,last_error)
@@ -255,6 +268,8 @@ test('operations diagnostics links bounded business identities and redacts unsaf
     assert.equal(body.metrics.missingRequirements,1);
     assert.equal(body.metrics.paidVendorCalls,3);
     assert.equal(body.metrics.paidOcrPages,5);
+    assert.equal(body.metrics.ocrPagesToday,3);
+    assert.equal(body.metrics.ocrPagesThisMonth,5);
     assert.equal(body.metrics.authUnavailable,0);
     assert.equal(body.metrics.mailUnknown,1);
     assert.deepEqual(body.configuration,{
@@ -268,6 +283,48 @@ test('operations diagnostics links bounded business identities and redacts unsaf
     assert.ok(!serialized.includes('reader@example.test'),serialized);
     assert.ok(!serialized.includes('secret-token'),serialized);
     assert.ok(!serialized.includes('https://jwc.example.test'),serialized);
+  }finally{
+    await mf.dispose();
+  }
+});
+
+test('operations OCR metrics follow the current UTC budget period without rewriting it',async()=>{
+  const {mf,db}=await fixture();
+  const diagnostics=async()=>{
+    const response=await mf.dispatchFetch('https://feed.test/internal/operations/diagnostics',{
+      headers:{Authorization:'Bearer test-admin-token'},
+    });
+    assert.equal(response.status,200,await response.clone().text());
+    return (await response.json()).metrics;
+  };
+  const setClock=at=>mf.dispatchFetch('https://feed.test/fixture/clock',{
+    method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({at}),
+  });
+  try{
+    await setClock('2026-10-13T00:15:09Z');
+    await db.prepare(`INSERT INTO pdf_ocr_budget(id,day,month,day_pages,month_pages)
+      VALUES (1,'2026-10-12','2026-10',3,7)
+      ON CONFLICT(id) DO UPDATE SET day='2026-10-12',month='2026-10',day_pages=3,month_pages=7`).run();
+    let metrics=await diagnostics();
+    assert.equal(metrics.ocrPagesToday,0);
+    assert.equal(metrics.ocrPagesThisMonth,7);
+    assert.equal(metrics.paidOcrPages,5);
+
+    await setClock('2026-11-01T00:15:09Z');
+    await db.prepare(`UPDATE pdf_ocr_budget SET day='2026-10-31',month='2026-10',day_pages=3,month_pages=9`).run();
+    metrics=await diagnostics();
+    assert.equal(metrics.ocrPagesToday,0);
+    assert.equal(metrics.ocrPagesThisMonth,0);
+    assert.equal(metrics.paidOcrPages,5);
+
+    await db.prepare(`UPDATE pdf_ocr_budget SET day='2026-11-01',month='2026-11',day_pages=2,month_pages=4`).run();
+    metrics=await diagnostics();
+    assert.equal(metrics.ocrPagesToday,2);
+    assert.equal(metrics.ocrPagesThisMonth,4);
+    assert.equal(metrics.paidOcrPages,5);
+
+    const budget=await db.prepare('SELECT day,month,day_pages,month_pages FROM pdf_ocr_budget WHERE id=1').first();
+    assert.deepEqual(budget,{day:'2026-11-01',month:'2026-11',day_pages:2,month_pages:4});
   }finally{
     await mf.dispose();
   }

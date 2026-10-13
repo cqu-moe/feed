@@ -5,6 +5,7 @@ import {readFile} from 'node:fs/promises';
 import {build} from 'esbuild';
 import {Miniflare,convertV4MiniflareOptions} from 'miniflare';
 import {oauthProvider,login} from './helpers/oauth-provider.mjs';
+import {mixedPdf} from './helpers/mixed-pdf.mjs';
 
 const articleId='1234567890abcdef12345678';
 const articleUrl='https://jwc.cqu.edu.cn/info/1082/1.htm';
@@ -211,6 +212,181 @@ for(const pdfReadFailure of [false,true])test(`migration repair preserves origin
   }finally{await mf.dispose();}
 });
 
+test('an unchanged mixed body PDF recheck does not create a false update event',async()=>{
+  const {mf,auth,db,bucket,legacy}=await fixture({pageCount:2,mixed:true});
+  try{
+    const cookie=await login(mf,auth);
+    const admin=(path,body)=>mf.dispatchFetch('https://feed.test'+path,{
+      method:body?'POST':'GET',headers:{Authorization:'Bearer migration-admin','Content-Type':'application/json'},
+      ...(body?{body:JSON.stringify(body)}:{}),
+    });
+    const read=path=>mf.dispatchFetch('https://feed.test'+path,{headers:{Cookie:cookie}});
+    const submitted=await admin('/internal/archive-migration',{requestId:'mvp-mixed-recheck',batchSize:20});
+    const submittedText=await submitted.text(),submittedJson=JSON.parse(submittedText);
+    assert.equal(submitted.status,202,submittedText);
+    assert.equal(submittedJson.run.state,'succeeded',submittedText);
+    assert.equal((await(await admin('/internal/archive-migration')).json()).report.imported.contentEvents,1);
+
+    const events=async()=>(await(await admin('/internal/notification-events?limit=100')).json()).events;
+
+    const unchanged=await captureRecheck({mf,db,bucket,legacy,taskId:'abcdefabcdefabcdef123458',bodyText:'通知说明'});
+    const unchangedProgressResponse=await mf.dispatchFetch('https://feed.test/fixture/progress',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({revisionId:unchanged.revisionId}),
+    });
+    const unchangedProgressText=await unchangedProgressResponse.text();
+    assert.equal(unchangedProgressResponse.status,200,unchangedProgressText);
+    const unchangedProgress=JSON.parse(unchangedProgressText);
+    assert.deepEqual(unchangedProgress.revision,{state:'ready',changeKind:'presentation_only'});
+    let history=await(await read(`/api/articles/${articleId}/revisions`)).json();
+    assert.equal(history.revisions[0].changeKind,'presentation_only');
+    assert.equal(history.revisions[0].state,'ready');
+    assert.equal(history.revisions.length,2);
+    assert.deepEqual((await events()).map(event=>event.kind),['initial']);
+
+    const changed=await captureRecheck({mf,db,bucket,legacy,taskId:'abcdefabcdefabcdef123459',bodyText:'通知说明：申请截止日期已延期'});
+    const changedProgressResponse=await mf.dispatchFetch('https://feed.test/fixture/progress',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({revisionId:changed.revisionId}),
+    });
+    const changedProgressText=await changedProgressResponse.text();
+    assert.equal(changedProgressResponse.status,200,changedProgressText);
+    const changedProgress=JSON.parse(changedProgressText);
+    assert.deepEqual(changedProgress.revision,{state:'ready',changeKind:'substantive'});
+    history=await(await read(`/api/articles/${articleId}/revisions`)).json();
+    assert.equal(history.revisions[0].changeKind,'substantive');
+    assert.equal(history.revisions[0].state,'ready');
+    assert.equal(history.revisions.length,3);
+    assert.deepEqual((await events()).map(event=>event.kind),['update','initial']);
+  }finally{await mf.dispose();}
+});
+
+test('an old mixed saved capture replays without a false update event',async()=>{
+  const {mf,auth,db,bucket,legacy}=await fixture({pageCount:2,mixed:true,baselineNative:true});
+  const taskId='abcdefabcdefabcdef12345a';
+  try{
+    const cookie=await login(mf,auth);
+    const admin=(path,body)=>mf.dispatchFetch('https://feed.test'+path,{
+      method:body?'POST':'GET',headers:{Authorization:'Bearer migration-admin','Content-Type':'application/json'},
+      ...(body?{body:JSON.stringify(body)}:{}),
+    });
+    const read=path=>mf.dispatchFetch('https://feed.test'+path,{headers:{Cookie:cookie}});
+    const submitted=await admin('/internal/archive-migration',{requestId:'mvp-old-mixed-journal',batchSize:20});
+    assert.equal(submitted.status,202,await submitted.clone().text());
+    assert.equal((await(await admin('/internal/archive-migration')).json()).report.imported.contentEvents,1);
+
+    await mf.dispatchFetch('https://feed.test/fixture/fail-batch',{method:'POST'});
+    const interrupted=await captureRecheck({mf,db,bucket,legacy,taskId,bodyText:'通知说明'});
+    assert.equal(interrupted.deferred,true,JSON.stringify(interrupted));
+    const journalKey=`captures/${taskId}/result.json`,journal=await bucket.get(journalKey);
+    assert.ok(journal,'Saved capture journal is missing after the controlled interruption');
+    const savedCapture=await journal.json();
+    assert.ok(savedCapture.migrationSemanticFingerprint);
+    delete savedCapture.migrationSemanticFingerprint;
+    await bucket.put(journalKey,JSON.stringify(savedCapture),{httpMetadata:{contentType:'application/json'}});
+
+    const replay=await captureRecheck({mf,db,bucket,legacy,taskId,bodyText:'通知说明',createTask:false});
+    assert.ok(replay.revisionId,JSON.stringify(replay));
+    const progress=await(await mf.dispatchFetch('https://feed.test/fixture/progress',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({revisionId:replay.revisionId}),
+    })).json();
+    assert.deepEqual(progress.revision,{state:'ready',changeKind:'presentation_only'});
+    const history=await(await read(`/api/articles/${articleId}/revisions`)).json();
+    assert.equal(history.revisions[0].changeKind,'presentation_only');
+    assert.equal(history.revisions[0].state,'ready');
+    assert.equal(history.revisions.length,2);
+    assert.deepEqual((await(await admin('/internal/notification-events?limit=100')).json()).events.map(event=>event.kind),['initial']);
+  }finally{await mf.dispose();}
+});
+
+test('a native mixed baseline survives an interrupted original PDF read',async()=>{
+  const {mf,auth,db,bucket,legacy}=await fixture({pageCount:2,mixed:true,baselineNative:true});
+  try{
+    const cookie=await login(mf,auth);
+    const admin=(path,body)=>mf.dispatchFetch('https://feed.test'+path,{
+      method:body?'POST':'GET',headers:{Authorization:'Bearer migration-admin','Content-Type':'application/json'},
+      ...(body?{body:JSON.stringify(body)}:{}),
+    });
+    const read=path=>mf.dispatchFetch('https://feed.test'+path,{headers:{Cookie:cookie}});
+    const events=async()=>(await(await admin('/internal/notification-events?limit=100')).json()).events;
+    const submitted=await admin('/internal/archive-migration',{requestId:'mvp-native-read-interruption',batchSize:20});
+    assert.equal(submitted.status,202,await submitted.clone().text());
+    assert.equal((await(await admin('/internal/archive-migration')).json()).report.imported.contentEvents,1);
+
+    const unchanged=await captureRecheck({mf,db,bucket,legacy,taskId:'abcdefabcdefabcdef12345c',
+      bodyText:'通知说明',pdfReadFailure:true});
+    const progress=await(await mf.dispatchFetch('https://feed.test/fixture/progress',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({revisionId:unchanged.revisionId}),
+    })).json();
+    assert.deepEqual(progress.revision,{state:'ready',changeKind:'presentation_only'});
+    let history=await(await read(`/api/articles/${articleId}/revisions`)).json();
+    assert.equal(history.revisions.length,2);
+    assert.equal(history.revisions[0].state,'ready');
+    assert.deepEqual((await events()).map(event=>event.kind),['initial']);
+
+    const changedAttachment='%PDF-1.7\n后来替换的普通附件';
+    await bucket.put(legacy.keys.normal,changedAttachment,{httpMetadata:{contentType:'application/pdf'}});
+    const changed=await captureRecheck({mf,db,bucket,legacy,taskId:'abcdefabcdefabcdef12345d',
+      bodyText:'通知说明：申请截止日期已延期'});
+    const changedProgress=await(await mf.dispatchFetch('https://feed.test/fixture/progress',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({revisionId:changed.revisionId}),
+    })).json();
+    assert.deepEqual(changedProgress.revision,{state:'ready',changeKind:'substantive'});
+    history=await(await read(`/api/articles/${articleId}/revisions`)).json();
+    assert.equal(history.revisions.length,3);
+    assert.equal(history.revisions[0].state,'ready');
+    assert.deepEqual((await events()).map(event=>event.kind),['update','initial']);
+  }finally{await mf.dispose();}
+});
+
+test('an old journal with unavailable comparison evidence stays deferred and reusable',async()=>{
+  const {mf,auth,db,bucket,legacy}=await fixture({pageCount:2,mixed:true,baselineNative:true});
+  const taskId='abcdefabcdefabcdef12345b';
+  try{
+    const cookie=await login(mf,auth),read=path=>mf.dispatchFetch('https://feed.test'+path,{headers:{Cookie:cookie}});
+    const admin=path=>mf.dispatchFetch('https://feed.test'+path,{headers:{Authorization:'Bearer migration-admin'}});
+    const migration=await mf.dispatchFetch('https://feed.test/internal/archive-migration',{
+      method:'POST',headers:{Authorization:'Bearer migration-admin','Content-Type':'application/json'},
+      body:JSON.stringify({requestId:'mvp-deferred-journal',batchSize:20}),
+    });
+    assert.equal(migration.status,202,await migration.clone().text());
+    assert.equal((await(await admin('/internal/archive-migration')).json()).report.imported.contentEvents,1);
+
+    await mf.dispatchFetch('https://feed.test/fixture/fail-batch',{method:'POST'});
+    await captureRecheck({mf,db,bucket,legacy,taskId,bodyText:'通知说明'});
+    const journalKey=`captures/${taskId}/result.json`,journal=await bucket.get(journalKey);
+    assert.ok(journal);
+    const savedCapture=await journal.json(),sourceBodyHash=savedCapture.sourceBodyHash;
+    assert.ok(sourceBodyHash);
+    delete savedCapture.migrationSemanticFingerprint;
+    delete savedCapture.sourceBodyHash;
+    await bucket.put(journalKey,JSON.stringify(savedCapture),{httpMetadata:{contentType:'application/json'}});
+
+    const before=await(await mf.dispatchFetch('https://feed.test/fixture/capture-state')).json();
+    const deferred=await captureRecheck({mf,db,bucket,legacy,taskId,bodyText:'must not scrape',createTask:false});
+    assert.equal(deferred.deferred,true,JSON.stringify(deferred));
+    assert.match(deferred.error,/Saved raw body evidence is missing/i);
+    assert.equal((await(await mf.dispatchFetch('https://feed.test/fixture/capture-state')).json()).scrapeCalls,before.scrapeCalls);
+    const beforeHistory=await(await read(`/api/articles/${articleId}/revisions`)).json();
+    assert.equal(beforeHistory.revisions.length,1);
+    assert.equal(beforeHistory.revisions[0].state,'ready');
+    assert.deepEqual((await(await admin('/internal/notification-events?limit=100')).json()).events.map(event=>event.kind),['initial']);
+    assert.ok(await bucket.get(journalKey));
+
+    savedCapture.sourceBodyHash=sourceBodyHash;
+    await bucket.put(journalKey,JSON.stringify(savedCapture),{httpMetadata:{contentType:'application/json'}});
+    const replay=await captureRecheck({mf,db,bucket,legacy,taskId,bodyText:'must not scrape',createTask:false});
+    assert.ok(replay.revisionId,JSON.stringify(replay));
+    const progress=await(await mf.dispatchFetch('https://feed.test/fixture/progress',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({revisionId:replay.revisionId}),
+    })).json();
+    assert.deepEqual(progress.revision,{state:'ready',changeKind:'presentation_only'});
+    assert.equal((await(await mf.dispatchFetch('https://feed.test/fixture/capture-state')).json()).scrapeCalls,before.scrapeCalls);
+    assert.deepEqual((await(await admin('/internal/notification-events?limit=100')).json()).events.map(event=>event.kind),['initial']);
+    const afterHistory=await(await read(`/api/articles/${articleId}/revisions`)).json();
+    assert.equal(afterHistory.revisions.length,2);
+    assert.equal(afterHistory.revisions[0].state,'ready');
+  }finally{await mf.dispose();}
+});
+
 test('bounded migration batches resume concurrently and expose paged comparison evidence',async()=>{
   const {mf,auth,db,bucket,legacy}=await fixture();
   const secondId='2234567890abcdef12345678';
@@ -372,12 +548,15 @@ test('recovering a missing body PDF requires OCR and preserves unconfirmed migra
   }finally{await mf.dispose();}
 });
 
-async function fixture({pageCount=1,model='mistral-ocr-4-1',ocrRole='body-pdf',caption='',native=false}={}){
+async function fixture({pageCount=1,model='mistral-ocr-4-1',ocrRole='body-pdf',caption='',native=false,mixed=false,baselineNative=false}={}){
   const bundle=await build({stdin:{contents:`
     import worker from './worker/index.mjs';
     import {createArchive} from './worker/archive.mjs';
     import {createCollector} from './worker/collect.mjs';
+    import {processOcrTask} from './worker/archive-ocr.mjs';
+    import {finishOcrTask,handleFeedJobs} from './worker/task-runtime.mjs';
     let reads=true,failBatch=false;
+    globalThis.CAPTURE_SCRAPE_CALLS=0;
     export default{
       async fetch(request,raw){
         if(new URL(request.url).pathname==='/fixture/capture'){
@@ -392,10 +571,56 @@ async function fixture({pageCount=1,model='mistral-ocr-4-1',ocrRole='body-pdf',c
             };
             const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;
           }});
-          const collector=createCollector({scrape:async()=>({markdown:page.bodyText,metadata:{statusCode:200,creditsUsed:1},
-            actions:{javascriptReturns:[{value:JSON.stringify(page)}]}})});
-          return Response.json(await createArchive({...raw,ARCHIVE:archive},{collector}).captureTask(taskId,1));
+          const collector=createCollector({scrape:async()=>{
+            globalThis.CAPTURE_SCRAPE_CALLS++;
+            return {markdown:page.bodyText,metadata:{statusCode:200,creditsUsed:1},
+              actions:{javascriptReturns:[{value:JSON.stringify(page)}]}};
+          }});
+          const captureDb=failBatch?new Proxy(raw.DB,{get(target,key){
+            if(key==='batch')return async statements=>{
+              failBatch=false;
+              throw new Error('controlled capture commit interruption');
+            };
+            const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;
+          }}):raw.DB;
+          return Response.json(await createArchive({...raw,DB:captureDb,ARCHIVE:archive},{collector}).captureTask(taskId,1));
         }
+        if(new URL(request.url).pathname==='/fixture/progress'){
+          const {revisionId}=await request.json(),timestamp=Date.now();
+          const ocrTask=await raw.DB.prepare(\`SELECT t.id FROM tasks t
+            JOIN revision_requirements q ON q.kind='body_ocr'
+              AND q.input_hash=json_extract(t.payload_json,'$.inputHash')
+              AND q.processor=json_extract(t.payload_json,'$.processor')
+              AND q.processor_version=json_extract(t.payload_json,'$.processorVersion')
+              AND q.options_hash=json_extract(t.payload_json,'$.optionsHash')
+            WHERE q.revision_id=? AND t.kind='ocr' AND t.state='queued' LIMIT 1\`).bind(revisionId).first();
+          let ocr=null;
+          if(ocrTask){
+            await raw.DB.batch([
+              raw.DB.prepare("UPDATE tasks SET state='starting',updated_at=? WHERE id=? AND attempt_no=1 AND state='queued'")
+                .bind(timestamp,ocrTask.id),
+              raw.DB.prepare(\`INSERT INTO task_attempts(task_id,attempt_no,workflow_instance_id,state,started_at)
+                VALUES (?,1,?,'running',?) ON CONFLICT(task_id,attempt_no) DO UPDATE SET state='running'\`)
+                .bind(ocrTask.id,'task-'+ocrTask.id+'-a1',timestamp),
+            ]);
+            ocr=await processOcrTask(raw,ocrTask.id,1,{provider:async(_env,{model,pages})=>({
+              model,pages:pages.map(index=>({index,text:'扫描通知 资助名单',markdown:'扫描通知 资助名单',tables:[]})),
+              usageInfo:{pages_processed:pages.length,doc_size_bytes:1},estimatedUsd:0,
+            })});
+            await finishOcrTask(raw,ocrTask.id,1,ocr);
+          }
+          const checks=await raw.DB.prepare(\`SELECT payload_json FROM outbox
+            WHERE topic='feed-events' AND state='queued' AND json_extract(payload_json,'$.revisionId')=? ORDER BY created_at,id\`).bind(revisionId).all();
+          const results=[];
+          for(const row of checks.results){
+            const body=JSON.parse(row.payload_json);
+            await handleFeedJobs({messages:[{body,attempt:1,ack(){},retry(){throw new Error('check-ready retried');}}]},raw);
+            results.push(body);
+          }
+          const revision=await raw.DB.prepare('SELECT state,change_kind AS changeKind FROM article_revisions WHERE id=?').bind(revisionId).first();
+          return Response.json({ocr,checks:results,revision});
+        }
+        if(new URL(request.url).pathname==='/fixture/capture-state')return Response.json({scrapeCalls:globalThis.CAPTURE_SCRAPE_CALLS});
         if(new URL(request.url).pathname==='/fixture/read-switch'&&request.method==='POST'){
           reads=await request.text()==='true';return new Response(String(reads));
         }
@@ -421,20 +646,44 @@ async function fixture({pageCount=1,model='mistral-ocr-4-1',ocrRole='body-pdf',c
       TASK_RUNTIME_ENABLED:'true',ARCHIVE_VERSIONS_ENABLED:'true',PDF_OCR_ENABLED:'false',PDF_OCR_MODEL:'mistral-ocr-4-1'}}));
   const db=await mf.getD1Database('DB'),bucket=await mf.getR2Bucket('ARCHIVE');
   try{
-    for(const name of ['0001_feed.sql','0002_auth.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql','0007_archive_versions.sql','0008_content_events.sql','0009_subscriptions.sql','0010_subscription_editing.sql','0011_archive_migration.sql']){
+    for(const name of ['0001_feed.sql','0002_auth.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql','0007_archive_versions.sql','0008_content_events.sql','0009_subscriptions.sql','0010_subscription_editing.sql','0011_archive_migration.sql','0013_notification_matching.sql']){
       await applyMigration(db,await readFile('migrations/'+name,'utf8'));
     }
-    const legacy=await seedLegacyArchive({db,bucket,pageCount,model,ocrRole,caption,native});
+    const legacy=await seedLegacyArchive({db,bucket,pageCount,model,ocrRole,caption,native,mixed,baselineNative});
     return {mf,auth,db,bucket,legacy};
   }catch(error){
     await mf.dispose();throw error;
   }
 }
 
-async function seedLegacyArchive({db,bucket,pageCount=1,model='mistral-ocr-4-1',ocrRole='body-pdf',caption='',native=false}){
-  const pdf=scannedPdf(pageCount,caption),normalAttachment='%PDF-1.7\n普通附件';
+async function captureRecheck({mf,db,bucket,legacy,taskId,bodyText,pdfReadFailure=false,createTask=true}){
+  const clock=Date.now();
+  if(createTask){
+    await db.prepare(`INSERT INTO tasks(id,kind,business_key,source_id,article_id,payload_json,state,due_at,attempt_no,created_at,updated_at)
+      VALUES (?,'capture',?,'jwc',?,'{}','running',?,1,?,?)`)
+      .bind(taskId,taskId,articleId,clock,clock,clock).run();
+    await db.prepare(`INSERT INTO task_attempts(task_id,attempt_no,workflow_instance_id,state,started_at)
+      VALUES (?,1,?,'running',?)`).bind(taskId,taskId,clock).run();
+  }
+  const files=[{filename:'attachment-1.pdf',key:legacy.keys.pdf,url:'https://jwc.cqu.edu.cn/body.pdf',name:'正文.pdf',role:'body-pdf'},
+    {filename:'attachment-2.pdf',key:legacy.keys.normal,url:'https://jwc.cqu.edu.cn/normal.pdf',name:'普通附件.pdf',role:'attachment'}];
+  const snapshot=await(await bucket.get(legacy.keys.snapshot)).text();
+  const artifacts=await Promise.all(files.map(async file=>({name:file.filename,contentType:'application/pdf',
+    base64:Buffer.from(await(await bucket.get(file.key)).arrayBuffer()).toString('base64')})));
+  artifacts.push({name:'offline.html',contentType:'text/html',base64:Buffer.from(snapshot).toString('base64')});
+  const response=await mf.dispatchFetch('https://feed.test/fixture/capture',{method:'POST',body:JSON.stringify({taskId,pdfReadFailure,
+    page:{bodyRecognized:true,page:{url:articleUrl,title:'迁移通知'},bodyText,errors:[],artifacts,
+      attachmentCandidates:files.map(file=>({url:file.url,name:file.name,role:file.role})),
+      downloads:files.map(file=>({url:file.url,role:file.role,kind:'pdf',originalFile:true,saved:{name:file.filename},fetchedAt:new Date(clock).toISOString()}))}})});
+  assert.equal(response.status,200,await response.clone().text());
+  return response.json();
+}
+
+async function seedLegacyArchive({db,bucket,pageCount=1,model='mistral-ocr-4-1',ocrRole='body-pdf',caption='',native=false,mixed=false,baselineNative=false}){
+  const pdf=mixed?mixedPdf():scannedPdf(pageCount,caption),normalAttachment='%PDF-1.7\n普通附件';
   const pdfHash=sha256(pdf),normalHash=sha256(normalAttachment);
-  const body='通知说明\n\nPDF 正文暂未提取到可搜索文字；可在下方阅读原文件。';
+  const body=mixed&&baselineNative?'通知说明\n\nCQU mixed notice first page'
+    :'通知说明\n\nPDF 正文暂未提取到可搜索文字；可在下方阅读原文件。';
   const snapshot=`<html><body><main><h1>迁移通知</h1><p>通知说明</p><iframe data-feed-pdf="attachment-1.pdf" src="https://jwc.cqu.edu.cn/old.pdf" width="700"></iframe></main><script>alert(1)</script></body></html>`;
   const keys={
     body:`${prefix}/body.txt`,snapshot:`${prefix}/offline.html`,
@@ -447,7 +696,10 @@ async function seedLegacyArchive({db,bucket,pageCount=1,model='mistral-ocr-4-1',
   await bucket.put(keys.normal,new TextEncoder().encode(normalAttachment),{httpMetadata:{contentType:'application/pdf'}});
   const text=native?caption:'扫描通知 资助名单';
   const ocrResult={sourceHash:pdfHash,model,totalPages:pageCount,
-    pages:Array.from({length:pageCount},(_,index)=>({index,text,markdown:text,source:native?'native':'ocr'})),createdAt:'2026-10-10T08:00:00Z'};
+    pages:mixed?[{index:0,text:'CQU mixed notice first page',markdown:'CQU mixed notice first page',source:'native'},
+        {index:1,text,markdown:text,source:'ocr'}]
+      :Array.from({length:pageCount},(_,index)=>({index,text,markdown:text,source:native?'native':'ocr'})),
+    createdAt:'2026-10-10T08:00:00Z'};
   await bucket.put(keys.ocr,new TextEncoder().encode(JSON.stringify(ocrResult)),{httpMetadata:{contentType:'application/json'}});
   const now=Date.parse('2026-10-10T09:00:00Z');
   await db.prepare(`INSERT INTO articles(id,source_id,url,title,published_at,discovered_at,captured_at,status,attempts,body_text,excerpt,prefix,content_hash,attachment_count,snapshot_key,ocr_result_key,ocr_model,ocr_updated_at)
@@ -459,7 +711,7 @@ async function seedLegacyArchive({db,bucket,pageCount=1,model='mistral-ocr-4-1',
     .bind(articleId,keys.pdf,Buffer.byteLength(pdf),'application/pdf',pdfHash,ocrRole,articleId,keys.normal,Buffer.byteLength(normalAttachment),'application/pdf',normalHash).run();
   await db.prepare(`INSERT INTO pdf_ocr_jobs(id,article_id,attachment_id,source_hash,source_key,filename,model,status,attempts,total_pages,ocr_pages,result_key,created_at,updated_at)
     VALUES ('legacy-ocr-1',?,'legacy-file-1',?,?,?,?, 'complete',1,?,?,?, ?,?)`)
-    .bind(articleId,pdfHash,keys.pdf,'attachment-1.pdf',model,pageCount,native?0:pageCount,keys.ocr,now,now).run();
+    .bind(articleId,pdfHash,keys.pdf,'attachment-1.pdf',model,pageCount,mixed?1:native?0:pageCount,keys.ocr,now,now).run();
   await db.prepare(`INSERT INTO article_sources(article_id,source_id,first_seen_at,last_seen_at,discovery_class,published_at,published_day,date_precision,source_timezone)
     VALUES (?,'jwc',?,?,?,?,?,'unknown','Asia/Shanghai')`)
     .bind(articleId,Date.parse('2026-10-09T08:00:00Z'),Date.parse('2026-10-10T09:00:00Z'),'migrated',null,null).run();
