@@ -1,6 +1,6 @@
 # 正式版隔离验收（T17）
 
-日期：2026-10-13，Asia/Shanghai。此页记录真实隔离环境；历史 MVP 证据见 [acceptance.md](acceptance.md)。T17 尚未完成，T18 生产灰度尚未授权或执行。
+日期：2026-10-13，Asia/Shanghai。此页记录真实隔离环境；历史 MVP 证据见 [acceptance.md](acceptance.md)。T17 真实20:00摘要仍待完成；用户已于同日授权直接正式上线，T18执行进度见 [正式发布记录](release-production.md)。
 
 ## 范围与资源
 
@@ -95,10 +95,10 @@ Cloudflare只读Analytics快照于02:40–02:52取得；账户累计从2026-10-0
 - 2026-10-13北京时间20:00的真实定时摘要及收件核对。目前实际摘要准备入口prepared0，符合未到窗口；有1条新通知候选和1条邮箱恢复积压，预期合并一封且不重复之前已送达版本。
 - 今晚摘要后补齐增量用量。Cloudflare当前计量已核对，最终美元账单尚未出；不需要等整月出账才推进验收，但不能捏造最终金额。
 - 两栏目、三通知、一个账号的演练不证明大规模吞吐；容量、生产预算与正式默认额度仍待确定。
-- T18生产备份/迁移比对、正式凭据、灰度范围、预算及上线授权。详见 [production-rollout.md](production-rollout.md)。
+- T18生产迁移比对、正式凭据、范围与预算的实际执行验收。上线已获授权，详见 [production-rollout.md](production-rollout.md)。
 
 T17 [#18](https://github.com/cqu-moe/feed/issues/18) 与 T18 [#19](https://github.com/cqu-moe/feed/issues/19) 保持打开。原始收据位于集成worktree的Git忽略目录 `.private/t17-receipts/`；私有RSS、凭据和会话不进入Git或Issue。
 
 ## 等待20:00的运行状态
 
-上述最新隔离部署启用正常每5分钟邮件恢复Cron，MAIL开启；CRAWL、TASK_RUNTIME、PDF_OCR均关闭。Cloudflare负责在真实20:00窗口准备和发送摘要；不是在本机改时钟触发。09:06回读仍只有此前2封已送达邮件。本会话20:10自动跟进提醒`feed-key`会核对真实收件、更新证据、关闭隔离Cron/邮件，并在Resend临时Key用完后提醒撤销。用户要求已写入提醒：独立复核和真实摘要两道门槛都通过后，再用内置提问工具提交具体正式上线方案确认；此前不操作生产。完成后暂停提醒。
+上述最新隔离部署启用正常每5分钟邮件恢复Cron，MAIL开启；CRAWL、TASK_RUNTIME、PDF_OCR均关闭。Cloudflare负责在真实20:00窗口准备和发送摘要；不是在本机改时钟触发。09:06回读仍只有此前2封已送达邮件。本会话20:10自动跟进提醒`feed-key`会核对真实收件、更新证据、关闭隔离Cron/邮件，并在Resend临时Key用完后提醒撤销。用户后续已授权直接正式上线，提醒已更新为每日正式监控并补齐T17真实摘要，不再重复请求上线批准。T17完成后停隔离任务并提醒撤销临时Key，继续生产监控。
