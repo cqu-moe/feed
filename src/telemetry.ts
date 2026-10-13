@@ -5,7 +5,7 @@ type EventLike = {
   properties: Record<string, unknown>;
 };
 
-type PostHogClient = typeof import('posthog-js')['default'];
+type PostHogClient = typeof import('posthog-js/dist/module.no-external')['default'];
 type DeferredCapture = { event: FeedEvent; properties: Record<string, unknown> };
 
 export type FeedEvent =
@@ -205,7 +205,10 @@ export function initFeedTelemetry(): Promise<boolean> {
 
   initialization = (async (): Promise<boolean> => {
     try {
-      const { default: loadedPostHog } = await import('posthog-js');
+      const [{ default: loadedPostHog }] = await Promise.all([
+        import('posthog-js/dist/module.no-external'),
+        import('posthog-js/dist/posthog-recorder'),
+      ]);
       loadedPostHog.init(token, {
         api_host: host,
         asset_host: host,
@@ -224,7 +227,7 @@ export function initFeedTelemetry(): Promise<boolean> {
         logs: { captureConsoleLogs: false },
         disable_surveys: true,
         disable_product_tours: true,
-        advanced_disable_flags: true,
+        advanced_disable_feature_flags: true,
         advanced_disable_toolbar_metrics: true,
         disable_session_recording: true,
         session_recording: {
