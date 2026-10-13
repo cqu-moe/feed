@@ -12,6 +12,7 @@ import {createArchive} from './archive.mjs';
 import {createSources} from './sources.mjs';
 import {createTaskRuntime,handleFeedJobs} from './task-runtime.mjs';
 import {createArchiveRecheck} from './archive-recheck.mjs';
+import {captureFeedPipelineSummaries} from './telemetry.mjs';
 export {FeedIngest} from './workflow.mjs';
 export {PdfOcrWorkflow} from './pdf-ocr.mjs';
 export {CaptureWorkflow} from './capture-workflow.mjs';
@@ -30,26 +31,27 @@ export default {
       jobs.push(sources.scheduleDue());
       if(env.ARCHIVE_VERSIONS_ENABLED==='true')jobs.push(createArchiveRecheck(env).scheduleDue());
       jobs.push(createTaskRuntime(env).recover());
+      jobs.push(captureFeedPipelineSummaries(env,ctx).catch(()=>{}));
     }
     if(controller.cron==='*/5 * * * *'&&(env.MAIL_ENABLED==='true'||env.RESEND_WEBHOOK_SECRET)){
-      jobs.push(createMail(env).recover().then(()=>createTaskRuntime(env).dispatchDueOutbox()));
+      jobs.push(createMail(env,{lifecycle:ctx}).recover().then(()=>createTaskRuntime(env).dispatchDueOutbox()));
     }
     ctx.waitUntil(Promise.all(jobs));
   },
-  async queue(batch,env){await handleFeedJobs(batch,env);},
-  async fetch(request,env){
+  async queue(batch,env,ctx){await handleFeedJobs(batch,env,{lifecycle:ctx});},
+  async fetch(request,env,ctx){
     const url=new URL(request.url);
     try{
       if(url.pathname==='/health')return json({ok:true,service:'cqu-feed'});
       if(url.pathname==='/webhooks/resend'){
         if(request.method!=='POST')return json({error:'Method not allowed'},405);
-        try{return json(await createMail(env).receiveWebhook(request));}
+        try{return json(await createMail(env,{lifecycle:ctx}).receiveWebhook(request));}
         catch(error){return json({error:'Mail webhook could not be accepted'},error.status??503);}
       }
       const rss=await rssRoute(request,env);if(rss)return rss;
       const bridge=await bridgeRoute(request,env);if(bridge)return bridge;
       if(url.pathname.startsWith('/internal/')){
-        return await internalRoute(request,env);
+        return await internalRoute(request,env,ctx);
       }
       const auth=await authRoute(request,env);if(auth)return auth;
       if(url.pathname.startsWith('/api/')){
@@ -65,7 +67,7 @@ export default {
       if(headers.get('Content-Type')?.includes('text/html')){
         const hash=Buffer.from(await crypto.subtle.digest('SHA-256',encoder.encode(themeInitScript))).toString('base64');
         const reader=url.pathname.startsWith('/reader/');
-        headers.set('Content-Security-Policy',`default-src 'self'; script-src 'self' 'sha256-${hash}'${reader?" 'wasm-unsafe-eval'":''}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; worker-src 'self'; frame-ancestors ${reader?"'self'":"'none'"}`);
+        headers.set('Content-Security-Policy',`default-src 'self'; script-src 'self' https://p.cqu.moe 'sha256-${hash}'${reader?" 'wasm-unsafe-eval'":''}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://p.cqu.moe; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; worker-src 'self'; frame-ancestors ${reader?"'self'":"'none'"}`);
         headers.set('Cache-Control','no-cache');
       }
       headers.set('Referrer-Policy','strict-origin-when-cross-origin');headers.set('X-Content-Type-Options','nosniff');

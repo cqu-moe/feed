@@ -2,8 +2,9 @@ import {sha} from './utils.mjs';
 import {readingExcerpt} from './reading.mjs';
 import {storeTextObject,verifyObject} from './archive-objects.mjs';
 import {aggregateOcrProjection,applyOcrEntries} from './archive-ocr-view.mjs';
+import {captureFeedWorkerEvent} from './telemetry.mjs';
 
-export async function reconcileRevision(env,revisionId){
+export async function reconcileRevision(env,revisionId,lifecycle){
   if(!/^[a-f0-9]{24}$/.test(revisionId??''))throw new Error('Invalid revision id');
   const revision=await env.DB.prepare(`SELECT r.*,a.source_id AS primary_source_id
     FROM article_revisions r JOIN articles a ON a.id=r.article_id WHERE r.id=?`).bind(revisionId).first();
@@ -130,6 +131,14 @@ export async function reconcileRevision(env,revisionId){
     throw new Error('Revision requirements changed before readiness commit');
   }
   const event=await env.DB.prepare('SELECT id FROM content_events WHERE revision_id=?').bind(revisionId).first();
+  captureFeedWorkerEvent(env,lifecycle,'feed_revision_ready',`feed_revision:${revisionId}`,{
+    trigger:'automatic',operation:'archive_revision',flow:'collection',stage:'ready',outcome:'success',
+    operation_id:revisionId,attempt_id:`${revision.capture_task_id}:ready`,revision_id:revisionId,
+    event_id:event?.id??null,capture_intent:captureIntent??'unknown',history_only:historyOnly,
+    event_created:Boolean(event),source_count:sources.length,requirement_count:requirements.results.length,
+    end_to_end_duration_ms:Math.max(0,timestamp-revision.observed_at),
+    duration_basis:'observed_to_ready_commit',
+  });
   return {state:'ready',eventCreated:Boolean(event)};
 }
 

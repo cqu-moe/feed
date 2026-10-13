@@ -17,6 +17,7 @@ function isGlobalLimitError(message){
 
 export function createArchive(env,{
   collector=createCollector(),
+  lifecycle,
 }={}){
   return {
     async captureTask(taskId,attemptNo){
@@ -70,7 +71,7 @@ export function createArchive(env,{
       return enqueuePdfOcr(env,articleId,options);
     },
     reconcileRevision(revisionId){
-      return reconcileRevision(env,revisionId);
+      return reconcileRevision(env,revisionId,lifecycle);
     },
     resumeExtract(){
       if(env.ARCHIVE_VERSIONS_ENABLED==='true')return createTaskRuntime(env).recover();

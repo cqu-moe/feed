@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState } from 'react';
+import { lazy, Suspense, useLayoutEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   createBrowserRouter,
@@ -8,6 +8,7 @@ import {
   Outlet,
   redirect,
   RouterProvider,
+  useLocation,
   useLoaderData,
   useNavigate,
   useRouteError,
@@ -31,6 +32,13 @@ import { AccessPage, AccountPage, ArticleDetailPage, ArticlesPage, LoginPage, So
 import { AdminTasksPage } from './admin-tasks';
 import { AdminSourcesPage } from './admin-sources';
 import { SubscriptionsPage } from './subscriptions';
+import {
+  initFeedTelemetry,
+  markFeedSessionReady,
+  resetFeedTelemetryIdentity,
+  syncFeedIdentity,
+  syncFeedReplay,
+} from './telemetry';
 import '@cqu-moe/theme/styles.css';
 import '@cqu-moe/ui/styles.css';
 import './styles.css';
@@ -39,17 +47,28 @@ const PdfReader = lazy(() => import('./pdf-reader'));
 
 type RootLoader = { session: Session };
 
+function confirmSession(session: Session, startedAt: number): void {
+  syncFeedIdentity(session.authenticated ? session.user?.id ?? null : null);
+  if (session.authenticated) {
+    markFeedSessionReady(session.entitled, Math.max(0, Math.round(performance.now() - startedAt)));
+  }
+}
+
 async function loadAuthenticatedSession(): Promise<RootLoader> {
+  const startedAt = performance.now();
   const result = await requestJson('/api/session', parseSession);
   if (!result.ok) throw new Response(null, { status: result.status });
   if (!result.data.authenticated) throw redirect('/login');
+  confirmSession(result.data, startedAt);
   return { session: result.data };
 }
 
 async function loadProtectedSession(): Promise<RootLoader> {
+  const startedAt = performance.now();
   const result = await requestJson('/api/session', parseSession);
   if (!result.ok) throw new Response(null, { status: result.status });
   if (!result.data.authenticated) throw redirect('/login');
+  confirmSession(result.data, startedAt);
   if (!result.data.entitled) {
     const current = window.location.pathname + window.location.search;
     throw redirect(`/access?returnTo=${encodeURIComponent(current)}`);
@@ -58,17 +77,21 @@ async function loadProtectedSession(): Promise<RootLoader> {
 }
 
 async function loadLogin() {
+  const startedAt = performance.now();
   const result = await requestJson('/api/session', parseSession);
   if (!result.ok) return null;
   if (!result.data.authenticated) return null;
+  confirmSession(result.data, startedAt);
   if (!result.data.entitled) throw redirect('/account');
   throw redirect('/');
 }
 
 async function loadAccess() {
+  const startedAt = performance.now();
   const result = await requestJson('/api/session', parseSession);
   if (!result.ok) throw new Response(null, { status: result.status });
   if (!result.data.authenticated) throw redirect('/login');
+  confirmSession(result.data, startedAt);
   if (result.data.entitled) {
     throw redirect(safeNext(new URL(window.location.href).searchParams.get('returnTo')));
   }
@@ -89,6 +112,7 @@ function Layout() {
       toast.error('退出失败，请稍后重试。');
       return;
     }
+    resetFeedTelemetryIdentity();
     navigate('/login', { replace: true });
   }
 
@@ -122,11 +146,20 @@ function Layout() {
         </>
       }
     >
+      <TelemetryRoute />
       <ContentContainer width="standard">
         <Outlet />
       </ContentContainer>
     </AppShell>
   );
+}
+
+function TelemetryRoute() {
+  const location = useLocation();
+  useLayoutEffect(() => {
+    syncFeedReplay(location);
+  }, [location]);
+  return null;
 }
 
 function RouteError() {
@@ -178,31 +211,31 @@ function NotFound() {
 }
 
 const router = createBrowserRouter([
-  { path: '/admin/tasks', element: <AdminTasksPage />, errorElement: <RouteError /> },
-  { path: '/admin/sources', element: <AdminSourcesPage />, errorElement: <RouteError /> },
+  { path: '/admin/tasks', element: <><TelemetryRoute /><AdminTasksPage /></>, errorElement: <><TelemetryRoute /><RouteError /></> },
+  { path: '/admin/sources', element: <><TelemetryRoute /><AdminSourcesPage /></>, errorElement: <><TelemetryRoute /><RouteError /></> },
   {
     path: '/reader/:articleId/revisions/:revisionId/:filename',
     loader: loadProtectedSession,
-    element: <Suspense fallback={<p role="status">正在加载 PDF 阅读器…</p>}><PdfReader /></Suspense>,
-    errorElement: <RouteError />,
+    element: <><TelemetryRoute /><Suspense fallback={<p role="status">正在加载 PDF 阅读器…</p>}><PdfReader /></Suspense></>,
+    errorElement: <><TelemetryRoute /><RouteError /></>,
   },
   {
     path: '/reader/:id/:filename',
     loader: loadProtectedSession,
-    element: <Suspense fallback={<p role="status">正在加载 PDF 阅读器…</p>}><PdfReader /></Suspense>,
-    errorElement: <RouteError />,
+    element: <><TelemetryRoute /><Suspense fallback={<p role="status">正在加载 PDF 阅读器…</p>}><PdfReader /></Suspense></>,
+    errorElement: <><TelemetryRoute /><RouteError /></>,
   },
   {
     path: '/login',
     loader: loadLogin,
-    element: <LoginPage />,
-    errorElement: <LoginPage />,
+    element: <><TelemetryRoute /><LoginPage /></>,
+    errorElement: <><TelemetryRoute /><LoginPage /></>,
   },
   {
     path: '/access',
     loader: loadAccess,
-    element: <AccessPage />,
-    errorElement: <AccessDeniedState />,
+    element: <><TelemetryRoute /><AccessPage /></>,
+    errorElement: <><TelemetryRoute /><AccessDeniedState /></>,
   },
   {
     path: '/',
@@ -220,6 +253,8 @@ const router = createBrowserRouter([
     ],
   },
 ]);
+
+void initFeedTelemetry();
 
 createRoot(document.getElementById('root')!).render(
   <ThemeProvider>

@@ -9,6 +9,28 @@ const policyOrigin = 'https://policy.test';
 export const staticSiteId = '7fd03676e5751e9b6dd95ecb';
 export const sharedArticleUrl = 'https://jwc.cqu.edu.cn/info/2026/1.htm';
 
+const telemetryStubPlugin = {
+  name: 'feed-telemetry-stub',
+  setup(buildApi) {
+    buildApi.onResolve({ filter: /(^|\/)telemetry\.mjs$/ }, () => ({
+      path: 'feed-telemetry-stub',
+      namespace: 'feed-telemetry-stub',
+    }));
+    buildApi.onLoad({ filter: /.*/, namespace: 'feed-telemetry-stub' }, () => ({
+      loader: 'js',
+      contents: `
+        const calls=[];
+        globalThis.FEED_TELEMETRY_EVENTS=calls;
+        globalThis.FEED_TELEMETRY_STUB_LOADED=true;
+        export function captureFeedWorkerEvent(_env,_lifecycle,event,distinctId,properties={}) {
+          calls.push({event,distinctId,properties});
+        }
+        export async function captureFeedPipelineSummaries() {}
+      `,
+    }));
+  },
+};
+
 const recheckWorkersPlugin = {
   name: 'recheck-workers-stub',
   setup(buildApi) {
@@ -59,7 +81,16 @@ const recheckFirecrawlPlugin = {
   },
 };
 
-export async function subscriptionsFixture({ editingMigration = true, clock, notificationPageSize, mailHarness, recheckMigration = false, recheckHarness = false, recheckVars = {} } = {}) {
+export async function subscriptionsFixture({
+  editingMigration = true,
+  clock,
+  notificationPageSize,
+  mailHarness,
+  telemetryHarness = false,
+  recheckMigration = false,
+  recheckHarness = false,
+  recheckVars = {},
+} = {}) {
   const app = await build({
     stdin: { contents: `
       import worker from './worker/index.mjs';
@@ -147,6 +178,10 @@ export async function subscriptionsFixture({ editingMigration = true, clock, not
           return Response.json(result);
         }
         if(new URL(request.url).pathname==='/__test/errors')return Response.json(workerErrors);
+        if(new URL(request.url).pathname==='/__test/telemetry')return Response.json({
+          loaded:globalThis.FEED_TELEMETRY_STUB_LOADED===true,
+          events:globalThis.FEED_TELEMETRY_EVENTS??[],
+        });
         if(new URL(request.url).pathname==='/__test/rss-failure'){
           const {url}=await request.json();
           return worker.fetch(new Request(url,{method:'GET'}),{...env,BASE_URL:'https://feed.test/#not-canonical'});
@@ -165,7 +200,10 @@ export async function subscriptionsFixture({ editingMigration = true, clock, not
     format: 'esm',
     platform: 'browser',
     external: ['node:buffer', 'node:*', 'cloudflare:workers'],
-    plugins: recheckHarness ? [recheckWorkersPlugin, recheckFirecrawlPlugin] : [],
+    plugins: [
+      ...(telemetryHarness ? [telemetryStubPlugin] : []),
+      ...(recheckHarness ? [recheckWorkersPlugin, recheckFirecrawlPlugin] : []),
+    ],
   });
   const policy = await build({
     stdin: {

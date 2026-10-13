@@ -19,7 +19,7 @@ export class MigrationValidationError extends Error{}
 export class MigrationConflictError extends Error{}
 export class MigrationNotFoundError extends Error{}
 
-export function createArchiveMigration(env,{now=()=>Date.now()}={}){
+export function createArchiveMigration(env,{now=()=>Date.now(),lifecycle}={}){
   return {
     async submit({requestId,batchSize=20}={}){
       validateRequest({requestId,batchSize});
@@ -507,7 +507,7 @@ export function createArchiveMigration(env,{now=()=>Date.now()}={}){
       .bind(RUN_ID,articleId).first();
     if(!record?.revision_id)throw new MigrationNotFoundError('Imported revision is missing');
     if(!['imported','failed'].includes(record.state))return record.state;
-    const result=await reconcileRevision(env,record.revision_id);
+    const result=await reconcileRevision(env,record.revision_id,lifecycle);
     if(result.notFound)throw new MigrationNotFoundError('Imported revision is missing');
     const state=result.state==='ready'?'ready':'blocked';
     const comparison=await refreshComparison(articleId,record.revision_id,state);
@@ -701,7 +701,7 @@ export function createArchiveMigration(env,{now=()=>Date.now()}={}){
       await env.DB.prepare(`UPDATE article_revisions SET state='assembling',semantic_fingerprint=? WHERE id=? AND state='blocked'
         AND NOT EXISTS(SELECT 1 FROM revision_requirements q WHERE q.revision_id=article_revisions.id AND q.required=1 AND q.state<>'fulfilled')`)
         .bind(semanticFingerprint,context.revision_id).run();
-      const result=await reconcileRevision(env,context.revision_id);
+      const result=await reconcileRevision(env,context.revision_id,lifecycle);
       state=result.state==='ready'?'ready':'blocked';
     }
     const nextDifferences=[...new Map([...parseJson(context.differences_json,[]),...differences]

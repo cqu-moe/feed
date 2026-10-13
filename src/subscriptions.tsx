@@ -22,12 +22,14 @@ import {
   parseSubscriptionChange,
   parseSubscriptionList,
   requestJson,
+  type ApiResult,
   type Subscription,
   type SubscriptionCreateResponse,
   type SubscriptionList,
 } from './api';
 import { LoginRequiredState, RetryButton, formatDateTime } from './components';
 import { SubscriptionActivity } from './subscription-activity';
+import { captureFeedEvent } from './telemetry';
 
 type ListState =
   | { kind: 'loading' }
@@ -103,6 +105,56 @@ type EditDraft = Pick<Subscription, 'name' | 'emailMode' | 'requestedEnabled' | 
   sourceIds: string[];
 };
 type Mutation = { path: string; method: string; body: Record<string, unknown> };
+type SubscriptionMutationData = {
+  created?: boolean;
+  changed?: boolean;
+  subscription: Subscription;
+};
+type SubscriptionOperation = 'create' | 'update' | 'delete' | 'restore' | 'rss_rotate' | 'rss_revoke';
+
+function subscriptionOperation(mutation: Mutation): SubscriptionOperation {
+  if (mutation.method === 'DELETE') return 'delete';
+  if (mutation.path.endsWith('/restore')) return 'restore';
+  if (mutation.path.endsWith('/rss/rotate')) return 'rss_rotate';
+  if (mutation.path.endsWith('/rss/revoke')) return 'rss_revoke';
+  return 'update';
+}
+
+function captureSubscriptionResult(
+  operation: SubscriptionOperation,
+  requestId: string,
+  startedAt: number,
+  attemptId: string,
+  result: ApiResult<SubscriptionMutationData>,
+  subscriptionId: string | null,
+): void {
+  const properties = result.ok
+    ? {
+      operation,
+      flow: 'subscription',
+      stage: 'finished',
+      outcome: 'success',
+      operation_id: requestId,
+      attempt_id: attemptId,
+      subscription_id: result.data.subscription.id,
+      no_op: !result.data.changed,
+      duration_ms: Math.max(0, Math.round(performance.now() - startedAt)),
+      duration_basis: 'subscription_attempt_request_to_authoritative_response',
+    }
+    : {
+      operation,
+      flow: 'subscription',
+      stage: 'finished',
+      outcome: 'failure',
+      operation_id: requestId,
+      attempt_id: attemptId,
+      error_code: result.status === 0 ? 'network_failed' : `http_${result.status}`,
+      ...(subscriptionId ? { subscription_id: subscriptionId } : {}),
+      duration_ms: Math.max(0, Math.round(performance.now() - startedAt)),
+      duration_basis: 'subscription_attempt_request_to_authoritative_response',
+    };
+  captureFeedEvent('feed_subscription_finished', properties);
+}
 
 function SubscriptionCard({ subscription, data, onChanged }: {
   subscription: Subscription; data: SubscriptionList; onChanged: () => Promise<void>;
@@ -145,11 +197,14 @@ function SubscriptionCard({ subscription, data, onChanged }: {
   }
   async function run(mutation: Mutation) {
     if (busy.current) return;
+    const startedAt = performance.now();
+    const attemptId = crypto.randomUUID();
     busy.current = true; setPending(mutation); setSave('loading'); setError(null); setMessage(null);
     const result = await requestJson(mutation.path, parseSubscriptionChange, {
       method: mutation.method, body: JSON.stringify(mutation.body),
     });
     busy.current = false;
+    captureSubscriptionResult(subscriptionOperation(mutation), String(mutation.body.requestId), startedAt, attemptId, result, subscription.id);
     if (!result.ok) {
       setSave('error'); setError(result.message);
       if (result.status >= 400 && result.status < 500) setPending(null);
@@ -329,6 +384,8 @@ export function SubscriptionsPage() {
     saving.current = true;
     setSaveState('loading');
     setSaveError(null);
+    const startedAt = performance.now();
+    const attemptId = crypto.randomUUID();
     const result = await requestJson('/api/subscriptions', parseSubscriptionCreate, {
       method: 'POST',
       body: JSON.stringify({
@@ -340,6 +397,10 @@ export function SubscriptionsPage() {
       }),
     });
     saving.current = false;
+    const mutationResult: ApiResult<SubscriptionMutationData> = result.ok
+      ? { ok: true, data: { changed: result.data.created, subscription: result.data.subscription } }
+      : { ok: false, status: result.status, message: result.message };
+    captureSubscriptionResult('create', draft.requestId, startedAt, attemptId, mutationResult, null);
     if (!result.ok) {
       setSaveState('error');
       setSaveError(result.message);

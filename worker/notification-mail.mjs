@@ -2,6 +2,7 @@ import {sha} from './utils.mjs';
 import {createNotifications} from './notifications.mjs';
 import {createResendProvider} from './mail-provider-resend.mjs';
 import {createDigestCompiler} from './mail-digest.mjs';
+import {captureFeedWorkerEvent} from './telemetry.mjs';
 
 const idPattern=/^[a-f0-9]{24}$/;
 const minute=60_000;
@@ -10,12 +11,34 @@ const escape=value=>String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&l
 const safeCode=value=>/^[a-z0-9_]{1,80}$/.test(value??'')?value:'provider_unavailable';
 
 // Notifications owns the delivery ledger; transport and provider adapters never claim items.
-export function createMail(env,{now=()=>Date.now(),provider=createResendProvider(env,{now})}={}){
+export function createMail(env,{now=()=>Date.now(),provider=createResendProvider(env,{now}),lifecycle}={}){
   const notifications=createNotifications(env,{now});
   const enabled=()=>env.MAIL_ENABLED==='true';
   const limit=Math.max(1,Math.min(50,Number(env.MAIL_PREPARE_LIMIT)||20));
   const maxAttempts=Math.max(1,Math.min(10,Number(env.MAX_MAIL_ATTEMPTS)||6));
   const prepareDigests=createDigestCompiler(env,{now,assess:assessMany,savePrivate,gate});
+
+  async function emitFinalized(id,state,{stage,error_code=null}={}){
+    try{
+      const message=await env.DB.prepare(`SELECT m.id,m.owner_sub,m.kind,m.attempts,m.created_at,
+          (SELECT COUNT(*) FROM user_deliveries d WHERE d.claimed_message_id=m.id) AS delivery_count,
+          (SELECT COUNT(DISTINCT i.event_id) FROM mail_items i WHERE i.message_id=m.id) AS event_count
+        FROM mail_messages m WHERE m.id=?`).bind(id).first();
+      if(!message)return;
+      let outcome=state==='submission_unknown'||state==='accepted'?'unverified':state==='cancelled'?'canceled'
+        :state==='deferred'?'partial':'failure';
+      if(state==='delivered')outcome='success';
+      captureFeedWorkerEvent(env,lifecycle,'feed_delivery_finalized',`feed_mail:${id}`,{
+        trigger:'automatic',operation:'mail_delivery',flow:'notification',stage,outcome,
+        operation_id:id,attempt_id:`${id}:${message.attempts}`,message_id:id,
+        owner_sub:message.owner_sub,message_kind:message.kind,
+        delivery_count:message.delivery_count,event_count:message.event_count,attempt_count:message.attempts,
+        state,error_code,provider_submission:['accepted','delivered','bounced','complained','rejected','submission_unknown'].includes(state),
+        delivered:state==='delivered',end_to_end_duration_ms:Math.max(0,now()-message.created_at),
+        duration_basis:'message_created_to_final_state',
+      });
+    }catch{}
+  }
 
   async function list(){
     const rows=await env.DB.prepare(`SELECT id,owner_sub AS ownerSub,kind,state,provider_id AS providerId,
@@ -138,8 +161,9 @@ export function createMail(env,{now=()=>Date.now(),provider=createResendProvider
     if(message.next_attempt_at===null)return {id,state:message.state};
     if(message.next_attempt_at>at||message.lease_until>at)return {id,state:message.state};
     if(message.submitted_at===null&&message.attempts>=maxAttempts){
-      await env.DB.prepare(`UPDATE mail_messages SET state='deferred',last_error='retry_limit_reached',next_attempt_at=NULL,updated_at=?
+      const exhausted=await env.DB.prepare(`UPDATE mail_messages SET state='deferred',last_error='retry_limit_reached',next_attempt_at=NULL,updated_at=?
         WHERE id=? AND submitted_at IS NULL AND (lease_until IS NULL OR lease_until<=?)`).bind(at,id,at).run();
+      if(exhausted.meta.changes)await emitFinalized(id,'deferred',{stage:'retry',error_code:'retry_limit_reached'});
       return {id,state:'deferred'};
     }
     const payload=await readPrivate(message.payload_key,message.payload_hash);
@@ -157,13 +181,14 @@ export function createMail(env,{now=()=>Date.now(),provider=createResendProvider
           reason='reconciliation_required';
       }
       if(reason){
-        await env.DB.batch([
+        const finalized=await env.DB.batch([
           env.DB.prepare(`UPDATE mail_messages SET state='submission_unknown',last_error=?,next_attempt_at=NULL,
             lease_token=NULL,lease_until=NULL,updated_at=? WHERE id=? AND (lease_until IS NULL OR lease_until<=?)
             AND state IN ('submitting','deferred','submission_unknown')`).bind(reason,at,id,at),
           env.DB.prepare(`UPDATE user_deliveries SET state='submission_unknown',updated_at=? WHERE claimed_message_id=?
             AND EXISTS(SELECT 1 FROM mail_messages WHERE id=? AND state='submission_unknown')`).bind(at,id,id),
         ]);
+        if(finalized[0].meta.changes)await emitFinalized(id,'submission_unknown',{stage:'provider_submission',error_code:reason});
         return {id,state:'submission_unknown'};
       }
     }
@@ -183,7 +208,7 @@ export function createMail(env,{now=()=>Date.now(),provider=createResendProvider
       if(recovered||invalid>=0){
         const reason=assessment.suppressionReason??(recovered?'recovered_backlog':!assessment.eligible?'no_eligible_match':assessment.recipient!==payload.to?'recipient_changed':'mode_changed');
         const backlog=Boolean(assessments.some(item=>item.eligible)&&(assessment.suppressionReason||recovered));
-        await env.DB.batch([
+        const cancelled=await env.DB.batch([
           env.DB.prepare(`UPDATE mail_messages SET state='cancelled',last_error=?,next_attempt_at=NULL,updated_at=?
             WHERE id=? AND submitted_at IS NULL AND (lease_until IS NULL OR lease_until<=?)`).bind(reason,at,id,at),
           env.DB.prepare(`UPDATE user_deliveries SET state='pending',claimed_message_id=NULL,suppression_reason=?,
@@ -192,6 +217,7 @@ export function createMail(env,{now=()=>Date.now(),provider=createResendProvider
             WHERE claimed_message_id=? AND EXISTS(SELECT 1 FROM mail_messages WHERE id=? AND state='cancelled')`)
             .bind(['recipient_changed','mode_changed','recovered_backlog'].includes(reason)?null:reason,backlog?1:0,at,backlog?1:0,at,id,id),
         ]);
+        if(cancelled[0].meta.changes)await emitFinalized(id,'cancelled',{stage:'preflight',error_code:reason});
         return {id,state:'cancelled'};
       }
       checked=gate(assessments);
@@ -213,7 +239,7 @@ export function createMail(env,{now=()=>Date.now(),provider=createResendProvider
     const suppression=await env.DB.prepare('SELECT reason FROM mail_suppressions WHERE recipient_hash=?').bind(message.recipient_hash).first();
     if(suppression){
       const uncertain=message.submitted_at!==null,state=uncertain?'submission_unknown':'cancelled';
-      await env.DB.batch([
+      const finalized=await env.DB.batch([
         env.DB.prepare(`UPDATE mail_messages SET state=?,last_error=?,submitted_at=?,next_attempt_at=NULL,
           lease_token=NULL,lease_until=NULL,updated_at=? WHERE id=? AND lease_token=?`)
           .bind(state,uncertain?'reconciliation_required':`email_${suppression.reason}`,message.submitted_at,at,id,token),
@@ -223,11 +249,12 @@ export function createMail(env,{now=()=>Date.now(),provider=createResendProvider
           AND EXISTS(SELECT 1 FROM mail_messages WHERE id=? AND state=?)`)
           .bind(uncertain?'submission_unknown':'pending',uncertain?1:0,`email_${suppression.reason}`,uncertain?1:0,at,at,id,id,state),
       ]);
+      if(finalized[0].meta.changes&&state!=='pending')await emitFinalized(id,state,{stage:'preflight',error_code:`email_${suppression.reason}`});
       return {id,state};
     }
     const result=await provider.send(payload,{idempotencyKey:message.idempotency_key});
     if(result.status==='accepted'){
-      await env.DB.batch([
+      const committed=await env.DB.batch([
         env.DB.prepare(`UPDATE mail_messages SET state='accepted',provider_id=?,accepted_at=COALESCE(accepted_at,?),
           lease_token=NULL,lease_until=NULL,next_attempt_at=NULL,last_error=NULL,updated_at=?
           WHERE id=? AND lease_token=?`).bind(result.providerId,at,at,id,token),
@@ -235,12 +262,16 @@ export function createMail(env,{now=()=>Date.now(),provider=createResendProvider
           AND EXISTS(SELECT 1 FROM mail_messages WHERE id=? AND state='accepted')`)
           .bind(at,id,id),
       ]);
+      if(committed[0].meta.changes){
+        const current=await env.DB.prepare('SELECT state FROM mail_messages WHERE id=?').bind(id).first();
+        if(current?.state==='accepted')await emitFinalized(id,'accepted',{stage:'provider_submission'});
+      }
     }else{
       // A later rejection/429 says nothing about the earlier request whose reply was lost.
       const uncertain=message.submitted_at!==null;
       const state=result.status==='unknown'||uncertain?'submission_unknown':result.status==='rejected'?'rejected':'deferred';
       const manual=uncertain&&result.status==='rejected';
-      await env.DB.batch([
+      const committed=await env.DB.batch([
         env.DB.prepare(`UPDATE mail_messages SET state=?,lease_token=NULL,lease_until=NULL,last_error=?,
           submitted_at=CASE WHEN ? THEN NULL ELSE submitted_at END,next_attempt_at=?,updated_at=? WHERE id=? AND lease_token=?`)
           .bind(state,manual?'reconciliation_required':safeCode(result.code),result.status==='deferred'&&message.submitted_at===null?1:0,
@@ -249,6 +280,9 @@ export function createMail(env,{now=()=>Date.now(),provider=createResendProvider
           AND EXISTS(SELECT 1 FROM mail_messages WHERE id=? AND state=?)`)
           .bind(state==='submission_unknown'?'submission_unknown':state==='rejected'?'suppressed':'claimed',safeCode(result.code),at,id,id,state),
       ]);
+      if(committed[0].meta.changes&&(state==='submission_unknown'||state==='rejected')){
+        await emitFinalized(id,state,{stage:'provider_submission',error_code:safeCode(result.code)});
+      }
     }
     return {id,state:(await env.DB.prepare('SELECT state FROM mail_messages WHERE id=?').bind(id).first()).state};
   }
@@ -281,7 +315,12 @@ export function createMail(env,{now=()=>Date.now(),provider=createResendProvider
           AND EXISTS(SELECT 1 FROM mail_messages WHERE id=? AND state='submission_unknown' AND next_attempt_at IS NULL)`)
           .bind(at,row.id,row.id),
       ]);
-      if(stopped[0].meta.changes)continue;
+      if(stopped[0].meta.changes){
+        const stoppedMessage=await env.DB.prepare('SELECT state FROM mail_messages WHERE id=?').bind(row.id).first();
+        if(stoppedMessage?.state==='submission_unknown')await emitFinalized(row.id,'submission_unknown',{stage:'retry',error_code:'reconciliation_required'});
+        else if(stoppedMessage?.state==='deferred')await emitFinalized(row.id,'deferred',{stage:'retry',error_code:'retry_limit_reached'});
+        continue;
+      }
       await env.DB.prepare(`INSERT INTO outbox(id,topic,dedupe_key,payload_json,available_at,created_at,updated_at)
         SELECT ?,'feed-mail',?,?,?,?,? WHERE EXISTS(SELECT 1 FROM mail_messages WHERE id=? AND attempts=?
           AND state IN ('prepared','deferred','submitting','submission_unknown') AND next_attempt_at<=? AND (lease_until IS NULL OR lease_until<=?))
@@ -360,7 +399,14 @@ export function createMail(env,{now=()=>Date.now(),provider=createResendProvider
       .bind(message.recipient_hash,event.type,event.providerId,at));
     statements.push(env.DB.prepare("UPDATE mail_webhook_receipts SET state='processed',message_id=?,processed_at=? WHERE id=? AND state='pending'")
       .bind(message.id,at,id));
-    await env.DB.batch(statements);
+    const committed=await env.DB.batch(statements);
+    if(committed[0].meta.changes&&(event.type!=='accepted'||message.state!=='accepted')){
+      const current=await env.DB.prepare('SELECT state FROM mail_messages WHERE id=?').bind(message.id).first();
+      if(current?.state)await emitFinalized(message.id,current.state,{
+        stage:'provider_receipt',
+        error_code:['bounced','complained'].includes(event.type)?`email_${event.type}`:null,
+      });
+    }
   }
   return {preparePending,prepareDigests,deliver,recover,list,receiveWebhook,reconcile};
 }

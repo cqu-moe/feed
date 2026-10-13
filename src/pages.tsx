@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useParams, useSearchParams, useRouteLoaderData } from 'react-router';
 import {
   Alert,
@@ -57,6 +57,7 @@ import {
   safeNext,
 } from './components';
 import { OcrReading } from './ocr-reading';
+import { captureFeedEvent } from './telemetry';
 
 type RequestState<T> =
   | { kind: 'loading' }
@@ -288,6 +289,14 @@ export function ArticlesPage() {
   const [listState, setListState] = useState<ArticleListState>({ kind: 'loading' });
   const [sourceReloadKey, setSourceReloadKey] = useState(0);
   const [listReloadKey, setListReloadKey] = useState(0);
+  const searchOperation = useRef<{
+    id: string;
+    attemptId: string;
+    startedAt: number;
+    hasQuery: boolean;
+    hasSourceFilter: boolean;
+    page: number;
+  } | null>(null);
 
   useEffect(() => {
     setQuery(committedQuery);
@@ -311,7 +320,45 @@ export function ArticlesPage() {
     if (committedPage > 1) search.set('page', String(committedPage));
     const suffix = search.size > 0 ? `?${search.toString()}` : '';
     requestJson(`/api/articles${suffix}`, parseArticleList, { signal: controller.signal }).then((result) => {
-      if (!controller.signal.aborted) setListState(fromResult(result));
+      if (!controller.signal.aborted) {
+        setListState(fromResult(result));
+        const operation = searchOperation.current;
+        if (operation) {
+          if (result.ok) {
+            captureFeedEvent('feed_search_completed', {
+              operation: 'search_filter',
+              flow: 'reading',
+              stage: 'result',
+              outcome: 'success',
+              operation_id: operation.id,
+              attempt_id: operation.attemptId,
+              result_count: result.data.total,
+              zero_results: result.data.total === 0,
+              has_query: operation.hasQuery,
+              has_source_filter: operation.hasSourceFilter,
+              page: result.data.page,
+              duration_ms: Math.max(0, Math.round(performance.now() - operation.startedAt)),
+              duration_basis: 'user_action_to_search_result',
+            });
+            searchOperation.current = null;
+          } else {
+            captureFeedEvent('feed_search_completed', {
+              operation: 'search_filter',
+              flow: 'reading',
+              stage: 'result',
+              outcome: 'failure',
+              operation_id: operation.id,
+              attempt_id: operation.attemptId,
+              error_code: result.status === 0 ? 'network_failed' : `http_${result.status}`,
+              has_query: operation.hasQuery,
+              has_source_filter: operation.hasSourceFilter,
+              page: operation.page,
+              duration_ms: Math.max(0, Math.round(performance.now() - operation.startedAt)),
+              duration_basis: 'user_action_to_search_result',
+            });
+          }
+        }
+      }
     });
     return () => controller.abort();
   }, [committedQuery, committedSource, committedPage, listReloadKey]);
@@ -324,7 +371,23 @@ export function ArticlesPage() {
     if (nextQuery.trim()) search.set('q', nextQuery.trim());
     if (nextSource) search.set('source', nextSource);
     if (nextPage > 1) search.set('page', String(nextPage));
-    setParams(search, { replace: false });
+    if (params.toString() === search.toString()) setListReloadKey((key) => key + 1);
+    else setParams(search, { replace: false });
+    searchOperation.current = {
+      id: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      startedAt: performance.now(),
+      hasQuery: Boolean(nextQuery.trim()),
+      hasSourceFilter: Boolean(nextSource),
+      page: nextPage,
+    };
+  }
+
+  function retrySearch() {
+    searchOperation.current = searchOperation.current
+      ? { ...searchOperation.current, attemptId: crypto.randomUUID() }
+      : null;
+    setListReloadKey((key) => key + 1);
   }
 
   function submit(event: FormEvent) {
@@ -427,7 +490,7 @@ export function ArticlesPage() {
           state="error"
           title="暂时无法加载通知"
           description={`${listState.message}筛选条件已保留，你可以重试。`}
-          action={<RetryButton onClick={() => setListReloadKey((key) => key + 1)} />}
+          action={<RetryButton onClick={retrySearch} />}
         />
       )}
       {listState.kind === 'not-found' && (
@@ -435,7 +498,7 @@ export function ArticlesPage() {
           state="not-found"
           title="通知索引不可用"
           description="索引尚未就绪或链接已失效，请稍后重试。"
-          action={<RetryButton onClick={() => setListReloadKey((key) => key + 1)} />}
+          action={<RetryButton onClick={retrySearch} />}
         />
       )}
       {listState.kind === 'success' && listState.data.articles.length === 0 && (
@@ -549,17 +612,49 @@ export function ArticleDetailPage() {
   const [state, setState] = useState<DetailState>({ kind: 'loading' });
   const [revisionState, setRevisionState] = useState<RevisionListState>({ kind: 'loading' });
   const [reloadKey, setReloadKey] = useState(0);
+  const openOperation = useRef<{
+    key: string;
+    id: string;
+    attemptId: string;
+    startedAt: number;
+  } | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
     setState({ kind: 'loading' });
+    const operationKey = `${id}\0${selectedRevisionId}`;
+    const previous = openOperation.current;
+    openOperation.current = previous?.key === operationKey
+      ? { ...previous, attemptId: crypto.randomUUID(), startedAt: performance.now() }
+      : { key: operationKey, id: crypto.randomUUID(), attemptId: crypto.randomUUID(), startedAt: performance.now() };
     const detailPath = selectedRevisionId
       ? `/api/articles/${encodeURIComponent(id)}/revisions/${encodeURIComponent(selectedRevisionId)}`
       : `/api/articles/${encodeURIComponent(id)}`;
     requestJson(detailPath, parseArticleDetail, {
       signal: controller.signal,
     }).then((result) => {
-      if (!controller.signal.aborted) setState(fromResult(result));
+      if (!controller.signal.aborted) {
+        setState(fromResult(result));
+        const operation = openOperation.current;
+        if (result.ok && operation && (!result.data.revision || result.data.revision.state === 'ready')) {
+          captureFeedEvent('feed_item_opened', {
+            operation: 'article_read',
+            flow: 'reading',
+            stage: 'opened',
+            outcome: 'success',
+            operation_id: operation.id,
+            attempt_id: operation.attemptId,
+            article_id: result.data.article.id,
+            revision_id: result.data.revision?.id ?? null,
+            content_kind: 'article',
+            ocr_used: Boolean(result.data.article.ocr?.pages.length),
+            revision_state: result.data.revision?.state ?? 'ready',
+            duration_ms: Math.max(0, Math.round(performance.now() - operation.startedAt)),
+            duration_basis: 'content_request_to_readable_response',
+          });
+          openOperation.current = null;
+        }
+      }
     });
     return () => controller.abort();
   }, [id, selectedRevisionId, reloadKey]);
