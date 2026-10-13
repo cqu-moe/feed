@@ -30,7 +30,7 @@
 | T14 / #15 | 本地验收完成 | 签名候选 `af78e9e`，独立审查后签名合并 `fa580df`；158 tests/build/design/dry-run 通过。历史补抓窗口、分页上限、持久准入、公平恢复及配置屏障已验收；真实 Worker 界面验证参数重置、配置变更清除旧结果及终态刷新 |
 | T15 / #16 | 本地验收完成 | 签名候选 `ed34fe7`，集成 `c966910`；主体及 T14 兼容性经独立审查，最后的受控时钟修复由主代理核对。169 tests/build/design/dry-run 通过，真实 Worker 管理 UI 已验收 |
 | T17 / #18 | 隔离业务验收通过 | 合成多源、迁移、TextIn、不可变版本、权益、RSS及即时邮件已实测；独立复核三项发现已修复，三路复审及203项测试、远端CI通过，真实20:00摘要已送达，2项合并、attempts1、无重复。详见[隔离验收记录](acceptance-production.md) |
-| T18 / #19 | 已授权，发布中 | 正式月预算100元，Resend Sending access；Auth与Feed先暂停任务发布，迁移与真实账号验收见[正式发布记录](release-production.md) |
+| T18 / #19 | 已上线，观察中 | 正式月预算100元，Resend Sending access；Auth契约、33篇迁移、真实账号阅读与RSS已通过，首批仅教务处。首个正式发现窗口和生产回滚演练仍待完成，见[正式发布记录](release-production.md) |
 
 ## 会话中的规格调整
 
