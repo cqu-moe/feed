@@ -161,7 +161,7 @@ export function sanitizeFeedEvent<T extends EventLike>(event: T | null): T | nul
       ...Object.fromEntries(Object.entries(source).filter(([key]) => systemProperties.has(key))),
     };
   }
-  Object.assign(properties, { telemetry_version: 2, product: 'feed', surface: 'web', environment, release, ...(isTestEvent ? { is_test: true } : {}) });
+  Object.assign(properties, { $geoip_disable: true, telemetry_version: 2, product: 'feed', surface: 'web', environment, release, ...(isTestEvent ? { is_test: true } : {}) });
   // Never retain SDK-generated person updates, which may include original URLs.
   return { event: event.event, ...(event.uuid === undefined ? {} : { uuid: event.uuid }),
     ...(event.timestamp === undefined ? {} : { timestamp: event.timestamp }), properties } as T;

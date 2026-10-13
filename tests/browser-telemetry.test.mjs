@@ -10,6 +10,7 @@ test('browser events preserve SDK transport fields but drop person metadata and 
     properties: { token: 'public-key', distinct_id: 'central-user', $session_id: 'session', result_count: 0, zero_results: true, operation: 'search_filter', outcome: 'success', query: 'private query', $current_url: 'https://feed.cqu.moe/?q=private' } };
   const clean = telemetry.sanitizeFeedEvent(source);
   assert.equal(clean.properties.token, 'public-key');
+  assert.equal(clean.properties.$geoip_disable, true);
   assert.equal(clean.properties.distinct_id, 'central-user');
   assert.equal(clean.properties.result_count, 0);
   assert.deepEqual(Object.keys(clean).sort(), ['event','properties','timestamp','uuid']);
@@ -23,6 +24,7 @@ test('snapshot payloads require an approved route and retain the already-masked 
   const clean = telemetry.sanitizeFeedEvent(snapshot);
   assert.equal(clean.properties.$snapshot_data, snapshot.properties.$snapshot_data);
   assert.equal(clean.properties.token, 'public-key');
+  assert.equal(clean.properties.$geoip_disable, true);
   assert.equal(JSON.stringify(clean).includes('private'), false);
   telemetry.syncFeedReplay({ pathname: '/reader/private/revisions/id/file.pdf', search: '', hash: '' });
   assert.equal(telemetry.sanitizeFeedEvent(snapshot), null);
