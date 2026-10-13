@@ -1,6 +1,6 @@
-# 重大通知存档 MVP 运维说明
+# 重大通知存档运维说明
 
-本文描述当前 worktree 的实际实现。它不包含任何 secret 值，也不应把本地测试通过解释为生产补抓完成。
+本文描述当前实现；实际生产启用范围与验收见 [release-production.md](release-production.md)。不包含 secret 值，本地测试通过不等于生产补抓完成。
 
 ## 1. 资源与配置
 
@@ -17,7 +17,7 @@
 | Workflow | binding `INGEST`，class `FeedIngest`；binding `PDF_OCR`，class `PdfOcrWorkflow` |
 | Workflow | binding `CAPTURE`，class `CaptureWorkflow`，执行单篇采集任务 |
 | Queue | producer/consumer 覆盖 `feed-jobs`、`feed-events`、`feed-mail` 三条业务队列，consumer 分别指向同名 `-dlq` |
-| Cron | `0 0 * * *` 为每日采集；`*/5 * * * *` 在 runtime 开启时恢复任务/outbox |
+| Cron | 正式仅 `*/5 * * * *`，按来源持久到期时间发现、分级复查并恢复任务/邮件；旧 MVP 每日 Cron 已停 |
 
 非敏感变量：
 
@@ -25,12 +25,12 @@
 | --- | --- | --- |
 | `BASE_URL` | `https://feed.cqu.moe` | OAuth 回调、桥接 URL 和安全 Origin 判断 |
 | `AUTH_BASE_URL` | `https://auth.cqu.moe` | OAuth/JWKS/userinfo/introspection 基础地址 |
-| `MAX_FIRECRAWL_PER_DAY` | `120` | D1 全局硬额度，按自然日计数 |
-| `MAX_OCR_PER_DAY` | `100` | D1 全局硬额度，按自然日计数 |
-| `MAX_ARTICLES_PER_RUN` | `40` | 每个来源 Workflow 每次运行最多处理的通知数 |
+| `MAX_FIRECRAWL_PER_DAY` | `6` | D1 全局硬额度，按自然日计数 |
+| `MAX_OCR_PER_DAY` | `2` | D1 全局硬额度，按自然日计数 |
+| `MAX_ARTICLES_PER_RUN` | `5` | 每个来源 Workflow 每次运行最多处理的通知数 |
 | `CRAWL_ENABLED` | `true` | 设为非 `true` 禁止每日和手动启动采集 |
-| `SOURCE_MANAGEMENT_ENABLED` | `false` | T04 动态站点/栏目、样本验证与发现调度；需先应用 0006 迁移并绑定 DISCOVERY |
-| `TASK_RUNTIME_ENABLED` | `false` | T03 单篇任务入口默认关闭；POST 需它与 `CRAWL_ENABLED` 同时为 `true`，状态 GET 不受此开关影响 |
+| `SOURCE_MANAGEMENT_ENABLED` | `true` | T04 动态站点/栏目、样本验证与发现调度；需先应用 0006 迁移并绑定 DISCOVERY |
+| `TASK_RUNTIME_ENABLED` | `true` | T03 单篇任务入口已启用；POST 需它与 `CRAWL_ENABLED` 同时为 `true`，状态 GET 不受此开关影响 |
 | `MAX_TASK_ATTEMPTS` | `3` | 自动恢复的 429 等暂态失败最大尝试次数；配置会限制在 1–10 |
 | `TASK_MAX_LAUNCH_ATTEMPTS` | `5` | start-job 出站投递恢复预算；超过后任务标记 `launch_delivery_exhausted` |
 | `TASK_LAUNCH_REPLAY_AFTER_MS` | `900000` | 已发送但未确认交接的 start-job 重放等待窗口 |
@@ -40,8 +40,8 @@
 | `OPERATIONS_DIAGNOSTIC_LIMIT` | `20` | 每类诊断与管理界面单次展示上限，实际会限制在 1–100 |
 | `PDF_OCR_ENABLED` | `true` | 自动入队与每日补偿；不禁止显式 admin 对比任务 |
 | `PDF_OCR_MODEL` | `textin-xparse-auto` | 固定文档 OCR 模型 |
-| `MAX_PDF_OCR_PAGES_PER_DAY` | `50` | UTC 每日预留源 PDF 页数 |
-| `MAX_PDF_OCR_PAGES_PER_MONTH` | `1000` | UTC 每月预留源 PDF 页数 |
+| `MAX_PDF_OCR_PAGES_PER_DAY` | `2` | UTC 每日预留源 PDF 页数 |
+| `MAX_PDF_OCR_PAGES_PER_MONTH` | `30` | UTC 每月预留源 PDF 页数 |
 
 `MAX_UPLOAD_BYTES_PER_DAY` 未写入 `wrangler.jsonc` 时使用代码默认值 268,435,456 字节，即 256 MiB。它只限制 Firecrawl 页面通过 `/internal/upload` 桥接上传的附件字节，不限制 Worker 直接 `put` 的正文、快照、截图、manifest 等对象。
 

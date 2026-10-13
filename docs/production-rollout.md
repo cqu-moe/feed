@@ -6,8 +6,8 @@
 
 - Feed：`cqu-feed`，域名 `feed.cqu.moe`，D1 `cqu-feed-mvp`（`ba632f5c-c3b4-4f3c-ad57-1ac89895b02a`），R2 `cqu-feed-archive`。
 - Auth：`cqu-moe-auth`，D1 `auth-cqu-moe-db`（`135e9272-b7f6-4672-925a-f813dba5ad40`）；Feed使用独立OAuth BFF和后台RPC客户端。
-- 现有集成配置已列出3 Queue及DLQ、5 Feed Workflow，存在配置不等于生产资源已创建或绑定通过。
-- 代码位于Feed `feat/production-v1` 与Auth `feat/feed-production-v1`，不是已上线main。生产构建由Git Connector负责，按 [ci-cd.md](ci-cd.md) 发布。
+- 正式3 Queue及同名DLQ已创建，5个Feed Workflow绑定已由上线后Worker设置读回确认。
+- Feed正式启用提交 `d04c0b6` 与Auth `bd40fdf` 已合入各自main并由Git Connector发布；完整证据和仍待观察项目见 [release-production.md](release-production.md)。
 
 ## 已确定的生产约束
 
