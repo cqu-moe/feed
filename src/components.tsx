@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import { Button, PageHeader, PageState, ThemeMenu } from '@cqu-moe/ui';
-import { Archive, ExternalLink, LogOut, RefreshCw } from 'lucide-react';
+import { ExternalLink, LogOut, RefreshCw } from 'lucide-react';
 import type { Session } from './api';
 
 export function safeNext(value: string | null): string {
@@ -84,13 +84,22 @@ export function isPdf(attachment: { name: string; url: string | null; contentTyp
   );
 }
 
+export function FeedBrand() {
+  return (
+    <Link className="feed-brand" to="/">
+      <span className="feed-brand-mark" aria-hidden="true">
+        <img className="feed-logo-light" src="/brand/logo-black.svg" alt="" width="32" height="32" />
+        <img className="feed-logo-dark" src="/brand/logo-white.svg" alt="" width="32" height="32" />
+      </span>
+      <span className="feed-brand-name">重大通知存档</span>
+    </Link>
+  );
+}
+
 export function StandaloneHeader({ actions }: { actions?: ReactNode }) {
   return (
     <header className="feed-standalone-header">
-      <Link className="feed-brand" to="/">
-        <Archive aria-hidden="true" />
-        重大通知存档
-      </Link>
+      <FeedBrand />
       <div className="feed-standalone-actions">
         {actions}
         <ThemeMenu />
