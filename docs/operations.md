@@ -25,8 +25,8 @@
 | --- | --- | --- |
 | `BASE_URL` | `https://feed.cqu.moe` | OAuth 回调、桥接 URL 和安全 Origin 判断 |
 | `AUTH_BASE_URL` | `https://auth.cqu.moe` | OAuth/JWKS/userinfo/introspection 基础地址 |
-| `MAX_FIRECRAWL_PER_DAY` | `6` | D1 全局硬额度，按自然日计数 |
-| `MAX_OCR_PER_DAY` | `2` | D1 全局硬额度，按自然日计数 |
+| `MAX_FIRECRAWL_PER_DAY` | `0` | 不设应用调用上限；每次尝试仍按 UTC 日记账 |
+| `MAX_OCR_PER_DAY` | `0` | 不设验证码调用上限；Workers AI 按实际神经元计量 |
 | `MAX_ARTICLES_PER_RUN` | `5` | 每个来源 Workflow 每次运行最多处理的通知数 |
 | `CRAWL_ENABLED` | `true` | 设为非 `true` 禁止每日和手动启动采集 |
 | `SOURCE_MANAGEMENT_ENABLED` | `true` | T04 动态站点/栏目、样本验证与发现调度；需先应用 0006 迁移并绑定 DISCOVERY |
@@ -40,8 +40,19 @@
 | `OPERATIONS_DIAGNOSTIC_LIMIT` | `20` | 每类诊断与管理界面单次展示上限，实际会限制在 1–100 |
 | `PDF_OCR_ENABLED` | `true` | 自动入队与每日补偿；不禁止显式 admin 对比任务 |
 | `PDF_OCR_MODEL` | `textin-xparse-auto` | 固定文档 OCR 模型 |
-| `MAX_PDF_OCR_PAGES_PER_DAY` | `2` | UTC 每日预留源 PDF 页数 |
-| `MAX_PDF_OCR_PAGES_PER_MONTH` | `30` | UTC 每月预留源 PDF 页数 |
+| `MAX_PDF_OCR_PAGES_PER_DAY` | `0` | 不设应用日页数上限，保留预留页数账本 |
+| `MAX_PDF_OCR_PAGES_PER_MONTH` | `0` | 不设应用月页数上限，保留预留页数账本 |
+
+2026-10-14 用户授权充分使用免费/已有套餐额度，进入按量收费后通知。上表四个 `0` 仅表示取消对应应用上限，仍原子累计尝试/预留页数；正整数继续执行硬限制，负数或非法数值拒绝运行。旧账本不清零。生产人民币100元/月预算保留，它是跨供应商运维预算，当前不是供应商账号自动封顶；不自动充值、买套餐或开启供应商额外付费选项。
+
+用量核对：管理员 `GET /internal/operations/provider-usage` 只读返回 Firecrawl credit 及 TextIn 有效套餐、余额；部分不可读显示未知，不伪装成零费用。`node scripts/read-ai-usage.mjs` 使用已有 Wrangler 登录或环境变量中的 Cloudflare token，读取账号今日/昨日实际神经元；包含昨日是为了北京时间08:10能看到08:00 UTC日切前的用量。脚本不提交识别请求，不输出凭据。它是整个 Cloudflare 账号口径，不能直接当作 Feed 的人民币账单。
+
+- Workers AI 免费额度为10,000神经元/UTC日，超出部分官方价0.011美元/千神经元；当前验证码模型按输入/输出token计量，不是固定每次1神经元。
+- Firecrawl Free 方案为每月1,000 credits；免费方案耗尽会拒绝请求，不自动进入 PAYG。读取实际账号账期，不按UTC月推算其重置时间。credit减少本身不等于现金收费。
+- TextIn 使用其独立有效套餐/赠送余额；包有效期与服务范围必须匹配。额度包消耗不等于按量现金支出，T币不能未经核实就当成人民币；跟踪余额、`unpaid` 与 `pay_type` 的变化。
+- 08:10/20:10的既有监控比较保存的供应商快照，首次看到实际进入按量费用时通知；这是定时核对，会有通知延迟。接近100元预算暂停新增付费采集/OCR并报告；读不到账单时报告不可核实，不声称已被自动硬封顶。供应商402、未知受理、OCR已有请求回执仍禁止盲目自动重试。
+
+依据：[Workers AI pricing](https://developers.cloudflare.com/workers-ai/platform/pricing/)、[Firecrawl billing](https://github.com/firecrawl/firecrawl-docs/blob/main/billing.mdx)、[TextIn套餐查询](https://www.textin.com/document/open_api_package)、[TextIn余额查询](https://www.textin.com/document/open_api_balance)。
 
 `MAX_UPLOAD_BYTES_PER_DAY` 未写入 `wrangler.jsonc` 时使用代码默认值 268,435,456 字节，即 256 MiB。它只限制 Firecrawl 页面通过 `/internal/upload` 桥接上传的附件字节，不限制 Worker 直接 `put` 的正文、快照、截图、manifest 等对象。
 
@@ -426,10 +437,10 @@ node scripts/manage.mjs auth-check
 
 | 边界 | 当前值 | 失效行为 |
 | --- | --- | --- |
-| Firecrawl 全局每日请求 | 120 | 后续请求抛 budget 错；当前来源停止处理后续文章 |
-| OCR 全局每日次数 | 100 | 该验证码尝试失败，文章/附件状态记录错误 |
-| 每来源每次运行处理通知 | 40 | 未处理通知保持待处理，等待后续运行 |
-| 列表页数 | 每来源 12 页 | run 标记 pagination limit，discovery incomplete |
+| Firecrawl 全局每日请求 | 不限（配置0） | 继续记账；供应商402仍阻塞，不自动充值 |
+| 验证码 OCR 全局每日次数 | 不限（配置0） | 继续记账，按账号实际神经元检查费用 |
+| legacy每来源每次运行处理通知 | 5 | 仅旧工作流；正式Queue任务无这个批次数上限 |
+| 每次发现列表页数 | 2 | 正式发现保存游标、分段继续；不是每天只能发现两篇 |
 | 文章内容错误尝试次数 | 3 | 之后人工排查；全局额度/限流延期不消耗次数 |
 | 附件数量 | 每篇 8 个 | 超出的候选附件不下载，记为 attachment limit reached |
 | 附件大小 | 64 MiB | 拒绝下载/上传 |
@@ -440,7 +451,7 @@ node scripts/manage.mjs auth-check
 
 额度在 D1 `usage(day, kind, used)` 中按自然日保留。Firecrawl 和 OCR 在发起外部调用前先占用额度，因此外部调用失败通常也会消耗一次。桥接上传额度在验证请求后、R2 完成前增加，流式上传中途失败也可能消耗字节额度。
 
-初始 30 天补抓的上限之间存在明显张力：5 个来源理论上每次最多 40 篇正文，再加列表页请求，可能超过全局 Firecrawl 120 次/天。因此补抓天然可能跨多天，且 5 个来源并发竞争同一个额度。不能把单日 `partial` 直接当作站点不可用；应同时查看 run error、usage 和下一日重试结果。
+早期 MVP 的120次/天与30天补抓示例已不代表当前生产配置。正式版补抓按来源配置、Queue任务和供应商容量推进；不能把 `partial` 直接当作站点不可用，应同时检查 task error、required artifacts 和供应商余额。
 
 Workers AI、R2 PUT、R2 存储、D1 行数和 Workers CPU 都会产生费用或免费额度消耗。D1 的 Firecrawl/OCR/上传额度不约束快照、正文、截图、manifest 和小附件写入，也不约束用户读取流量。扩大站点、历史窗口或放开附件前必须重新估算并调整这些上限。
 

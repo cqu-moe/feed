@@ -50,9 +50,10 @@ export function normalizedDate(value) {
 export function cutoffDate(now = Date.now()) { return new Date(now - 30*86400000).toISOString().slice(0,10); }
 export const articleId = async url => (await sha(url)).slice(0,24);
 export async function reserveBudget(env, kind, limit) {
+  if (!Number.isSafeInteger(limit) || limit < 0) throw new Error('Invalid daily budget');
   const day = new Date().toISOString().slice(0,10);
   await env.DB.prepare('INSERT OR IGNORE INTO usage(day,kind,used) VALUES (?,?,0)').bind(day,kind).run();
-  const row = await env.DB.prepare('UPDATE usage SET used=used+1 WHERE day=? AND kind=? AND used<? RETURNING used').bind(day,kind,limit).first();
+  const row = await env.DB.prepare('UPDATE usage SET used=used+1 WHERE day=? AND kind=? AND (?=0 OR used<?) RETURNING used').bind(day,kind,limit,limit).first();
   if (!row) throw new Error(`${kind} daily budget reached (${limit})`);
   return row.used;
 }

@@ -15,8 +15,8 @@
     "AUTH_BASE_URL":"https://auth.cqu.moe",
     "POSTHOG_HOST":"https://p.cqu.moe",
     "ENVIRONMENT":"production",
-    "MAX_FIRECRAWL_PER_DAY":"6",
-    "MAX_OCR_PER_DAY":"2",
+    "MAX_FIRECRAWL_PER_DAY":"0",
+    "MAX_OCR_PER_DAY":"0",
     "MAX_ARTICLES_PER_RUN":"5",
     "CRAWL_ENABLED":"true",
     "TASK_RUNTIME_ENABLED":"true",
@@ -40,8 +40,8 @@
     "OPERATIONS_DIAGNOSTIC_LIMIT":"20",
     "PDF_OCR_ENABLED":"true",
     "PDF_OCR_MODEL":"textin-xparse-auto",
-    "MAX_PDF_OCR_PAGES_PER_DAY":"2",
-    "MAX_PDF_OCR_PAGES_PER_MONTH":"30"
+    "MAX_PDF_OCR_PAGES_PER_DAY":"0",
+    "MAX_PDF_OCR_PAGES_PER_MONTH":"0"
   },
   "triggers":{"crons":["*/5 * * * *"]},
   "workflows":[{"name":"cqu-feed-ingest","binding":"INGEST","class_name":"FeedIngest"},{"name":"cqu-feed-pdf-ocr","binding":"PDF_OCR","class_name":"PdfOcrWorkflow"},{"name":"cqu-feed-capture","binding":"CAPTURE","class_name":"CaptureWorkflow"},{"name":"cqu-feed-discovery","binding":"DISCOVERY","class_name":"DiscoveryWorkflow"},{"name":"cqu-feed-archive-ocr","binding":"ARCHIVE_OCR","class_name":"ArchiveOcrWorkflow"}],

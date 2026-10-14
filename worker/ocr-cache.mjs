@@ -67,11 +67,11 @@ export async function pdfBytes(env,job){
 export async function reservePages(env,count){
   const day=new Date().toISOString().slice(0,10),month=day.slice(0,7);
   const daily=Number(env.MAX_PDF_OCR_PAGES_PER_DAY||50),monthly=Number(env.MAX_PDF_OCR_PAGES_PER_MONTH||1000);
-  if(!Number.isSafeInteger(count)||count<1||!Number.isSafeInteger(daily)||!Number.isSafeInteger(monthly))throw new Error('Invalid OCR budget');
+  if(!Number.isSafeInteger(count)||count<1||!Number.isSafeInteger(daily)||daily<0||!Number.isSafeInteger(monthly)||monthly<0)throw new Error('Invalid OCR budget');
   await env.DB.prepare('INSERT OR IGNORE INTO pdf_ocr_budget(id,day,month) VALUES (1,?,?)').bind(day,month).run();
   const reserved=await env.DB.prepare(`UPDATE pdf_ocr_budget SET day=?,month=?,day_pages=CASE WHEN day=? THEN day_pages+? ELSE ? END,month_pages=CASE WHEN month=? THEN month_pages+? ELSE ? END
-    WHERE id=1 AND (CASE WHEN day=? THEN day_pages ELSE 0 END)+?<=? AND (CASE WHEN month=? THEN month_pages ELSE 0 END)+?<=? RETURNING id`)
-    .bind(day,month,day,count,count,month,count,count,day,count,daily,month,count,monthly).first();
+    WHERE id=1 AND (?=0 OR (CASE WHEN day=? THEN day_pages ELSE 0 END)+?<=?) AND (?=0 OR (CASE WHEN month=? THEN month_pages ELSE 0 END)+?<=?) RETURNING id`)
+    .bind(day,month,day,count,count,month,count,count,daily,day,count,daily,monthly,month,count,monthly).first();
   if(!reserved)throw new Error('PDF OCR budget exhausted');
   await env.DB.batch([day,month].map(period=>env.DB.prepare('INSERT INTO pdf_ocr_usage(period,reserved_pages) VALUES (?,?) ON CONFLICT(period) DO UPDATE SET reserved_pages=reserved_pages+excluded.reserved_pages').bind(period,count)));
   return {day,month};
