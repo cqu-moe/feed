@@ -49,6 +49,14 @@ export function normalizedDate(value) {
 }
 export function cutoffDate(now = Date.now()) { return new Date(now - 30*86400000).toISOString().slice(0,10); }
 export const articleId = async url => (await sha(url)).slice(0,24);
+export function budgetLimit(value,fallback) {
+  const raw=value===undefined?fallback:value;
+  if(typeof raw!=='number' && (typeof raw!=='string'||!/^\d+$/.test(raw)))
+    throw new Error('Invalid budget configuration');
+  const limit=Number(raw);
+  if(!Number.isSafeInteger(limit)||limit<0)throw new Error('Invalid budget configuration');
+  return limit;
+}
 export async function reserveBudget(env, kind, limit) {
   if (!Number.isSafeInteger(limit) || limit < 0) throw new Error('Invalid daily budget');
   const day = new Date().toISOString().slice(0,10);

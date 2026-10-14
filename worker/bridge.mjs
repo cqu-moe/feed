@@ -1,7 +1,7 @@
 import {Buffer} from 'node:buffer';
 import {bridgeHTML} from './bridge-page.mjs';
 import {recognizeDigits} from './captcha-ai.mjs';
-import {bounded,encoder,equal,json,cleanError,reserveBudget,fileKind} from './utils.mjs';
+import {bounded,encoder,equal,json,cleanError,reserveBudget,fileKind,budgetLimit} from './utils.mjs';
 import staticSources from './sources.json';
 async function mac(env,payload) {
   const key = await crypto.subtle.importKey('raw',encoder.encode(env.BRIDGE_SECRET),{name:'HMAC',hash:'SHA-256'},false,['sign']);
@@ -53,7 +53,7 @@ export async function bridgeRoute(request,env) {
   if(!inserted){const row=await env.DB.prepare('SELECT result FROM ocr_slots WHERE run_id=? AND slot=?').bind(grant.runId,body.slot).first();return row?.result?json(JSON.parse(row.result)):json({error:'OCR running'},409);}
   const result={};const started=Date.now();
   try{
-    await reserveBudget(env,'ocr',Number(env.MAX_OCR_PER_DAY||100));
+    await reserveBudget(env,'ocr',budgetLimit(env.MAX_OCR_PER_DAY,100));
     result.digits=await recognizeDigits({run:async(...args)=>{const value=await env.AI.run(...args);result.usage=value.usage;return value;}},bytes,body.mime);
   }catch(error){result.error=cleanError(error);}
   result.aiMs=Date.now()-started;

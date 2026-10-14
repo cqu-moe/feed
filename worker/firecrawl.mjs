@@ -1,6 +1,6 @@
-import {bounded,reserveBudget} from './utils.mjs';
+import {bounded,reserveBudget,budgetLimit} from './utils.mjs';
 export async function scrape(env,url,options={}){
-  await reserveBudget(env,'firecrawl',Number(env.MAX_FIRECRAWL_PER_DAY||120));
+  await reserveBudget(env,'firecrawl',budgetLimit(env.MAX_FIRECRAWL_PER_DAY,120));
   const response=await fetch('https://api.firecrawl.dev/v2/scrape',{
     method:'POST',headers:{'Content-Type':'application/json',...(env.FIRECRAWL_API_KEY?{Authorization:`Bearer ${env.FIRECRAWL_API_KEY}`}:{})},
     body:JSON.stringify({url,proxy:'auto',maxAge:0,timeout:210000,waitFor:2000,...options}),

@@ -1,7 +1,7 @@
 import {mistralOcr} from './mistral-ocr.mjs';
 import {TEXTIN_MODEL,TEXTIN_CACHE_VERSION,textinConfig,textinOcr,parseTextinResult} from './textin-ocr.mjs';
 import {pdfPages} from './pdf-text.mjs';
-import {put,sha,cleanError} from './utils.mjs';
+import {put,sha,cleanError,budgetLimit} from './utils.mjs';
 const VERSION='v1',MAX_BYTES=12*1024*1024,MAX_OCR_PAGES=20;
 
 // Both generations use the exact MVP namespace and ten-page request groups.
@@ -66,7 +66,7 @@ export async function pdfBytes(env,job){
 
 export async function reservePages(env,count){
   const day=new Date().toISOString().slice(0,10),month=day.slice(0,7);
-  const daily=Number(env.MAX_PDF_OCR_PAGES_PER_DAY||50),monthly=Number(env.MAX_PDF_OCR_PAGES_PER_MONTH||1000);
+  const daily=budgetLimit(env.MAX_PDF_OCR_PAGES_PER_DAY,50),monthly=budgetLimit(env.MAX_PDF_OCR_PAGES_PER_MONTH,1000);
   if(!Number.isSafeInteger(count)||count<1||!Number.isSafeInteger(daily)||daily<0||!Number.isSafeInteger(monthly)||monthly<0)throw new Error('Invalid OCR budget');
   await env.DB.prepare('INSERT OR IGNORE INTO pdf_ocr_budget(id,day,month) VALUES (1,?,?)').bind(day,month).run();
   const reserved=await env.DB.prepare(`UPDATE pdf_ocr_budget SET day=?,month=?,day_pages=CASE WHEN day=? THEN day_pages+? ELSE ? END,month_pages=CASE WHEN month=? THEN month_pages+? ELSE ? END

@@ -9,9 +9,16 @@ before(async()=>{
   const bundle=await build({stdin:{contents:`
     import {reserveBudget} from './worker/utils.mjs';
     import {reservePages} from './worker/ocr-cache.mjs';
+    import {scrape} from './worker/firecrawl.mjs';
+    let providerCalls=0;
+    globalThis.fetch=async()=>{providerCalls++;return Response.json({success:true,data:{}})};
     export default {async fetch(request,env){
       const input=await request.json();
       try{
+        if(input.kind==='scrape'){
+          await scrape({...env,MAX_FIRECRAWL_PER_DAY:input.limit},'https://example.test/');
+          return Response.json({providerCalls});
+        }
         const result=input.kind==='pdf'
           ?await reservePages({...env,MAX_PDF_OCR_PAGES_PER_DAY:String(input.daily),MAX_PDF_OCR_PAGES_PER_MONTH:String(input.monthly)},input.count)
           :await reserveBudget(env,input.kind,input.limit);
@@ -67,4 +74,19 @@ test('disabling either PDF cap retains the other cap and keeps failed reservatio
     const rows=(await db.prepare('SELECT reserved_pages FROM pdf_ocr_usage').all()).results;
     assert.ok(rows.every(r=>r.reserved_pages===2));
   }
+});
+
+test('malformed environment limits never grant an unlimited paid request',async()=>{
+  for(const limit of [' ','',false,'0x0','NaN',-1]){
+    const response=await reserve({kind:'scrape',limit});
+    assert.equal(response.status,409,`Firecrawl limit ${JSON.stringify(limit)}`);
+    assert.equal((await db.prepare('SELECT COUNT(*) count FROM usage').first()).count,0);
+  }
+  for(const limits of [{daily:' ',monthly:0},{daily:0,monthly:' '}]){
+    assert.equal((await reserve({kind:'pdf',...limits,count:1})).status,409);
+    assert.equal((await db.prepare('SELECT COUNT(*) count FROM pdf_ocr_budget').first()).count,0);
+  }
+  const response=await reserve({kind:'scrape',limit:'0'});
+  assert.equal(response.status,200);
+  assert.equal((await response.json()).providerCalls,1);
 });

@@ -9,10 +9,15 @@ import {createNotifications} from './notifications.mjs';
 import {createArchiveMigration,MigrationConflictError,MigrationNotFoundError,MigrationValidationError} from './archive-migration.mjs';
 import {createOperations,OperationsError} from './operations.mjs';
 import {createArchiveRecheck} from './archive-recheck.mjs';
+import {readProviderUsage} from './provider-usage.mjs';
 
 export async function internalRoute(request,env,ctx){
   const url=new URL(request.url);
   if(!await requireAdmin(request,env))return json({error:'Unauthorized'},401);
+  if(url.pathname==='/internal/operations/provider-usage'){
+    if(request.method!=='GET')return json({error:'Method not allowed'},405);
+    return json(await readProviderUsage(env));
+  }
   if(url.pathname==='/internal/operations/diagnostics'&&request.method==='GET'){
     const limit=url.searchParams.has('limit')?Number(url.searchParams.get('limit')):undefined;
     try{return json(await createOperations(env).diagnostics({requestedLimit:limit}));}
