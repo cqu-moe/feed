@@ -126,7 +126,7 @@ async function getJson(url, headers) {
   const response = await fetch(url, {
     method: 'GET',
     headers,
-    redirect: 'error',
+    redirect: 'manual',
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) throw new UsageReadError('http',response.status);

@@ -124,7 +124,7 @@ test('admin provider usage reports allowlisted Firecrawl and TextIn balances', a
     assert.deepEqual(await fixtureTimeouts(mf), [8000, 8000, 8000]);
     for (const call of calls) {
       assert.equal(call.init.method, 'GET');
-      assert.equal(call.init.redirect, 'error');
+      assert.equal(call.init.redirect, 'manual');
       assert.equal(call.init.body, undefined);
     }
     assert.equal(calls[0].init.headers.Authorization, 'Bearer firecrawl-key');
@@ -303,6 +303,19 @@ test('provider usage does not call providers when credentials are absent', async
   }
 });
 
+test('provider redirects fail closed without sending credentials to the redirect target', async()=>{
+  const {mf}=await fixture(async()=>new Response('provider redirect',{status:302,headers:{Location:'https://untrusted.example/collect'}}));
+  try{
+    const response=await mf.dispatchFetch(`https://feed.test${endpoint}`,{headers:{Authorization:'Bearer test-admin-token'}});
+    const body=await response.json();
+    assert.deepEqual(body.providers.firecrawl.error,{kind:'http',status:302});
+    assert.deepEqual(body.providers.textin.errors,{balance:{kind:'http',status:302},packages:{kind:'http',status:302}});
+    const calls=await fixtureCalls(mf);
+    assert.equal(calls.length,3);
+    assert.ok(calls.every(call=>call.init.redirect==='manual'&&!call.url.includes('untrusted.example')));
+  }finally{await mf.dispose()}
+});
+
 async function fixture(providerFetch, bindings = {}) {
   const bundle = await build({
     stdin: {
@@ -323,6 +336,7 @@ async function fixture(providerFetch, bindings = {}) {
                 return actualTimeout(milliseconds);
               };
               globalThis.fetch=(resource,init)=>{
+                new Request(resource,init); // Preserve native Workers Request option validation at the HTTP boundary.
                 globalThis.PROVIDER_USAGE_CALLS.push({url:String(resource),init});
                 return globalThis.PROVIDER_USAGE_FETCH(String(resource),init);
               };
