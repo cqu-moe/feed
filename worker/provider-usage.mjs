@@ -35,8 +35,8 @@ async function readFirecrawl(env) {
       usage: Object.keys(usage).length ? usage : null,
       missingFields,
     };
-  } catch {
-    return unavailableProvider('unavailable');
+  } catch (error) {
+    return {...unavailableProvider('unavailable'),error:failureDetails(error)};
   }
 }
 
@@ -64,13 +64,17 @@ async function readTextIn(env) {
     packages: packageResult.value,
     missingFields,
     unavailableRequests,
+    ...(unavailableRequests.length?{errors:{
+      ...(balanceResult.error?{balance:balanceResult.error}:{}),
+      ...(packageResult.error?{packages:packageResult.error}:{}),
+    }}:{}),
   };
 }
 
 async function readTextInBalance(headers) {
   try {
     const payload = await getJson(TEXTIN_BALANCE_URL, headers);
-    if (payload?.code !== 200 || !isRecord(payload.data)) return textInResult(null, [], true);
+    if (payload?.code !== 200 || !isRecord(payload.data)) return textInResult(null, [], true,invalidProvider(payload));
     const data = payload.data;
     const value = {};
     const missingFields = [];
@@ -84,8 +88,8 @@ async function readTextInBalance(headers) {
     if (data.pay_type === 1 || data.pay_type === 2) value.pay_type = data.pay_type;
     else missingFields.push('pay_type');
     return textInResult(Object.keys(value).length ? value : null, missingFields, false);
-  } catch {
-    return textInResult(null, [], true);
+  } catch (error) {
+    return textInResult(null, [], true,failureDetails(error));
   }
 }
 
@@ -93,7 +97,7 @@ async function readTextInPackages(headers) {
   try {
     const payload = await getJson(TEXTIN_PACKAGES_URL, headers);
     if (payload?.code !== 200 || !isRecord(payload.data) || !Array.isArray(payload.data.list))
-      return textInResult(null, [], true);
+      return textInResult(null, [], true,invalidProvider(payload));
 
     const packages = [];
     const missingFields = [];
@@ -113,8 +117,8 @@ async function readTextInPackages(headers) {
       packages.push(normalized);
     });
     return textInResult(packages, missingFields, false);
-  } catch {
-    return textInResult(null, [], true);
+  } catch (error) {
+    return textInResult(null, [], true,failureDetails(error));
   }
 }
 
@@ -125,7 +129,7 @@ async function getJson(url, headers) {
     redirect: 'error',
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
-  if (!response.ok) throw new Error('Provider HTTP error');
+  if (!response.ok) throw new UsageReadError('http',response.status);
   const bytes = await bounded(response, MAX_RESPONSE_BYTES);
   return JSON.parse(new TextDecoder().decode(bytes));
 }
@@ -152,8 +156,8 @@ function copyCount(target, source, field, missingFields, outputField = field, mi
   else missingFields.push(missingField);
 }
 
-function textInResult(value, missingFields, unavailable) {
-  return { value, missingFields, unavailable };
+function textInResult(value, missingFields, unavailable, error) {
+  return { value, missingFields, unavailable, error };
 }
 
 function unavailableProvider(status) {
@@ -162,4 +166,18 @@ function unavailableProvider(status) {
 
 function isRecord(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+class UsageReadError extends Error {
+  constructor(kind,status){super('Provider usage unavailable');this.kind=kind;this.status=status;}
+}
+function failureDetails(error){
+  if(error instanceof UsageReadError)return {kind:error.kind,status:error.status};
+  if(error?.name==='TimeoutError'||error?.name==='AbortError')return {kind:'timeout'};
+  if(error instanceof SyntaxError)return {kind:'invalid_json'};
+  if(error?.message==='Response too large')return {kind:'response_too_large'};
+  return {kind:'network_or_decode'};
+}
+function invalidProvider(payload){
+  return {kind:'provider_response',code:Number.isSafeInteger(payload?.code)?payload.code:null};
 }

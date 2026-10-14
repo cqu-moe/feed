@@ -193,6 +193,7 @@ test('provider usage preserves available providers through partial failures and 
       status: 'unavailable',
       usage: null,
       missingFields: [],
+      error: { kind: 'http', status: 503 },
     });
     assert.deepEqual(body.providers.textin, {
       status: 'partial',
@@ -208,6 +209,7 @@ test('provider usage preserves available providers through partial failures and 
       packages: null,
       missingFields: ['pay_type'],
       unavailableRequests: ['packages'],
+      errors: { packages: { kind: 'http', status: 500 } },
     });
     const raw = JSON.stringify(body);
     assert.doesNotMatch(raw, /raw-secret|Authorization|x-ti-secret-code|FIRECRAWL_API_KEY|TEXTIN_SECRET_CODE/);
