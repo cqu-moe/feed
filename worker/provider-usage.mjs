@@ -2,8 +2,10 @@ import { bounded } from './utils.mjs';
 
 const FIRECRAWL_CREDITS_URL = 'https://api.firecrawl.dev/v2/team/credit-usage';
 const TEXTIN_BALANCE_URL = 'https://api.textin.com/user/finance/balance';
-const TEXTIN_PARSE_API_PATH = 'https://api.textin.com/api/v1/xparse/parse/sync';
-const TEXTIN_PACKAGES_URL = `https://api.textin.com/user/finance/package?api_path=${encodeURIComponent(TEXTIN_PARSE_API_PATH)}&include_all=0`;
+// Finance uses the PDF product's catalog identifier; the xParse invocation URL returns code 404 here.
+// https://www.textin.com/document/open_api_package
+const TEXTIN_PACKAGE_API_PATH = 'https://api.textin.com/ai/service/v1/pdf_to_markdown';
+const TEXTIN_PACKAGES_URL = `https://api.textin.com/user/finance/package?api_path=${encodeURIComponent(TEXTIN_PACKAGE_API_PATH)}&include_all=0`;
 const REQUEST_TIMEOUT_MS = 8000;
 const MAX_RESPONSE_BYTES = 256 * 1024;
 

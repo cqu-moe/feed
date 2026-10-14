@@ -50,7 +50,7 @@ test('admin provider usage reports allowlisted Firecrawl and TextIn balances', a
         },
       });
     }
-    if (url === 'https://api.textin.com/user/finance/package?api_path=https%3A%2F%2Fapi.textin.com%2Fapi%2Fv1%2Fxparse%2Fparse%2Fsync&include_all=0') {
+    if (url === 'https://api.textin.com/user/finance/package?api_path=https%3A%2F%2Fapi.textin.com%2Fai%2Fservice%2Fv1%2Fpdf_to_markdown&include_all=0') {
       return Response.json({
         code: 200,
         data: {
@@ -119,7 +119,7 @@ test('admin provider usage reports allowlisted Firecrawl and TextIn balances', a
     assert.deepEqual(calls.map(call => call.url), [
       'https://api.firecrawl.dev/v2/team/credit-usage',
       'https://api.textin.com/user/finance/balance',
-      'https://api.textin.com/user/finance/package?api_path=https%3A%2F%2Fapi.textin.com%2Fapi%2Fv1%2Fxparse%2Fparse%2Fsync&include_all=0',
+      'https://api.textin.com/user/finance/package?api_path=https%3A%2F%2Fapi.textin.com%2Fai%2Fservice%2Fv1%2Fpdf_to_markdown&include_all=0',
     ]);
     assert.deepEqual(await fixtureTimeouts(mf), [8000, 8000, 8000]);
     for (const call of calls) {
