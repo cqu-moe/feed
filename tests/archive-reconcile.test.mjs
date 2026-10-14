@@ -40,15 +40,17 @@ test('only Archive reconcile publishes a complete no-OCR revision and one stable
         };
         const scrape=async()=>({markdown:'完整正文',rawHtml:snapshot,metadata:{statusCode:200,creditsUsed:1},
           actions:{javascriptReturns:[{value:JSON.stringify(page)}]}});
+        let reconcileAt=null;
         async function inspect(env,revisionId){
-          const [revision,readModel,event,eventSources,outbox]=await Promise.all([
+          const [revision,readModel,event,eventSources,outbox,article]=await Promise.all([
             env.DB.prepare('SELECT id,state,ready_at FROM article_revisions WHERE id=?').bind(revisionId).first(),
             env.DB.prepare('SELECT readable_text FROM article_read_models WHERE article_id=?').bind(${JSON.stringify(articleId)}).first(),
             env.DB.prepare('SELECT id,revision_id,kind,history_only,date_state FROM content_events WHERE revision_id=?').bind(revisionId).first(),
             env.DB.prepare('SELECT event_id,source_id,discovery_class,date_precision FROM event_sources ORDER BY source_id').all(),
             env.DB.prepare("SELECT topic,dedupe_key,payload_json FROM outbox ORDER BY dedupe_key").all(),
+            env.DB.prepare('SELECT latest_ready_revision_id,next_recheck_at FROM articles WHERE id=?').bind(${JSON.stringify(articleId)}).first(),
           ]);
-          return {revision,readModel,event,eventSources:eventSources.results,outbox:outbox.results};
+          return {revision,readModel,event,eventSources:eventSources.results,outbox:outbox.results,article};
         }
         export default{
           async fetch(request,env){
@@ -56,10 +58,17 @@ test('only Archive reconcile publishes a complete no-OCR revision and one stable
               const url=new URL(request.url);
               const archive=createArchive(env,{collector:createCollector({scrape})});
               if(url.pathname==='/capture')return Response.json(await archive.captureTask(${JSON.stringify(taskId)},1));
+              if(url.pathname==='/clock')reconcileAt=(await request.json()).at;
               if(url.pathname==='/reconcile'){
                 const revisionId=url.searchParams.get('revisionId');
                 if(!/^[a-f0-9]{24}$/.test(revisionId??''))return Response.json({error:'Invalid revision id'},400);
-                return Response.json(await archive.reconcileRevision(revisionId));
+                const nativeDateNow=Date.now;
+                if(reconcileAt!==null)Date.now=()=>reconcileAt;
+                try{
+                  return Response.json(await archive.reconcileRevision(revisionId));
+                }finally{
+                  Date.now=nativeDateNow;
+                }
               }
               if(url.pathname==='/inspect'){
                 const revisionId=url.searchParams.get('revisionId');
@@ -84,13 +93,15 @@ test('only Archive reconcile publishes a complete no-OCR revision and one stable
   }));
   try{
     const db=await mf.getD1Database('DB');
-    for(const name of ['0001_feed.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql','0007_archive_versions.sql','0008_content_events.sql']){
+    for(const name of ['0001_feed.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql','0007_archive_versions.sql','0008_content_events.sql','0017_archive_recheck.sql']){
       await applyMigration(db,await readFile(`migrations/${name}`,'utf8'));
     }
     const now=Date.now();
+    const readyAt=now+1234,publishedAt=new Date(now-3_600_000).toISOString();
     await db.prepare("INSERT INTO sources(id,name,url) VALUES ('jwc','教务处','https://jwc.cqu.edu.cn/')").run();
     await db.prepare(`INSERT INTO articles(id,source_id,url,title,published_at,discovered_at,status,attempts,lease_until)
-      VALUES (?,'jwc',?,?,'2026-01-03','2026-01-01','pending',0,0)`).bind(articleId,articleUrl,'统一发布通知').run();
+      VALUES (?,'jwc',?,?,?,?,'pending',0,0)`)
+      .bind(articleId,articleUrl,'统一发布通知',publishedAt,new Date(now).toISOString()).run();
     await db.prepare(`INSERT INTO tasks(id,kind,business_key,source_id,article_id,payload_json,state,due_at,attempt_no,created_at,updated_at)
       VALUES (?,'capture',?, 'jwc',?,'{}','running',?,1,?,?)`)
       .bind(taskId,`capture:${articleId}:reconcile`,articleId,now,now,now).run();
@@ -107,11 +118,13 @@ test('only Archive reconcile publishes a complete no-OCR revision and one stable
     assert.deepEqual({...readyMessage,outboxId:'x'.repeat(readyMessage.outboxId.length)},
       {v:1,type:'check-ready',outboxId:'x'.repeat(24),revisionId:captured.revisionId,generation:1});
 
+    await mf.dispatchFetch('https://feed.test/clock',{method:'POST',body:JSON.stringify({at:readyAt})});
     const first=await(await mf.dispatchFetch('https://feed.test/reconcile?revisionId='+captured.revisionId)).json();
     assert.deepEqual(first,{state:'ready',eventCreated:true});
     state=await(await mf.dispatchFetch('https://feed.test/inspect?revisionId='+captured.revisionId)).json();
     assert.equal(state.revision.state,'ready');
-    assert.ok(state.revision.ready_at);
+    assert.equal(state.revision.ready_at,readyAt);
+    assert.equal(state.article.next_recheck_at,readyAt+7*86_400_000);
     assert.equal(state.readModel.readable_text,'完整正文');
     assert.deepEqual({...state.event,revision_id:captured.revisionId},
       {id:state.event.id,revision_id:captured.revisionId,kind:'initial',history_only:0,date_state:'verified'});
@@ -179,7 +192,7 @@ test('content events preserve observation order, capture intent, source dates, a
   }));
   try{
     const db=await mf.getD1Database('DB'),bucket=await mf.getR2Bucket('ARCHIVE');
-    for(const name of ['0001_feed.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql','0007_archive_versions.sql','0008_content_events.sql']){
+    for(const name of ['0001_feed.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql','0007_archive_versions.sql','0008_content_events.sql','0017_archive_recheck.sql']){
       await applyMigration(db,await readFile(`migrations/${name}`,'utf8'));
     }
     await db.prepare("INSERT INTO sources(id,name,url) VALUES ('jwc','教务处','https://jwc.cqu.edu.cn/')").run();
@@ -222,7 +235,11 @@ test('content events preserve observation order, capture intent, source dates, a
       sha256:unknown.snapshotHash,httpMetadata:{contentType:'text/html; charset=utf-8'},
     });
 
+    const explicitNextRecheck=123456;
+    await db.prepare('UPDATE articles SET next_recheck_at=? WHERE id=?').bind(explicitNextRecheck,historyArticle).run();
     assert.deepEqual(await reconcile(mf,baseline.revisionId),{state:'ready',eventCreated:true});
+    assert.equal((await db.prepare('SELECT next_recheck_at FROM articles WHERE id=?').bind(historyArticle).first()).next_recheck_at,
+      explicitNextRecheck);
     assert.deepEqual(await reconcile(mf,changed.revisionId),{state:'ready',eventCreated:true});
     assert.deepEqual(await reconcile(mf,presentation.revisionId),{state:'ready',eventCreated:false});
     assert.deepEqual(await reconcile(mf,unknown.revisionId),{state:'ready',eventCreated:true});

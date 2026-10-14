@@ -3,6 +3,7 @@ import {readingExcerpt} from './reading.mjs';
 import {storeTextObject,verifyObject} from './archive-objects.mjs';
 import {aggregateOcrProjection,applyOcrEntries} from './archive-ocr-view.mjs';
 import {captureFeedWorkerEvent} from './telemetry.mjs';
+import {nextRecheckAt} from './recheck-policy.mjs';
 
 export async function reconcileRevision(env,revisionId,lifecycle){
   if(!/^[a-f0-9]{24}$/.test(revisionId??''))throw new Error('Invalid revision id');
@@ -52,6 +53,12 @@ export async function reconcileRevision(env,revisionId,lifecycle){
   const historyOnly=captureIntent==='backfill'||captureIntent==='migrated'
     ||(!captureIntent&&!sources.some(source=>source.discovery_class==='live'));
   const dateUnknown=sources.length>0&&sources.every(source=>source.date_precision==='unknown');
+  const hasRecheckSchedule=await env.DB.prepare(`SELECT 1 FROM sqlite_master
+    WHERE type='table' AND name='archive_recheck_cursor'`).first();
+  const nextRecheck=hasRecheckSchedule?nextRecheckAt(env,{
+    publishedAt:revision.published_at,
+    observedAt:revision.observed_at,
+  },timestamp):null;
 
   const statements=[];
   if(reading.ocrProjection){
@@ -115,12 +122,15 @@ export async function reconcileRevision(env,revisionId,lifecycle){
       (SELECT revision_no FROM article_revisions WHERE id=article_read_models.revision_id)`)
     .bind(readingExcerpt(reading.text),reading.text,reading.ocr?.resultHash??null,reading.ocr?.model??null,
       reading.ocr?.updatedAt??null,revisionId,revision.article_id,revision.requirement_generation));
-  statements.push(env.DB.prepare(`UPDATE articles SET latest_ready_revision_id=?
+  statements.push(env.DB.prepare(`UPDATE articles SET latest_ready_revision_id=?${hasRecheckSchedule?`,
+      next_recheck_at=CASE WHEN latest_ready_revision_id IS NULL AND next_recheck_at=0
+        THEN ? ELSE next_recheck_at END`:''}
     WHERE id=? AND EXISTS(SELECT 1 FROM article_revisions ready WHERE ready.id=? AND ready.article_id=articles.id
       AND ready.state='ready' AND ready.requirement_generation=? AND ready.revision_no>COALESCE((
         SELECT current.revision_no FROM article_revisions current
         WHERE current.id=articles.latest_ready_revision_id),0))
-    RETURNING id`).bind(revisionId,revision.article_id,revisionId,revision.requirement_generation));
+    RETURNING id`).bind(...(hasRecheckSchedule?[revisionId,nextRecheck]:[revisionId]),
+      revision.article_id,revisionId,revision.requirement_generation));
   const committed=await env.DB.batch(statements);
   if(!committed[0].results?.length){
     const current=await env.DB.prepare('SELECT state FROM article_revisions WHERE id=?').bind(revisionId).first();

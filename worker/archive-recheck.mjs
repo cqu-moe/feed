@@ -1,6 +1,7 @@
 import {sha} from './utils.mjs';
 import {createSources} from './sources.mjs';
 import {launchOutboxId,launchOutboxStatement} from './task-statements.mjs';
+import {articleAgeMs,boundedInteger,parseRecheckPolicy} from './recheck-policy.mjs';
 
 const eligibleSource=`s.enabled=1 AND st.enabled=1 AND s.validation_state='verified'
   AND (s.id=a.source_id OR EXISTS(SELECT 1 FROM article_sources als WHERE als.article_id=a.id AND als.source_id=s.id))
@@ -11,9 +12,7 @@ export function createArchiveRecheck(env,{now=()=>Date.now()}={}){
     const value=now();
     return value instanceof Date?value.getTime():value;
   };
-  const recentAfterMs=boundedInteger(env.RECHECK_RECENT_AFTER_SEC,30*86_400,60,365*86_400,'RECHECK_RECENT_AFTER_SEC')*1000;
-  const recentIntervalMs=boundedInteger(env.RECHECK_RECENT_INTERVAL_SEC,7*86_400,600,365*86_400,'RECHECK_RECENT_INTERVAL_SEC')*1000;
-  const oldIntervalMs=boundedInteger(env.RECHECK_OLD_INTERVAL_SEC,30*86_400,600,365*86_400,'RECHECK_OLD_INTERVAL_SEC')*1000;
+  const policy=parseRecheckPolicy(env);
 
   return {
     async scheduleDue({limit=20}={}){
@@ -22,7 +21,8 @@ export function createArchiveRecheck(env,{now=()=>Date.now()}={}){
       const at=timestamp(),pageSize=boundedInteger(limit,20,1,100);
       const managed=env.SOURCE_MANAGEMENT_ENABLED==='true';
       const cursor=await env.DB.prepare('SELECT due_at,article_id,generation FROM archive_recheck_cursor WHERE id=1').first();
-      const rows=await env.DB.prepare(`SELECT a.id,a.url,a.source_id,a.next_recheck_at AS due_at,r.observed_at,r.published_at
+      const rows=await env.DB.prepare(`SELECT a.id,a.url,a.source_id,a.next_recheck_at AS due_at,
+        r.observed_at AS observedAt,r.published_at AS publishedAt
         FROM articles a
         JOIN article_revisions r ON r.id=a.latest_ready_revision_id AND r.article_id=a.id
         WHERE a.latest_ready_revision_id IS NOT NULL AND a.next_recheck_at<=?
@@ -48,8 +48,8 @@ export function createArchiveRecheck(env,{now=()=>Date.now()}={}){
           WHERE s.id=? AND s.config_version=? AND ${eligibleSource})`:'';
         const gateArgs=managed?[source.id,source.configVersion]:[];
         const age=articleAgeMs(row,at);
-        const interval=age<=recentAfterMs?recentIntervalMs:oldIntervalMs;
-        const nextDue=at+interval,businessKey=`recheck:${row.id}:${row.due_at}`;
+        const nextDue=at+(age<=policy.recentAfterMs?policy.recentIntervalMs:policy.oldIntervalMs);
+        const businessKey=`recheck:${row.id}:${row.due_at}`;
         const taskId=(await sha(businessKey)).slice(0,24);
         const payload={source,recheck:{articleId:row.id,dueAt:row.due_at,configVersion:source.configVersion}};
         statements.push(
@@ -92,24 +92,11 @@ export function createArchiveRecheck(env,{now=()=>Date.now()}={}){
         due:row.due??0,
         scheduledTasks:row.scheduled_tasks,
         intervalsSeconds:{
-          recentAfter:recentAfterMs/1000,
-          recent:recentIntervalMs/1000,
-          old:oldIntervalMs/1000,
+          recentAfter:policy.recentAfterMs/1000,
+          recent:policy.recentIntervalMs/1000,
+          old:policy.oldIntervalMs/1000,
         },
       };
     },
   };
-}
-
-function boundedInteger(value,fallback,min,max,name='setting'){
-  if(value===undefined||value===null)return fallback;
-  const number=Number(value);
-  if(!Number.isSafeInteger(number)||number<min||number>max)
-    throw new Error(`Recheck configuration ${name} must be an integer from ${min} to ${max}`);
-  return number;
-}
-
-function articleAgeMs(row,at){
-  const publishedAt=Date.parse(row.published_at??'');
-  return Number.isFinite(publishedAt)?at-publishedAt:at-row.observed_at;
 }
