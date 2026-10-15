@@ -4,6 +4,13 @@ import { createHash } from 'node:crypto';
 
 function sha(bytes) { return createHash('sha256').update(bytes).digest('hex'); }
 
+export function assertSelectedAttemptCleanup(report) {
+  if (report.run.results.some(result => result.selected && result.attempts.some(attempt =>
+    attempt.cleanup === 'failed' || attempt.secondaryErrors?.some(error => error.phase === 'cleanup')))) {
+    throw new Error('Selected browser attempt cleanup failed; original details remain in report.json');
+  }
+}
+
 export function redact(input, values) {
   let text = input;
   for (const value of values) {

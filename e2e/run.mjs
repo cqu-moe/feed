@@ -4,7 +4,7 @@ import { mkdir, readdir, readFile, realpath, writeFile } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { exportPublic, redact } from './evidence.mjs';
+import { assertSelectedAttemptCleanup, exportPublic, redact } from './evidence.mjs';
 
 import { AUTH_E2E_COMMIT, FEED_E2E_BASE_COMMIT, setFeedEntitlements, startFeedRuntime } from './runtime.mjs';
 
@@ -157,6 +157,7 @@ try {
       const s = evidence.summary;
       if (!s.executed || s.skipped || s.interrupted || s.flaky) throw new Error('Required suite was empty, skipped, interrupted or flaky');
       if (evidence.runnerExit !== 0 || s.failed || report.run.status !== 'passed') throw new Error(`Browser suite failed (exit ${evidence.runnerExit})`);
+      if (!crossBrowser) assertSelectedAttemptCleanup(report);
       if (!process.env.FEED_E2E_STOCK_BROWSER) {
         const receipts = (await readdir(variantDir)).filter(p => p.startsWith('browser-cleanup-'));
         if (!receipts.length) throw new Error('No browser cleanup receipt');

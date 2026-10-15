@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { exportPublic } from '../e2e/evidence.mjs';
+import { assertSelectedAttemptCleanup, exportPublic } from '../e2e/evidence.mjs';
 
 test('public E2E export preserves raw evidence and resolves artifact IDs after redaction and binary omission', async t => {
   const root = await mkdtemp(join(tmpdir(), 'feed-evidence-'));
@@ -50,4 +50,24 @@ test('public E2E export also redacts startup and supplementary-engine evidence w
   await writeFile(join(source, 'playwright-report.json'), JSON.stringify({ error: 'synthetic-password' }));
   await exportPublic(source, destination, ['synthetic-password']);
   assert.deepEqual(JSON.parse(await readFile(join(destination, 'playwright-report.json'), 'utf8')), { error: '[redacted]' });
+});
+
+test('selected attempt cleanup failures override passing browser aggregates and preserve original details', () => {
+  for (const attempt of [
+    { cleanup: 'failed', secondaryErrors: [] },
+    { cleanup: 'complete', secondaryErrors: [{ phase: 'cleanup', code: 'ENGINE_FAILURE', message: 'private-provider-detail' }] },
+  ]) {
+    const report = { run: { status: 'passed', exitCode: 0, results: [{ selected: true, attempts: [attempt] }] } };
+    const original = structuredClone(report);
+    assert.throws(() => assertSelectedAttemptCleanup(report), error => {
+      assert.match(error.message, /cleanup failed/);
+      assert.ok(!error.message.includes('private-provider-detail'));
+      return true;
+    });
+    assert.deepEqual(report, original);
+  }
+  assert.doesNotThrow(() => assertSelectedAttemptCleanup({ run: { results: [
+    { selected: true, attempts: [{ cleanup: 'complete', secondaryErrors: [] }] },
+    { selected: false, attempts: [{ cleanup: 'failed', secondaryErrors: [{ phase: 'cleanup' }] }] },
+  ] } }));
 });
