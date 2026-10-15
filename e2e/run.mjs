@@ -7,6 +7,8 @@ import { pathToFileURL } from 'node:url';
 import { AUTH_E2E_COMMIT, FEED_E2E_BASE_COMMIT, setFeedEntitlements, startFeedRuntime } from './runtime.mjs';
 
 const authInput = process.env.FEED_E2E_AUTH_CHECKOUT;
+const ingestion = process.env.FEED_E2E_SUITE === 'ingestion';
+if (process.env.FEED_E2E_SUITE && !ingestion) throw new Error('Unknown FEED_E2E_SUITE');
 if (!authInput) throw new Error('FEED_E2E_AUTH_CHECKOUT is required (a clean pinned checkout inside .e2e)');
 const authDir = resolve(authInput);
 const outputRoot = resolve('.e2e');
@@ -41,6 +43,8 @@ const isolatedEnv = {
   PLAYWRIGHT_BROWSERS_PATH: browserDir,
 };
 const manifest = {
+  suite: ingestion ? 'ingestion' : 'reader',
+  disableConsumers: process.env.FEED_E2E_DISABLE_CONSUMERS === '1',
   feedCommit, feedBase: FEED_E2E_BASE_COMMIT, feedDirty, authCommit,
   sourceDigest: await sourceDigest(),
   runner: 'e2e@0.21.0', engine: '@e2e-dev/web@0.15.0', node: process.version,
@@ -73,7 +77,8 @@ try {
     let accounts = {};
     let rawLog = '';
     try {
-      runtime = await startFeedRuntime({ buildDir, stateDir: join(variantDir, '.runtime'), authDir });
+      runtime = await startFeedRuntime({ buildDir, stateDir: join(variantDir, '.runtime'), authDir, ingestion,
+        disableConsumers: process.env.FEED_E2E_DISABLE_CONSUMERS === '1' });
       if (process.env.FEED_E2E_FAIL_STARTUP === '1') throw new Error('Injected startup failure after real Worker initialization');
       evidence.readiness = runtime.readiness;
       evidence.migrations = runtime.migrations;
@@ -95,6 +100,8 @@ try {
         FEED_E2E_CONTROL_URL: runtime.controlOrigin, FEED_E2E_CONTROL_SECRET: runtime.controlSecret,
         FEED_E2E_OUTPUT: variantDir, FEED_E2E_MOBILE: variant === 'mobile' ? '1' : '',
         FEED_E2E_BREAK_ASSERTION: faults.assertion,
+        FEED_E2E_SUITE: ingestion ? 'ingestion' : '',
+        FEED_E2E_ADMIN_TOKEN: runtime.ingestion?.bindings.ADMIN_TOKEN ?? '',
         FEED_E2E_STOCK_BROWSER: process.env.FEED_E2E_STOCK_BROWSER || '',
         FEED_E2E_OWNER_ID: accounts.owner.userId, FEED_E2E_OTHER_ID: accounts.other.userId,
       };
@@ -141,6 +148,11 @@ try {
       evidence.errors.push(...errorMessages(error));
       if (error.cleanup) evidence.cleanup = error.cleanup;
     } finally {
+      if (runtime?.ingestion) {
+        try {
+          await writeFile(join(variantDir, 'ingestion.json'), JSON.stringify(await runtime.ingestion.control({ action: 'ingestion-state' }, { mf: null, db: runtime.feedDb }), null, 2));
+        } catch (error) { evidence.errors.push(`Ingestion evidence readback failed: ${error.message}`); }
+      }
       let runtimeSensitive = [];
       try { runtimeSensitive = await runtime?.sensitiveValues() ?? []; }
       catch { evidence.errors.push('Sensitive-value inventory failed; public export withheld'); }
@@ -193,7 +205,7 @@ async function sourceDigest() {
   const paths = execFileSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], { encoding: 'utf8' }).split('\0').filter(Boolean).sort();
   const hashes = [];
   for (const path of paths) {
-    if (!/^(src\/|worker\/|e2e\/|public\/|scripts\/|migrations\/|tsconfig|e2e\.config|package\.json|pnpm-|\.github\/|\.design\/|\.nvmrc|vite\.config|index\.html)/.test(path)) continue;
+    if (!/^(src\/|worker\/|e2e\/|public\/|scripts\/|migrations\/|tests\/helpers\/mixed-pdf\.mjs$|tsconfig|e2e\.config|package\.json|pnpm-|\.github\/|\.design\/|\.nvmrc|vite\.config|index\.html)/.test(path)) continue;
     hashes.push([path, sha(await readFile(path))]);
   }
   return { sha256: sha(JSON.stringify(hashes)), files: Object.fromEntries(hashes) };

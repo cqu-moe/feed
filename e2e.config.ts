@@ -74,10 +74,12 @@ export default {
     username: process.env[`FEED_E2E_${role.toUpperCase()}_EMAIL`]!,
     password: process.env[`FEED_E2E_${role.toUpperCase()}_PASSWORD`]!,
   }])),
-  tests: ['e2e/**/*.e2e.ts'],
+  tests: process.env.FEED_E2E_SUITE === 'ingestion'
+    ? ['e2e/ingestion.e2e.ts']
+    : ['e2e/**/*.e2e.ts', '!e2e/ingestion.e2e.ts'],
   workers: 1,
   retries: 0,
-  timeout: 120000,
+  timeout: process.env.FEED_E2E_SUITE === 'ingestion' ? 300000 : 120000,
   assertionTimeout: 10000,
   output: process.env.FEED_E2E_OUTPUT!,
   targets: [{

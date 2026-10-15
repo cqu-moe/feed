@@ -6,6 +6,7 @@ import { createConnection } from 'node:net';
 import { join, resolve } from 'node:path';
 
 import { Miniflare, convertV4MiniflareOptions, Log, LogLevel } from 'miniflare';
+import { createIngestionFixture } from './ingestion-runtime.mjs';
 
 export const FEED_E2E_BASE_COMMIT = 'dc57c11a324e9e0091dfc3f0c0ddf666f205069e';
 export const AUTH_E2E_COMMIT = 'd9bf0c5e6d5cc459029da6a345991b8d0f13f514';
@@ -181,7 +182,7 @@ export async function seedSyntheticNotification(db, bucket) {
   return { id, objectHash, key, manifestHash, manifestKey };
 }
 
-export async function startFeedRuntime({ buildDir, stateDir, authDir }) {
+export async function startFeedRuntime({ buildDir, stateDir, authDir, ingestion = false, disableConsumers = false }) {
   await rm(stateDir, { recursive: true, force: true });
   const feedBundle = await readFile(join(buildDir, 'feed', 'index.js'), 'utf8');
   const authBundle = await readFile(join(buildDir, 'auth', 'index.js'), 'utf8');
@@ -194,11 +195,14 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir }) {
   const observations = [];
   const unexpected = [];
   const mails = new Map();
+  const ingest = ingestion ? createIngestionFixture() : null;
   let mf;
   let feedDb;
   let authDb;
 
   const denyUnexpected = async request => {
+    const fixtureResponse = await ingest?.outbound(request);
+    if (fixtureResponse) return fixtureResponse;
     const url = new URL(request.url);
     if (url.origin === 'https://api.resend.com' && url.pathname === '/emails' && request.method === 'POST') {
       const mail = await request.json();
@@ -247,10 +251,12 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir }) {
           MAX_OCR_PER_DAY: '0',
           MAX_PDF_OCR_PAGES_PER_DAY: '0',
           MAX_PDF_OCR_PAGES_PER_MONTH: '0',
+          ...(ingest?.bindings ?? {}),
         },
         d1Databases: { DB: 'feed-e2e-database' },
         r2Buckets: { ARCHIVE: 'feed-e2e-archive' },
         queueProducers: { FEED_JOBS: 'feed-e2e-jobs', FEED_EVENTS: 'feed-e2e-events', FEED_MAIL: 'feed-e2e-mail' },
+        ...(ingest ? { queueConsumers: disableConsumers ? {} : ingest.consumers } : {}),
         workflows: {
           INGEST: { name: 'feed-e2e-ingest', className: 'FeedIngest' },
           PDF_OCR: { name: 'feed-e2e-pdf-ocr', className: 'PdfOcrWorkflow' },
@@ -271,6 +277,7 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir }) {
           assetConfig: { not_found_handling: 'single-page-application' },
         },
       },
+      ...(ingest ? [ingest.deadLetterObserver] : []),
       {
         name: 'auth',
         modules: [{ type: 'ESModule', path: join(buildDir, 'auth', 'index.js'), contents: authBundle }],
@@ -338,6 +345,11 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir }) {
       let body = '';
       for await (const chunk of request) body += chunk;
       const input = JSON.parse(body);
+      if (ingest && input.action.startsWith('ingestion-')) {
+        const result = await ingest.control(input, { mf, db: feedDb });
+        response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(result));
+        return;
+      }
       if (input.action === 'add-verified-source') {
         const now = Date.now();
         await feedDb.batch([
@@ -448,7 +460,8 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir }) {
     if (Object.values(baseline).some(n => n !== 0)) throw new Error('Fresh runtime contains prior user state');
     await authDb.prepare("INSERT INTO entitlement_config(key,value) VALUES ('invitation_required','1') ON CONFLICT(key) DO UPDATE SET value='1'").run();
     const bucket = await mf.getR2Bucket('ARCHIVE', 'feed');
-    const synthetic = await seedSyntheticNotification(feedDb, bucket);
+    const synthetic = ingest ? null : await seedSyntheticNotification(feedDb, bucket);
+    if (ingest) await ingest.initialize(feedDb, bucket);
     await new Promise(done => control.listen(0, '127.0.0.1', done));
     const authOrigin = (await mf.unsafeGetDirectURL('auth')).href;
     const feedOrigin = `https://127.0.0.1:${feedPort}`;
@@ -470,7 +483,7 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir }) {
       controlOrigin: `http://127.0.0.1:${control.address().port}`,
       controlSecret,
       async sensitiveValues() {
-        const values = [oauthClientSecret, rpcClientSecret, controlSecret, ...mails.values()];
+        const values = [oauthClientSecret, rpcClientSecret, controlSecret, ingest?.bindings.ADMIN_TOKEN, ...mails.values()].filter(Boolean);
         for (const table of ['session', 'oauthAccessToken', 'oauthRefreshToken']) {
           const rows = await authDb.prepare(`SELECT token FROM ${table}`).all();
           values.push(...rows.results.map(row => row.token).filter(Boolean));
@@ -478,12 +491,14 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir }) {
         return values;
       },
       observations,
+      ingestion: ingest,
       feedDb,
       authDb,
       oauth,
       synthetic,
       mails,
       async close() {
+        ingest?.release();
         const ports = [feedPort, authPort, control.address()?.port].filter(Boolean);
         const results = await Promise.allSettled([
           new Promise((done, fail) => control.close(error => error ? fail(error) : done())),

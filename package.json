@@ -13,7 +13,8 @@
     "deploy:ci": "wrangler d1 migrations apply cqu-feed-mvp --remote && wrangler deploy",
     "deploy": "pnpm build && pnpm deploy:ci",
     "test:browser": "tsc --project tsconfig.browser.json && playwright test",
-    "test:e2e": "node e2e/run.mjs"
+    "test:e2e": "node e2e/run.mjs",
+    "test:e2e:ingestion": "FEED_E2E_SUITE=ingestion node e2e/run.mjs"
   },
   "dependencies": {
     "@cqu-moe/theme": "file:./.design/cqu-moe-theme-1.1.0.tgz",

@@ -43,13 +43,14 @@ jobs:
           retention-days: 7
 
   e2e:
-    name: Real Auth and Feed E2E (round ${{ matrix.round }})
+    name: Real Auth and Feed ${{ matrix.suite }} E2E (round ${{ matrix.round }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         round: [1, 2]
+        suite: [reader, ingestion]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -77,11 +78,12 @@ jobs:
       - run: pnpm test:e2e
         env:
           FEED_E2E_AUTH_CHECKOUT: .e2e/auth-checkout
-          FEED_E2E_OUTPUT: .e2e/round-${{ matrix.round }}
+          FEED_E2E_SUITE: ${{ matrix.suite == 'ingestion' && 'ingestion' || '' }}
+          FEED_E2E_OUTPUT: .e2e/${{ matrix.suite }}-round-${{ matrix.round }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: feed-auth-e2e-round-${{ matrix.round }}
-          path: .e2e/round-${{ matrix.round }}/public/
+          name: feed-auth-${{ matrix.suite }}-e2e-round-${{ matrix.round }}
+          path: .e2e/${{ matrix.suite }}-round-${{ matrix.round }}/public/
           if-no-files-found: error
           retention-days: 7

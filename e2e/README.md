@@ -80,3 +80,53 @@ Negative controls, each expected to exit nonzero (use distinct output paths):
 
 Firefox/WebKit, real devices, production Auth, live school fetches, email delivery
 and paid OCR are outside this ticket's local Chromium acceptance.
+
+## FEED-03 native ingestion
+
+```sh
+FEED_E2E_AUTH_CHECKOUT=.e2e/auth-checkout pnpm test:e2e:ingestion
+```
+
+This selects `ingestion.e2e.ts` instead of the preloaded reader suite. Each
+viewport starts empty articles/tasks/revisions/events/derived outputs and R2,
+with all migrations applied. Existing catalogue sources are disabled. The
+existing administrator HTTP routes create a synthetic `school.example.test`
+site, verify two columns, enable and schedule discovery, capture, backfill,
+recover failed attempts, recheck versions and replay Queue handoffs. Native
+Miniflare consumers start the unmodified `DiscoveryWorkflow`, `CaptureWorkflow`
+and `ArchiveOcrWorkflow`; no direct handler/step calls or ready-state inserts.
+Auth signup, verification, OAuth, RPC and the reader remain real.
+
+Only Firecrawl's school/article response and TextIn's OCR response are synthetic.
+The provider ledger records requests independently from product accounting.
+Synthetic PDFs reuse the existing mixed-PDF fixture. This suite owns ingestion
+completeness, source/pagination deduplication, task/receipt reuse, failure recovery,
+history-only and presentation-only event semantics. Detailed reader/PDF controls
+remain owned by FEED-02 and the existing Playwright suite.
+
+The DLQ case uses a real R2 deletion/restoration: while OCR is held at the vendor
+boundary, remove the new revision's saved snapshot; after OCR succeeds, native
+readiness consumption must fail object verification and reach the native DLQ.
+A separate observer consumes only that DLQ into an observation table. It never
+replaces the product consumer. Local consumer `maxRetries=0` intentionally
+shortens platform delivery retries; the product's minimum 60-second replay window
+is still waited in real time. The admin diagnostics/replay route must recover
+from the original payload after the exact snapshot bytes are restored. No D1
+success or receipt state is changed by the fixture.
+
+Recheck coverage advances only an existing article's schedule deadline, then
+uses the real `/internal/rechecks` entry point. It does not claim to wait the
+production seven-day cadence. A malformed TextIn response retains raw/request
+receipts, blocks another paid attempt, and cannot publish its new observation.
+`MAIL_ENABLED=false`; content-event assertions do not claim email delivery.
+
+The shared runner's empty/assertion/startup/cleanup controls also apply to this
+suite. `FEED_E2E_DISABLE_CONSUMERS=1` removes the local native consumers; source
+verification must time out nonzero with no Workflow attempts or ready records.
+CI runs reader and ingestion in separate jobs, each twice with desktop
+and phone viewports. All browser isolation and evidence-export rules above
+apply. `public/<variant>/ingestion.json` records independent D1/R2/provider/DLQ
+readback, and `ingestion-checkpoints.json` lists completed behavior checks.
+Local native emulation proves the installed runtime path; remote Cloudflare
+scheduling, retry timing/concurrency, real schools/vendors and paid OCR remain
+independent acceptance boundaries.
