@@ -93,7 +93,16 @@ test('FEED02 real archive search reading and PDF history', async ({ app, screen,
     downloadUrl: null,
   });
 
+  const currentDocUrl = await screen.getByRole('link', '当前申请表.doc').getAttribute('href');
+  const currentDocResponse = await rawFetch(browser, currentDocUrl!, 'HEAD');
   const currentDoc = await browser.waitForDownload(() => screen.getByRole('link', '当前申请表.doc').click());
+  await writeFile(join(process.env.FEED_E2E_OUTPUT!, 'download-response.json'), JSON.stringify({
+    status: currentDocResponse.status,
+    contentDisposition: currentDocResponse.headers['content-disposition'] ?? null,
+    contentType: currentDocResponse.headers['content-type'] ?? null,
+    suggestedFilename: currentDoc.suggestedFilename,
+    sha256: sha256(await readFile(currentDoc.absolutePath)),
+  }, null, 2));
   expect(currentDoc.suggestedFilename).toBe('当前申请表.doc');
   const currentDocBytes = await readFile(currentDoc.absolutePath);
   expect(currentDocBytes.toString('utf8')).toBe('FEED02 current ordinary attachment');

@@ -18,7 +18,8 @@ export function createIngestionFixture() {
   let hidden;
   const calls = [];
   const faults = [];
-  const day = offset => new Date(Date.now() + offset * 86400000).toISOString().slice(0, 10);
+  const calendar = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' });
+  const day = offset => calendar.format(new Date(Date.now() + offset * 86400000));
   const bindings = {
     ADMIN_TOKEN: randomBytes(32).toString('hex'),
     BRIDGE_SECRET: 'synthetic-ingestion-bridge-secret',

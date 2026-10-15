@@ -37,6 +37,8 @@ const isolatedEnv = {
   PATH: process.env.PATH,
   TMPDIR: process.env.TMPDIR,
   CI: process.env.CI,
+  // Linux Chromium converts Unicode download names through the native locale.
+  ...(process.platform === 'linux' ? { LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' } : {}),
   HOME: privateHome,
   XDG_CONFIG_HOME: join(privateHome, '.config'),
   WRANGLER_SEND_METRICS: 'false',
