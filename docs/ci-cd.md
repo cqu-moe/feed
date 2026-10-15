@@ -4,7 +4,7 @@
 
 ## GitHub Actions
 
-`.github/workflows/ci.yml` 在 main push、PR 和手动触发时运行 `pnpm run ci`：测试、TypeScript/Vite/PDF 静态资源构建、设计规范检查和 Worker dry-run。最后一步验证 Wrangler 配置及 Worker 打包，不上传或部署，也不证明远端绑定可用。只授予 `contents: read`，不配置 Cloudflare secret，不负责部署。
+`.github/workflows/ci.yml` 在 main push、PR 和手动触发时运行 `pnpm run ci`：测试、TypeScript/Vite/PDF 静态资源构建、设计规范检查和 Worker dry-run。最后一步验证 Wrangler 配置及 Worker 打包，不上传或部署，也不证明远端绑定可用。随后安装 Chromium 并执行 `pnpm test:browser`，失败时保留浏览器截图、trace 和报告 7 天。浏览器测试运行真实构建后的前端与 PDF.js，通过受控 HTTP fixture 提供通知和文件；真实权限、Range/HEAD、版本不可变与快照净化仍由 Miniflare 集成测试验证。只授予 `contents: read`，不配置 Cloudflare secret，不负责部署。
 
 ## Cloudflare Workers Builds
 
@@ -34,3 +34,12 @@ Auth 的 `cqu-feed` 客户端已同步主页与上述回调；保留原 workers.
 GitHub CI 与 Cloudflare Builds 独立触发，因此 Cloudflare Build command 本身也执行检查。验证分别查看 GitHub CI、对应提交的 Cloudflare build/deployment、线上 `/health` 和实际登录业务；前两者通过不代表真实账号验收完成。
 
 参考：[Workers Git integration](https://developers.cloudflare.com/workers/ci-cd/builds/git-integration/)、[Build configuration](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/)、[Build image](https://developers.cloudflare.com/workers/ci-cd/builds/build-image/)。
+
+## 本地浏览器回归
+
+首次运行先执行 `pnpm exec playwright install chromium`，再执行 `pnpm test:browser`。测试会构建前端并启动独立预览服务，不复用已有开发服务器。多 worktree 并行时用 `FEED_TEST_PORT=5191 pnpm test:browser` 指定不同端口。已安装 Chrome 的本地环境也可使用 `PLAYWRIGHT_CHANNEL=chrome pnpm test:browser`，测试仍创建独立无头浏览器上下文。
+
+`pnpm run ci` 保持无浏览器依赖，供 Cloudflare 构建使用。浏览器回归作为 GitHub Actions 的独立步骤执行，不能把 fixture 会话通过当成生产 Auth 登录已验收。
+
+
+PDF 打开事件另用 `VITE_POSTHOG_PROJECT_TOKEN=phc_feed_browser_test pnpm test:browser tests/browser/pdf-telemetry.spec.ts` 验证，GitHub Actions 会运行此步骤。测试配置只接受这个虚拟项目标识，并将统计主机固定为本地截获端点；不会沿用真实项目 token。该测试模拟普通浏览器属性，使 SDK 不因 webdriver 过滤所有事件，再检查真实 SDK 的 HTTP 事件。普通浏览器回归跳过这两项，由此专用步骤执行。

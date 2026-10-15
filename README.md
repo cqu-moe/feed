@@ -37,9 +37,10 @@ Cloudflare Cron
 2. 点击登录，跳转到 auth.cqu.moe。
 3. 使用拥有 `feed.access` 权益的账号完成授权。
 4. 在“通知”页搜索、筛选来源和翻页；URL 会保留 `q`、`source`、`page`。
-5. 打开通知查看统一阅读正文。普通正文渲染纯文本；OCR 结果使用安全 Markdown 表格按页展示，不渲染源站 HTML。
-6. 附件区可下载已保存文件；PDF 附件用自托管 PDF.js 阅读器在 iframe 中预览，原文件由受保护的 `/api/files/{articleId}/{filename}` 提供。
-7. “原貌存档”在新窗口打开。快照会移除源站脚本和表单外壳、保留正文并限制外部请求，并把已保存的 PDF 阅读区替换为 Feed 自己的受保护 PDF 地址。
+5. 打开通知后直接阅读。正文型 PDF 默认展示已保存的原件，可切换到“正文”；普通 PDF 附件不改变默认阅读方式。普通正文渲染纯文本，OCR 结果使用安全 Markdown，不渲染源站 HTML。
+6. PDF 阅读器支持上下连续滚动、页码链接、缩放和下载；通知原件、附件预览及网页快照里的 PDF 使用同一阅读器。普通附件列在正文末尾。
+7. 阅读切换栏中的“网页快照”在当前页打开所选版本的快照，可通过浏览器后退返回。快照移除源站脚本和表单外壳、限制外部请求，并把已保存的 PDF 阅读区替换为 Feed 受保护的阅读器。
+8. 按需打开历史记录或存档信息，查看旧版本、采集记录与截图。切换版本后，正文、原件、附件和快照属于同一版本；未完成版本不会替代当前可读版本。
 
 没有 `feed.access` 的已登录账号会看到无权页。Auth 侧撤销权益后，下一次受保护请求会被 introspection 拒绝。
 
@@ -59,13 +60,9 @@ pnpm check:design
 - `pnpm test` 使用 Miniflare 覆盖搜索、Range、快照安全、OAuth BFF 和附件上传。
 - `pnpm build` 执行 TypeScript 检查并生成 `dist/`。
 - `pnpm check:design` 执行 CQU Moe Design 1.1.0 规则检查。
+- `pnpm test:browser` 验证构建后页面的阅读、版本切换和 PDF 交互。安装浏览器及独立遥测回归命令见 [通知阅读页验证](docs/design/notice-reading-validation.md)。
 
-当前工作区验证结果：
-
-- `pnpm test`：结果及覆盖范围见验收记录。
-- `pnpm build`：通过；Vite 提示单个 minified chunk 超过 500 KiB。
-- `pnpm check:design`：通过。
-- 前端 fixture 覆盖双主题和响应式；另以真实登录会话验证云端业务。
+通知阅读改版的测试结果与未执行层级见 [通知阅读页验证](docs/design/notice-reading-validation.md)。既有云端和真实会话证据见 [验收记录](docs/acceptance.md)，不代表当前分支已部署或完成新版本账号验收。
 
 ## 部署摘要
 

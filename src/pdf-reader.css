@@ -1,0 +1,70 @@
+.feed-reader {
+  display: flex;
+  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--muted);
+}
+
+.feed-reader-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  flex-wrap: wrap;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.feed-reader-toolbar span {
+  min-width: 3.5rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.feed-reader-document {
+  position: relative;
+  width: 100%;
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  overflow-anchor: none;
+  padding: var(--space-3);
+}
+
+.feed-reader-document .react-pdf__Document {
+  display: flex;
+  width: max-content;
+  min-width: 100%;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.feed-reader-page {
+  display: grid;
+  flex: none;
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-popover);
+  place-items: center;
+}
+
+.feed-reader-page > .react-pdf__Page {
+  width: 100%;
+}
+
+.feed-reader-page[data-feed-page-state='placeholder'] > p {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: var(--text-sm);
+}

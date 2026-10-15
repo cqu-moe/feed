@@ -17,7 +17,7 @@ before(async()=>{
   await db.prepare("INSERT INTO sources(id,name,url) VALUES ('jwc','教务处','https://jwc.cqu.edu.cn/'),('civil','土木学院','https://civil.cqu.edu.cn/')").run();
   await db.prepare("INSERT INTO articles(id,source_id,url,title,published_at,discovered_at,body_text,snapshot_key) VALUES (?,'jwc','https://jwc.cqu.edu.cn/info/1/1.htm','关于优异生申请通知','2026-10-01','2026-10-11','请提交奖学金材料，比例100%。','snapshot')").bind(id).run();
   await db.prepare("INSERT INTO articles(id,source_id,url,title,published_at,discovered_at,body_text) VALUES (?,'civil','https://civil.cqu.edu.cn/info/1/2.htm','研究生奖学金','2026-10-02','2026-10-11','报名材料')").bind(second).run();
-  await db.prepare("INSERT INTO attachments(id,article_id,name,original_url,filename,object_key,bytes,content_type,status) VALUES ('file',?,'通知正文.pdf','https://jwc.cqu.edu.cn/file.pdf','attachment-1.pdf','pdf',17,'application/pdf','complete')").bind(id).run();
+  await db.prepare("INSERT INTO attachments(id,article_id,name,original_url,filename,object_key,bytes,content_type,status,role) VALUES ('file',?,'通知正文.pdf','https://jwc.cqu.edu.cn/file.pdf','attachment-1.pdf','pdf',17,'application/pdf','complete','body-pdf')").bind(id).run();
   await bucket.put('pdf','%PDF-1.7\nexample!',{httpMetadata:{contentType:'application/pdf'}});
   await bucket.put('snapshot',`<html><head><meta http-equiv="refresh" content="0;url=/auth/logout"><script>alert(1)</script></head><body onload="alert(2)"><form action="/submit"><h1>通知正文</h1><iframe data-feed-pdf="attachment-1.pdf" src="https://school/old.pdf" srcdoc="evil" sandbox="allow-popups allow-top-navigation-by-user-activation" width="700"></iframe><iframe src="/auth/login"></iframe><a href="javascript:alert(3)" onclick="evil()">bad</a></form></body></html>`);
 });
@@ -35,6 +35,20 @@ test('PDF content supports bounded ranges, suffixes, HEAD and 416',async()=>{
   const suffix=await mf.dispatchFetch(path,{headers:{Range:'bytes=-4'}});assert.equal(await suffix.text(),'ple!');
   const head=await mf.dispatchFetch(path,{method:'HEAD'});assert.equal(head.headers.get('content-length'),'17');assert.equal(await head.text(),'');
   assert.equal((await mf.dispatchFetch(path,{headers:{Range:'bytes=20-25'}})).status,416);
+});
+test('legacy detail preserves body-pdf and serves its exact saved bytes',async()=>{
+  const r=await mf.dispatchFetch(`https://feed.test/api/articles/${id}`);
+  assert.equal(r.status,200);
+  const result=await r.json();
+  assert.equal(result.attachments.length,1);
+  assert.deepEqual(
+    result.attachments.map(({name,filename,role,url,downloadUrl})=>({name,filename,role,url,downloadUrl})),
+    [{name:'通知正文.pdf',filename:'attachment-1.pdf',role:'body-pdf',url:`/api/files/${id}/attachment-1.pdf`,downloadUrl:`/api/files/${id}/attachment-1.pdf?download=1`}]
+  );
+  const file=await mf.dispatchFetch(`https://feed.test/api/files/${id}/attachment-1.pdf`);
+  assert.equal(file.status,200);
+  assert.equal(file.headers.get('content-type'),'application/pdf');
+  assert.equal(await file.text(),'%PDF-1.7\nexample!');
 });
 test('Snapshot preserves saved PDF frame and removes executable source content',async()=>{
   const r=await mf.dispatchFetch(`https://feed.test/api/snapshots/${id}`,{method:'GET'}),html=await r.text();
