@@ -1305,48 +1305,6 @@ body {
   }
 }
 
-.feed-reader {
-  min-height: 100vh;
-  background: var(--muted);
-}
-
-.feed-reader-toolbar {
-  position: sticky;
-  top: 0;
-  z-index: 10;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-2);
-  padding: var(--space-2);
-  border-bottom: 1px solid var(--border);
-  background: var(--surface);
-}
-
-.feed-reader-toolbar span {
-  min-width: 3.5rem;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
-}
-
-.feed-reader-document {
-  width: 100%;
-  overflow: auto;
-  padding-block: var(--space-3);
-}
-
-.feed-reader-document .react-pdf__Document {
-  display: flex;
-  width: max-content;
-  min-width: 100%;
-  justify-content: center;
-}
-
-.feed-reader-document .react-pdf__Page {
-  box-shadow: var(--shadow-popover);
-}
-
 .feed-admin-mail {
   display: grid;
   gap: var(--space-4);

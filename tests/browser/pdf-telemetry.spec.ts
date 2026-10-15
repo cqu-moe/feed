@@ -7,9 +7,14 @@ test.skip(process.env.VITE_POSTHOG_PROJECT_TOKEN !== 'phc_feed_browser_test', 'R
 type CapturedEvent = { event: string; properties: Record<string, unknown> };
 
 async function observeEvents(page: Page) {
-  // The external SDK filters webdriver. Model a normal browser only inside
-  // this local fixture; every capture request remains intercepted below.
-  await page.addInitScript(() => Object.defineProperty(navigator, 'webdriver', { get: () => false }));
+  // The SDK filters both webdriver and headless client hints. Model a normal
+  // browser only in this local fixture; all capture requests stay intercepted.
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => false });
+    // Some Chromium builds return a fresh client-hints object on each access.
+    // Model a browser without this optional API instead of mutating one copy.
+    Object.defineProperty(navigator, 'userAgentData', { get: () => undefined });
+  });
   const events: CapturedEvent[] = [];
   await page.context().route('**/__telemetry/**', async route => {
     const request = route.request();
@@ -55,7 +60,20 @@ test('one standalone PDF open stays one event through page and zoom changes', as
   await expect(page.getByText('2 / 3')).toBeVisible();
   await page.getByRole('button', { name: '放大' }).click();
   await page.mouse.move(640, 450);
-  await page.mouse.wheel(0, 500);
+  for (let step = 0; step < 12; step += 1) {
+    await page.mouse.wheel(0, 400);
+    await page.waitForTimeout(100);
+    if (await page.getByText('3 / 3').isVisible()) break;
+  }
+  await expect(page.getByText('3 / 3')).toBeVisible();
+  await expect(page.getByLabel('PDF 第 3 页')).toBeInViewport({ ratio: 0.1 });
+  for (let step = 0; step < 12; step += 1) {
+    await page.mouse.wheel(0, -400);
+    await page.waitForTimeout(100);
+    if (await page.getByText('2 / 3').isVisible()) break;
+  }
+  await expect(page.getByText('2 / 3')).toBeVisible();
+  await expect(page.getByLabel('PDF 第 2 页')).toBeInViewport({ ratio: 0.1 });
   await page.getByRole('button', { name: '上一页' }).click();
   await expect(page.getByText('1 / 3')).toBeVisible();
   await flushThroughAnotherDocument(page, events);
