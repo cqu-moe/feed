@@ -348,7 +348,7 @@ test('original preview failure keeps text and protected download available', asy
   await page.goto(`/articles/${articleId}`);
 
   const failedFrame = page.frameLocator('iframe[title="通知原件.pdf PDF 预览"]');
-  await expect(failedFrame.getByText('页面加载失败')).toBeVisible({ timeout: 15000 });
+  await expect(failedFrame.getByRole('heading', { name: 'PDF 暂时无法预览' })).toBeVisible({ timeout: 15000 });
   const textButton = page.getByRole('button', { name: '正文', exact: true });
   await textButton.focus();
   await page.keyboard.press('Enter');
@@ -356,7 +356,7 @@ test('original preview failure keeps text and protected download available', asy
 
   await page.getByRole('button', { name: '原件 PDF：通知原件.pdf' }).focus();
   await page.keyboard.press('Enter');
-  await expect(failedFrame.getByText('页面加载失败')).toBeVisible({ timeout: 15000 });
+  await expect(failedFrame.getByRole('heading', { name: 'PDF 暂时无法预览' })).toBeVisible({ timeout: 15000 });
   await expect(downloadBytes(page, page.getByRole('link', { name: '下载原件 PDF' }))).resolves.toEqual(original);
 });
 

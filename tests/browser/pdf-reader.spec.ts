@@ -1,4 +1,13 @@
-import { test, expect, installReadingRoutes, makePdf, articleId, revisionId, oldRevisionId } from './fixtures';
+import {
+  articleId,
+  expect,
+  installReadingRoutes,
+  makePdf,
+  oldRevisionId,
+  readingDetail,
+  revisionId,
+  test,
+} from './fixtures';
 import type { FrameLocator, Locator } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 
@@ -206,31 +215,59 @@ test('page deep links normalize safely, support browser history, refresh, and or
 });
 
 test('every existing PDF entry reuses continuous reader behavior', async ({ page }) => {
-  await installReadingRoutes(page, { kind: 'pdf', pdf: makePdf(3) });
+  const bodyPdf = makePdf(3);
+  const ordinaryPdf = makePdf([
+    { text: 'ORDINARY ATTACHMENT PAGE ONE' },
+    { text: 'ORDINARY ATTACHMENT PAGE TWO' },
+    { text: 'ORDINARY ATTACHMENT PAGE THREE' },
+  ]);
+  const detail = readingDetail('pdf');
+  const ordinaryAttachment = {
+    ...detail.attachments[1],
+    name: '普通PDF附件.pdf',
+    filename: 'attachment-2.pdf',
+    contentType: 'application/pdf',
+    bytes: ordinaryPdf.length,
+    url: detail.attachments[1].url.replace('attachment-2.doc', 'attachment-2.pdf'),
+    downloadUrl: detail.attachments[1].downloadUrl.replace('attachment-2.doc', 'attachment-2.pdf'),
+  };
+  detail.attachments[1] = ordinaryAttachment;
+  await installReadingRoutes(page, {
+    detail,
+    pdf: bodyPdf,
+    files: {
+      [detail.attachments[0].url]: bodyPdf,
+      [ordinaryAttachment.url]: ordinaryPdf,
+    },
+  });
 
   async function readAcross(scrollSurface: Locator, reader: Locator | FrameLocator) {
     await scrollSurface.scrollIntoViewIfNeeded();
     await scrollSurface.hover();
-    const frameBox = await scrollSurface.boundingBox();
-    expect(frameBox).toBeTruthy();
-    for (let wheel = 0; wheel < 20; wheel += 1) {
-      await page.mouse.wheel(0, 150);
-      await page.waitForTimeout(20);
+    for (let wheel = 0; wheel < 24; wheel += 1) {
+      await page.mouse.wheel(0, 60);
+      await page.waitForTimeout(100);
       if (await reader.getByText('2 / 3').isVisible()) break;
     }
-    const pageBox = await reader.getByLabel('PDF 第 2 页').boundingBox();
-    expect(pageBox).toBeTruthy();
-    const overlap = Math.min(
-      frameBox!.y + frameBox!.height,
-      pageBox!.y + pageBox!.height,
-    ) - Math.max(frameBox!.y, pageBox!.y);
-    expect(overlap / pageBox!.height).toBeGreaterThan(0.1);
+    const visiblePageRatio = await reader.getByLabel('PDF 第 2 页').evaluate(element => {
+      const box = element.getBoundingClientRect();
+      const overlap = Math.min(box.bottom, window.innerHeight) - Math.max(box.top, 0);
+      return Math.max(0, overlap) / box.height;
+    });
+    expect(visiblePageRatio).toBeGreaterThan(0.1);
     await expect(reader.getByText('2 / 3')).toBeVisible();
   }
 
   await page.goto(`/articles/${articleId}`);
   const detailFrame = page.frameLocator('iframe[title="通知原件.pdf PDF 预览"]');
+  const ordinaryFrame = page.frameLocator('iframe[title="普通PDF附件.pdf PDF 预览"]');
+  await expect(detailFrame.getByText('PDF PAGE 1', { exact: true })).toBeVisible();
+  await expect(ordinaryFrame.getByText('ORDINARY ATTACHMENT PAGE ONE', { exact: true })).toBeVisible();
   await readAcross(page.locator('iframe[title="通知原件.pdf PDF 预览"]'), detailFrame);
+  await readAcross(
+    page.locator('iframe[title="普通PDF附件.pdf PDF 预览"]'),
+    ordinaryFrame,
+  );
 
   await page.goto(`/api/articles/${articleId}/revisions/${revisionId}/snapshot`);
   const snapshotFrame = page.frameLocator('iframe[title="快照中的 PDF"]');
