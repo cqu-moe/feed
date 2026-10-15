@@ -55,16 +55,11 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Require read access to the private pinned Auth dependency
-        env:
-          AUTH_READ_TOKEN: ${{ secrets.FEED_E2E_AUTH_READ_TOKEN }}
-        run: test -n "$AUTH_READ_TOKEN" || { echo 'FEED_E2E_AUTH_READ_TOKEN is required'; exit 1; }
       - uses: actions/checkout@v4
         with:
           repository: cqu-moe/auth
           ref: d9bf0c5e6d5cc459029da6a345991b8d0f13f514
           path: .e2e/auth-checkout
-          token: ${{ secrets.FEED_E2E_AUTH_READ_TOKEN }}
           persist-credentials: false
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4

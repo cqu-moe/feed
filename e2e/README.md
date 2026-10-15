@@ -64,8 +64,8 @@ runtime-directory removal are independently read back.
 `FEED_E2E_OUTPUT` selects a **fresh** child of `.e2e/`; `FEED_E2E_VARIANT=desktop`
 or `mobile` narrows local diagnostics. Other CLI arguments go to e2e (for example
 `--grep 'real OAuth'`). CI passes no filters and runs both viewports twice.
-Private Auth checkout in GitHub Actions requires `FEED_E2E_AUTH_READ_TOKEN` with
-read access; missing credentials fail the job. Runtime Workers receive no cloud
+Public Auth checkout in GitHub Actions uses the default read-only workflow token;
+no additional cross-repository secret is required. Runtime Workers receive no cloud
 or developer credentials. CI does not deploy anything.
 
 Negative controls, each expected to exit nonzero (use distinct output paths):
