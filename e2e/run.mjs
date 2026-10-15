@@ -9,8 +9,10 @@ import { assertSelectedAttemptCleanup, exportPublic, redact } from './evidence.m
 import { AUTH_E2E_COMMIT, FEED_E2E_BASE_COMMIT, setFeedEntitlements, startFeedRuntime } from './runtime.mjs';
 
 const authInput = process.env.FEED_E2E_AUTH_CHECKOUT;
-const ingestion = process.env.FEED_E2E_SUITE === 'ingestion';
-if (process.env.FEED_E2E_SUITE && !ingestion) throw new Error('Unknown FEED_E2E_SUITE');
+const suite = process.env.FEED_E2E_SUITE || 'reader';
+const ingestion = suite === 'ingestion';
+const mail = suite === 'mail';
+if (!['reader', 'ingestion', 'mail'].includes(suite)) throw new Error('Unknown FEED_E2E_SUITE');
 if (!authInput) throw new Error('FEED_E2E_AUTH_CHECKOUT is required (a clean pinned checkout inside .e2e)');
 const authDir = resolve(authInput);
 const outputRoot = resolve('.e2e');
@@ -47,7 +49,8 @@ const isolatedEnv = {
   PLAYWRIGHT_BROWSERS_PATH: browserDir,
 };
 const manifest = {
-  suite: ingestion ? 'ingestion' : 'reader',
+  suite,
+  disableMailConsumer: process.env.FEED_E2E_DISABLE_MAIL_CONSUMER === '1',
   disableConsumers: process.env.FEED_E2E_DISABLE_CONSUMERS === '1',
   feedCommit, feedBase: FEED_E2E_BASE_COMMIT, feedDirty, authCommit,
   sourceDigest: await sourceDigest(),
@@ -90,7 +93,8 @@ try {
     let accounts = {};
     let rawLog = '';
     try {
-      runtime = await startFeedRuntime({ buildDir, stateDir: join(variantDir, '.runtime'), authDir, ingestion,
+      runtime = await startFeedRuntime({ buildDir, stateDir: join(variantDir, '.runtime'), authDir, ingestion, mail,
+        disableMailConsumer: process.env.FEED_E2E_DISABLE_MAIL_CONSUMER === '1',
         disableConsumers: process.env.FEED_E2E_DISABLE_CONSUMERS === '1',
         corruptReadingPdf: process.env.FEED_E2E_CORRUPT_PDF === '1' });
       if (process.env.FEED_E2E_FAIL_STARTUP === '1') throw new Error('Injected startup failure after real Worker initialization');
@@ -114,7 +118,8 @@ try {
         FEED_E2E_CONTROL_URL: runtime.controlOrigin, FEED_E2E_CONTROL_SECRET: runtime.controlSecret,
         FEED_E2E_OUTPUT: variantDir, FEED_E2E_MOBILE: variant === 'mobile' ? '1' : '',
         FEED_E2E_BREAK_ASSERTION: faults.assertion,
-        FEED_E2E_SUITE: ingestion ? 'ingestion' : '',
+        FEED_E2E_SUITE: suite,
+        FEED_E2E_MAIL_WRONG_ORACLE: process.env.FEED_E2E_MAIL_WRONG_ORACLE || '',
         FEED_E2E_ADMIN_TOKEN: runtime.ingestion?.bindings.ADMIN_TOKEN ?? '',
         FEED_E2E_BROWSER: browserName,
         FEED_E2E_STOCK_BROWSER: process.env.FEED_E2E_STOCK_BROWSER || '',
@@ -173,6 +178,10 @@ try {
       evidence.errors.push(...errorMessages(error));
       if (error.cleanup) evidence.cleanup = error.cleanup;
     } finally {
+      if (runtime?.mail) {
+        try { await writeFile(join(variantDir, 'mail.json'), JSON.stringify(await runtime.mailState(), null, 2)); }
+        catch (error) { evidence.errors.push(`Mail evidence readback failed: ${error.message}`); }
+      }
       if (runtime?.ingestion) {
         try {
           await writeFile(join(variantDir, 'ingestion.json'), JSON.stringify(await runtime.ingestion.control({ action: 'ingestion-state' }, { mf: null, db: runtime.feedDb }), null, 2));

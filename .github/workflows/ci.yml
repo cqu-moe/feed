@@ -50,7 +50,7 @@ jobs:
       fail-fast: false
       matrix:
         round: [1, 2]
-        suite: [reader, ingestion]
+        suite: [reader, ingestion, mail]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -78,8 +78,23 @@ jobs:
       - run: pnpm test:e2e
         env:
           FEED_E2E_AUTH_CHECKOUT: .e2e/auth-checkout
-          FEED_E2E_SUITE: ${{ matrix.suite == 'ingestion' && 'ingestion' || '' }}
+          FEED_E2E_SUITE: ${{ matrix.suite }}
           FEED_E2E_OUTPUT: .e2e/${{ matrix.suite }}-round-${{ matrix.round }}
+      - name: Mail gate negative controls
+        if: matrix.suite == 'mail' && matrix.round == 1
+        run: pnpm test:e2e:mail:controls
+        env:
+          FEED_E2E_AUTH_CHECKOUT: .e2e/auth-checkout
+          FEED_E2E_CONTROL_OUTPUT: .e2e/mail-controls
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.suite == 'mail' && matrix.round == 1
+        with:
+          name: feed-mail-negative-controls
+          path: |
+            .e2e/mail-controls/controls.json
+            .e2e/mail-controls/*/public/
+          if-no-files-found: error
+          retention-days: 7
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -10,8 +10,9 @@ const ordinaryPdf = Buffer.from('%PDF-1.7\nFEED03 ordinary attachment original b
 
 // Only the external Firecrawl/school and TextIn boundaries are replaced. Their
 // responses are evidence inputs, never ready revisions, task receipts or tokens.
-export function createIngestionFixture() {
+export function createIngestionFixture({ dateOnly = false } = {}) {
   let mode = 'baseline';
+  let generation = 0;
   let ocrRelease;
   let ocrGate;
   let bucket;
@@ -54,7 +55,7 @@ export function createIngestionFixture() {
     const activeMode = primary ? mode : 'baseline';
     const file = ['ocr', 'ocr-invalid'].includes(activeMode) ? pdf(activeMode) : ordinaryPdf;
     const missing = activeMode === 'missing';
-    const text = primary ? body(activeMode) : `${title(n)}独立分页正文`;
+    const text = primary ? `${body(activeMode)}${generation ? ` 邮件验收版本${generation}` : ''}` : `${title(n)}独立分页正文`;
     const html = `<!doctype html><html><head><title>${title(n)}</title></head><body><main class="${activeMode}"><h1>${title(n)}</h1><p>${text}</p></main></body></html>`;
     const fileUrl = `${SCHOOL}/files/${n}.pdf`;
     const attached = primary;
@@ -78,6 +79,7 @@ export function createIngestionFixture() {
 
   return {
     bindings, consumers, deadLetterObserver,
+    rebind(archive) { bucket = archive; },
     release() { ocrRelease?.(); ocrRelease = null; },
     async initialize(db, archive) {
       bucket = archive;
@@ -101,8 +103,8 @@ export function createIngestionFixture() {
         if (mode === 'failure' && !list && url.pathname.endsWith('/1001.htm')) return Response.json({ success: false, error: 'Synthetic upstream outage' }, { status: 500 });
         if (!list) return Response.json({ success: true, data: capture(url.href) });
         const page2 = url.pathname.endsWith('page2');
-        const articles = page2 ? [{ url: `${SCHOOL}/info/2026/1002.htm`, title: title(1002), publishedAt: day(0) + ' 09:02' }]
-          : [{ url: `${SCHOOL}/info/2026/1001.htm?utm_source=duplicate`, title: title(1001), publishedAt: day(0) + ' 09:01' },
+        const articles = page2 ? [{ url: `${SCHOOL}/info/2026/1002.htm`, title: title(1002), publishedAt: day(0) + (dateOnly ? '' : ' 09:02') }]
+          : [{ url: `${SCHOOL}/info/2026/1001.htm?utm_source=duplicate`, title: title(1001), publishedAt: day(0) + (dateOnly ? '' : ' 09:01') },
             { url: `${SCHOOL}/info/2026/1003.htm`, title: title(1003), publishedAt: day(-10) + ' 09:03' }];
         return Response.json({ success: true, data: { metadata: { statusCode: 200, creditsUsed: 1 },
           actions: { javascriptReturns: [{ value: JSON.stringify({ articles, next: page2 ? [] : [new URL('page2', url.href + '/').href] }) }] } } });
@@ -123,6 +125,10 @@ export function createIngestionFixture() {
       return null;
     },
     async control(input, { mf, db }) {
+      if (input.action === 'ingestion-content') {
+        if (!Number.isSafeInteger(input.generation) || input.generation < 1) throw new Error('Invalid external content generation');
+        generation = input.generation; return { generation };
+      }
       if (input.action === 'ingestion-mode') {
         if (!['baseline', 'layout', 'missing', 'ocr', 'ocr-invalid', 'failure'].includes(input.mode)) throw new Error('Invalid provider mode');
         mode = input.mode;

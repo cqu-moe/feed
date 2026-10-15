@@ -8,6 +8,7 @@ import { join, resolve } from 'node:path';
 import { seedSyntheticReadingArchive } from './reading-fixtures.mjs';
 
 import { Miniflare, convertV4MiniflareOptions, Log, LogLevel } from 'miniflare';
+import { createMailFixture } from './mail-runtime.mjs';
 import { createIngestionFixture } from './ingestion-runtime.mjs';
 
 export const FEED_E2E_BASE_COMMIT = 'dc57c11a324e9e0091dfc3f0c0ddf666f205069e';
@@ -184,7 +185,7 @@ export async function seedSyntheticNotification(db, bucket) {
   return { id, objectHash, key, manifestHash, manifestKey };
 }
 
-export async function startFeedRuntime({ buildDir, stateDir, authDir, ingestion = false, disableConsumers = false, corruptReadingPdf = false }) {
+export async function startFeedRuntime({ buildDir, stateDir, authDir, ingestion = false, disableConsumers = false, corruptReadingPdf = false, mail = false, disableMailConsumer = false }) {
   await rm(stateDir, { recursive: true, force: true });
   const feedBundle = await readFile(join(buildDir, 'feed', 'index.js'), 'utf8');
   const authBundle = await readFile(join(buildDir, 'auth', 'index.js'), 'utf8');
@@ -197,7 +198,8 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir, ingestion 
   const observations = [];
   const unexpected = [];
   const mails = new Map();
-  const ingest = ingestion ? createIngestionFixture() : null;
+  const ingest = ingestion || mail ? createIngestionFixture({ dateOnly: mail }) : null;
+  const mailFixture = mail ? createMailFixture() : null;
   let mf;
   let feedDb;
   let authDb;
@@ -205,6 +207,8 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir, ingestion 
   let bucket;
 
   const denyUnexpected = async request => {
+    const mailResponse = await mailFixture?.outbound(request, mf);
+    if (mailResponse) return mailResponse;
     const fixtureResponse = await ingest?.outbound(request);
     if (fixtureResponse) return fixtureResponse;
     const url = new URL(request.url);
@@ -232,7 +236,7 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir, ingestion 
     workers: [
       {
         name: 'feed',
-        modules: [{ type: 'ESModule', path: join(buildDir, 'feed', 'index.js'), contents: feedBundle }],
+        modules: [...(mailFixture ? [{ type: 'ESModule', path: join(buildDir, 'feed', 'mail-entry.mjs'), contents: mailFixture.module('./index.js', controlSecret) }] : []), { type: 'ESModule', path: join(buildDir, 'feed', 'index.js'), contents: feedBundle }],
         compatibilityDate: '2026-10-11',
         compatibilityFlags: ['nodejs_compat'],
         bindings: {
@@ -256,11 +260,12 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir, ingestion 
           MAX_PDF_OCR_PAGES_PER_DAY: '0',
           MAX_PDF_OCR_PAGES_PER_MONTH: '0',
           ...(ingest?.bindings ?? {}),
+          ...(mailFixture?.bindings ?? {}),
         },
         d1Databases: { DB: 'feed-e2e-database' },
         r2Buckets: { ARCHIVE: 'feed-e2e-archive' },
         queueProducers: { FEED_JOBS: 'feed-e2e-jobs', FEED_EVENTS: 'feed-e2e-events', FEED_MAIL: 'feed-e2e-mail' },
-        ...(ingest ? { queueConsumers: disableConsumers ? {} : ingest.consumers } : {}),
+        ...(ingest ? { queueConsumers: disableConsumers ? {} : { ...ingest.consumers, ...(mailFixture && !disableMailConsumer ? { 'feed-e2e-mail': { maxBatchSize: 1, maxBatchTimeout: 0, maxRetries: 0, deadLetterQueue: 'feed-e2e-dlq' } } : {}) } } : {}),
         workflows: {
           INGEST: { name: 'feed-e2e-ingest', className: 'FeedIngest' },
           PDF_OCR: { name: 'feed-e2e-pdf-ocr', className: 'PdfOcrWorkflow' },
@@ -269,6 +274,7 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir, ingestion 
           ARCHIVE_OCR: { name: 'feed-e2e-archive-ocr', className: 'ArchiveOcrWorkflow' },
         },
         serviceBindings: {
+          ...(mailFixture ? { MAIL_E2E_GATE: () => mailFixture.queueGate() } : {}),
           AUTH: modes.httpOutage ? 'auth-outage' : 'auth',
           AUTH_FEED_RPC: { name: modes.rpcOutage ? 'auth-outage' : 'auth', entrypoint: 'AuthService' },
         },
@@ -349,6 +355,11 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir, ingestion 
       let body = '';
       for await (const chunk of request) body += chunk;
       const input = JSON.parse(body);
+      if (mailFixture && input.action.startsWith('mail-')) {
+        const result = await mailFixture.control(input, { mf, db: feedDb, authDb, controlSecret });
+        response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(result));
+        return;
+      }
       if (ingest && input.action.startsWith('ingestion-')) {
         const result = await ingest.control(input, { mf, db: feedDb });
         response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(result));
@@ -397,6 +408,7 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir, ingestion 
         feedDb = await mf.getD1Database('DB', 'feed');
         authDb = await mf.getD1Database('DATABASE', 'auth');
         bucket = await mf.getR2Bucket('ARCHIVE', 'feed');
+        ingest?.rebind(bucket);
       } else if (['session-state', 'expire-session', 'expire-access'].includes(input.action)) {
         const rows = await feedDb.prepare('SELECT token_hash,payload,revision FROM feed_session').all();
         const key = await crypto.subtle.importKey('raw', createHash('sha256').update('feed-session-v1:feed-e2e-session-encryption-key-never-use').digest(), 'AES-GCM', false, ['decrypt']);
@@ -513,7 +525,7 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir, ingestion 
       controlOrigin: `http://127.0.0.1:${control.address().port}`,
       controlSecret,
       async sensitiveValues() {
-        const values = [oauthClientSecret, rpcClientSecret, controlSecret, ingest?.bindings.ADMIN_TOKEN, ...mails.values()].filter(Boolean);
+        const values = [oauthClientSecret, rpcClientSecret, controlSecret, ingest?.bindings.ADMIN_TOKEN, mailFixture?.bindings.RESEND_API_KEY, mailFixture?.bindings.RESEND_WEBHOOK_SECRET, ...mails.values()].filter(Boolean);
         for (const table of ['session', 'oauthAccessToken', 'oauthRefreshToken']) {
           const rows = await authDb.prepare(`SELECT token FROM ${table}`).all();
           values.push(...rows.results.map(row => row.token).filter(Boolean));
@@ -522,6 +534,8 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir, ingestion 
       },
       observations,
       ingestion: ingest,
+      mail: mailFixture,
+      async mailState() { return mailFixture.control({ action: 'mail-state' }, { mf, db: feedDb }); },
       get feedDb() { return feedDb; },
       get authDb() { return authDb; },
       oauth,
@@ -529,6 +543,7 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir, ingestion 
       mails,
       async close() {
         ingest?.release();
+        mailFixture?.release();
         const ports = [feedPort, authPort, control.address()?.port].filter(Boolean);
         const results = await Promise.allSettled([
           new Promise((done, fail) => control.close(error => error ? fail(error) : done())),
