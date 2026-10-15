@@ -647,6 +647,15 @@ function parseOcrPage(value: unknown): OcrPage {
 }
 
 function parseOcr(value: unknown): ArticleOcr {
+  // Archived OCR output predates the ISO timestamp contract.
+  const updatedAt = isRecord(value)
+    ? typeof value.updatedAt === 'number'
+      && Number.isSafeInteger(value.updatedAt)
+      && value.updatedAt >= 0
+      && value.updatedAt <= 8.64e15
+        ? new Date(value.updatedAt).toISOString()
+        : value.updatedAt
+    : undefined;
   if (
     !isRecord(value) ||
     (value.status !== 'complete' &&
@@ -655,7 +664,7 @@ function parseOcr(value: unknown): ArticleOcr {
       value.status !== 'failed') ||
     typeof value.model !== 'string' ||
     !Array.isArray(value.pages) ||
-    (typeof value.updatedAt !== 'string' && value.updatedAt !== null)
+    (typeof updatedAt !== 'string' && updatedAt !== null)
   ) {
     throw new Error('扫描件识别结果接口结构不匹配。');
   }
@@ -664,7 +673,7 @@ function parseOcr(value: unknown): ArticleOcr {
     model: value.model,
     htmlText: typeof value.htmlText === 'string' ? value.htmlText : '',
     pages: value.pages.map(parseOcrPage),
-    updatedAt: stringOrNull(value.updatedAt),
+    updatedAt: stringOrNull(updatedAt),
   };
 }
 

@@ -22,6 +22,15 @@ test('a reader can trace the loaded current and historical version snapshot', as
   const oldMaterial = Buffer.from('old-version-application.doc');
   const detail = readingDetail('pdf');
   const oldDetail = readingDetail('pdf', oldRevisionId);
+  // Historical OCR archives store createdAt as epoch milliseconds.
+  Object.assign(oldDetail.article, {
+    ocr: {
+      status: 'complete', model: 'mistral-ocr-4-1', htmlText: '',
+      updatedAt: 1791849653860,
+      pages: [{ page: 1, filename: 'attachment-5.pdf', source: 'native',
+        markdown: '历史 PDF 识别正文。', text: '历史 PDF 识别正文。' }],
+    },
+  });
   detail.attachments[0].bytes = currentOriginal.length;
   detail.attachments[1].bytes = currentMaterial.length;
   oldDetail.attachments[0] = {
@@ -81,6 +90,10 @@ test('a reader can trace the loaded current and historical version snapshot', as
   await expect(
     page.frameLocator('iframe[title="历史通知原件.pdf PDF 预览"]').getByText('OLD SNAPSHOT JOURNEY ORIGINAL'),
   ).toBeVisible({ timeout: 15000 });
+
+  await page.getByRole('button', { name: '正文', exact: true }).click();
+  await expect(page.getByText('历史 PDF 识别正文。', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '原件 PDF：历史通知原件.pdf' }).click();
 
   const downloadPromise = page.waitForEvent('download');
   await page.getByRole('link', { name: '旧版申请表.doc' }).click();
