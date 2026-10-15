@@ -12,15 +12,36 @@ import {
 const longAttachmentName =
   '附件1：2026-2027学年优异生选拔与培养汇总申请材料明细表（含学院推荐意见与成绩说明）.doc';
 
+test.describe('touch attachment downloads', () => {
+  test.use({ hasTouch: true, viewport: { width: 390, height: 844 } });
+  test('a short attachment name has a 44px download target', async ({ page }) => {
+    const detail = readingDetail('html');
+    detail.attachments[0].name = '表.doc';
+    await installReadingRoutes(page, { detail });
+    await page.goto(`/articles/${articleId}`);
+    const link = page.getByRole('link', { name: '表.doc', exact: true });
+    const box = await link.boundingBox();
+    expect(box).toBeTruthy();
+    expect(box!.width).toBeGreaterThanOrEqual(44);
+    expect(box!.height).toBeGreaterThanOrEqual(44);
+    const download = page.waitForEvent('download');
+    await link.tap({ position: { x: 10, y: 40 } });
+    expect((await download).suggestedFilename()).toBe('attachment-2.doc');
+  });
+});
+
 test('reader opens a web notice and downloads its material in layout A', async ({ page }) => {
   const detail = readingDetail('html');
   detail.article.bodyText = [
     '各学院：',
     '请根据学校要求开展优异生培养工作。',
     '附件【报名表.doc】已下载次',
+    '附件【说明.doc】已下载 3次',
     '上一条：学术通知',
     '附件：1. 优异生指标',
     '2. 优异生申请表',
+    '附件【作者保留的说明】',
+    '教务处',
   ].join('\n\n');
   detail.attachments = [
     {
@@ -47,8 +68,11 @@ test('reader opens a web notice and downloads its material in layout A', async (
 
   await expect(page.getByRole('heading', { name: '版本时间线' })).toHaveCount(0);
   await expect(page.getByText('已下载次')).toHaveCount(0);
+  await expect(page.getByText('已下载 3次')).toHaveCount(0);
   await expect(page.getByText('上一条：学术通知')).toHaveCount(0);
   await expect(page.getByText('附件：1. 优异生指标')).toBeVisible();
+  await expect(page.getByText('附件【作者保留的说明】', { exact: true })).toBeVisible();
+  await expect(page.getByText('教务处', { exact: true })).toBeVisible();
 
   await page.getByRole('link', { name: /附件 1/ }).click();
   await expect(page.getByRole('heading', { name: '附件', exact: true })).toBeVisible();

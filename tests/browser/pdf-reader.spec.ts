@@ -13,6 +13,35 @@ import { readFile } from 'node:fs/promises';
 
 test.describe.configure({ mode: 'serial' });
 
+for (const entry of ['notice', 'snapshot'] as const) {
+  test(`embedded PDF loading and navigation preserve the outer ${entry} scroll position`, async ({ page }) => {
+    await installReadingRoutes(page, {
+      kind: 'pdf',
+      pdf: makePdf(3),
+      snapshots: {
+        [revisionId]: `<!doctype html><meta charset="utf-8"><header style="height:400px">通知原貌</header>
+          <iframe title="快照中的 PDF" src="/reader/${articleId}/revisions/${revisionId}/attachment-1.pdf" style="width:90vw;height:540px"></iframe>
+          <footer style="height:1000px">原貌页尾</footer>`,
+      },
+    });
+    await page.goto(entry === 'notice' ? `/articles/${articleId}` : `/api/articles/${articleId}/revisions/${revisionId}/snapshot`);
+    const frameElement = page.locator('iframe').first();
+    const reader = frameElement.contentFrame();
+    await expect(reader.getByText('PDF PAGE 1', { exact: true })).toBeVisible();
+    expect(await page.evaluate(() => window.scrollY)).toBe(0);
+
+    // Position the frame's toolbar in view, as a reader would, before navigating.
+    await frameElement.evaluate(element => window.scrollTo(0, element.getBoundingClientRect().top + window.scrollY - 100));
+    const outerY = await page.evaluate(() => window.scrollY);
+    await reader.getByRole('button', { name: '下一页' }).click();
+    await expect(reader.getByText('2 / 3')).toBeVisible();
+    expect(await page.evaluate(() => window.scrollY)).toBe(outerY);
+    await reader.getByRole('button', { name: '上一页' }).click();
+    await expect(reader.getByText('1 / 3')).toBeVisible();
+    expect(await page.evaluate(() => window.scrollY)).toBe(outerY);
+  });
+}
+
 function mixedLongPdf() {
   return makePdf(Array.from({ length: 120 }, (_, index) => ({
     width: index % 2 === 0 ? 612 : 792,
@@ -280,6 +309,36 @@ test('every existing PDF entry reuses continuous reader behavior', async ({ page
   await page.goto(`/reader/${articleId}/attachment-1.pdf`);
   await expect(page.getByText('1 / 3')).toBeVisible();
   await readAcross(page.getByRole('region', { name: 'PDF 连续阅读' }), page.locator('main'));
+});
+
+test('a canvas drawing failure offers the original download and recovers on retry', async ({ page }) => {
+  const pdf = makePdf(2);
+  await installReadingRoutes(page, { kind: 'pdf', pdf });
+  await page.addInitScript(() => {
+    const fillRect = CanvasRenderingContext2D.prototype.fillRect;
+    CanvasRenderingContext2D.prototype.fillRect = function (this: CanvasRenderingContext2D, ...args) {
+      // Fail the real browser drawing boundary once, leaving PDF.js and its
+      // document parsing, page metadata, and render promise handling intact.
+      if (this.canvas.isConnected && this.canvas.width > 100) {
+        CanvasRenderingContext2D.prototype.fillRect = fillRect;
+        throw new Error('Browser canvas drawing temporarily unavailable');
+      }
+      return fillRect.apply(this, args);
+    };
+  });
+  await page.goto(`/reader/${articleId}/revisions/${revisionId}/attachment-1.pdf`);
+  await expect(page.getByRole('heading', { name: 'PDF 页面暂时无法呈现' })).toBeVisible();
+  const downloadPromise = page.waitForEvent('download');
+  await page.getByRole('link', { name: '下载 PDF', exact: true }).click();
+  const download = await downloadPromise;
+  expect(await readFile((await download.path())!)).toEqual(pdf);
+
+  await page.getByRole('button', { name: '重试预览' }).click();
+  await expect(page.getByText('PDF PAGE 1', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('PDF 第 1 页').locator('canvas')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'PDF 页面暂时无法呈现' })).toHaveCount(0);
+  await page.getByRole('button', { name: '下一页' }).click();
+  await expect(page.getByText('2 / 2')).toBeVisible();
 });
 
 test('a missing PDF can be retried after storage recovery', async ({ page }) => {

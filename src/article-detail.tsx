@@ -34,6 +34,7 @@ import {
 } from './components';
 import { OcrReading } from './ocr-reading';
 import { captureFeedEvent } from './telemetry';
+import { removeReadingNoise } from '../shared/reading-noise.mjs';
 
 type RequestState<T> =
   | { kind: 'loading' }
@@ -151,10 +152,7 @@ function attachmentFormat(attachment: Attachment): string {
 }
 
 function readingParagraphs(value: string): string[] {
-  return value
-    .replace(/\r\n/g, '\n')
-    .replace(/附件【[^\n】]*】已下载\s*(?:\d+)?次/g, '')
-    .replace(/^(?:上一条|下一条)[：:][^\n]*$/gm, '')
+  return removeReadingNoise(value.replace(/\r\n/g, '\n'))
     .split(/\n{2,}/)
     .map(paragraph => paragraph.trim())
     .filter(paragraph => paragraph && paragraph !== pdfTextUnavailable);

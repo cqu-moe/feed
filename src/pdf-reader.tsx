@@ -183,7 +183,10 @@ export default function PdfReader() {
     const element = container.current;
     const pageElement = pageRefs.current[targetPage - 1];
     if (!element || !pageElement) return;
-    pageElement.scrollIntoView({ block: 'start', inline: 'nearest' });
+    // Convert the page position to this scrollport's coordinates. Unlike
+    // scrollIntoView, this cannot scroll the embedding notice or snapshot.
+    element.scrollTop += pageElement.getBoundingClientRect().top
+      - element.getBoundingClientRect().top - element.clientTop;
   }
 
   function goToPage(nextPage: number) {
@@ -476,6 +479,10 @@ export default function PdfReader() {
                       width={layout.width}
                       renderTextLayer
                       renderAnnotationLayer
+                      onRenderError={() => setReaderError({
+                        title: 'PDF 页面暂时无法呈现',
+                        description: `第 ${pageNumber} 页绘制失败，请重试预览，或下载原文件阅读。`,
+                      })}
                       loading={<p role="status">正在呈现第 {pageNumber} 页…</p>}
                     />
                   ) : (
