@@ -9,7 +9,7 @@ export function readingText(value) {
     .replace(/^# attachment-\d+\.pdf\s*\n## Metadata\n[\s\S]*?^## Contents\s*$/gm, '')
     .replace(/^### Page \d+\s*$/gm, '')
     .replace(/如果您无法在线浏览此 PDF 文件，则可以[\s\S]*?下载此 PDF 文件/g, '')
-    .replace(/附件【[^\n]*?】已下载\d+次/g, '')
+    .replace(/附件【[^\n]*?】已下载(?:\d+)?次/g, '')
     .replace(/^(?:上一条|下一条)[：:][^\n]*$/gm, '')
     .replace(/\n[ \t]*\n(?:[ \t]*\n)+/g, '\n\n')
     .trim();

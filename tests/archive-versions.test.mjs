@@ -526,6 +526,10 @@ test('immutable revisions preserve A-B-A bytes, reject incomplete defaults, and 
   const current = await detail(articleId, undefined, cookie);
   assert.equal(current.revision.revisionNo, 3);
   assert.match(current.article.bodyText, /版本 A 的中文正文/);
+  assert.deepEqual(
+    current.attachments.map(({ filename, role, status }) => ({ filename, role, status })),
+    [{ filename: 'attachment-1.pdf', role: 'attachment', status: 'complete' }],
+  );
   const currentSearch = await json(miniflare.dispatchFetch(`${feedOrigin}/api/articles?q=${encodeURIComponent('版本 A')}`, {
     headers: { Cookie: cookie },
   }));
@@ -556,6 +560,7 @@ test('immutable revisions preserve A-B-A bytes, reject incomplete defaults, and 
   assert.equal(await fileA1.text(), '%PDF-1.7\nimmutable-a\n');
   assert.equal(await fileB.text(), '%PDF-1.7\nimmutable-b\n');
   assert.equal(await fileA3.text(), '%PDF-1.7\nimmutable-a\n');
+  assert.equal(fileA3.headers.get('content-type'), 'application/pdf');
   assert.equal(fileA1.headers.get('etag'), fileA3.headers.get('etag'));
 
   const range = await miniflare.dispatchFetch(fileUrl(articleId, revisionA1.id), {

@@ -69,6 +69,7 @@ export type Attachment = {
   id: string;
   name: string;
   filename?: string | null;
+  role?: 'body-pdf' | 'attachment';
   bytes: number | null;
   contentType: string | null;
   status: string;
@@ -585,7 +586,7 @@ export function parseArticleList(value: unknown): ArticleList {
   };
 }
 
-function parseAttachment(value: unknown): Attachment {
+function parseAttachment(value: unknown, requirements: RevisionRequirement[] = [], attachmentValues: unknown[] = []): Attachment {
   if (
     !isRecord(value) ||
     typeof value.id !== 'string' ||
@@ -594,16 +595,31 @@ function parseAttachment(value: unknown): Attachment {
   ) {
     throw new Error('附件接口结构不匹配。');
   }
+  const filename = stringOrNull(value.filename);
+  const role = value.role === 'body-pdf' || value.role === 'attachment' ? value.role : undefined;
+  const matchingBodyRequirements = requirements.filter(requirement =>
+    requirement.kind === 'body_pdf' && requirement.filename === filename,
+  );
+  const attachmentsWithFilename = attachmentValues.filter(item =>
+    isRecord(item) && stringOrNull(item.filename) === filename,
+  );
+  const canRecoverBodyRole = (value.role === undefined || value.role === null)
+    && filename !== null
+    && matchingBodyRequirements.length === 1
+    && attachmentsWithFilename.length === 1;
+  const resolvedRole = role ?? (canRecoverBodyRole ? 'body-pdf' as const : undefined);
+
   return {
     id: value.id,
     name: value.name,
-    filename: stringOrNull(value.filename),
+    filename,
     bytes: numberOrNull(value.bytes),
     contentType: stringOrNull(value.contentType),
     status: value.status,
     error: stringOrNull(value.error),
     url: stringOrNull(value.url),
     downloadUrl: stringOrNull(value.downloadUrl),
+    ...(resolvedRole ? { role: resolvedRole } : {}),
   };
 }
 
@@ -734,7 +750,13 @@ export function parseArticleDetail(value: unknown): ArticleDetailResponse {
     throw new Error('通知正文接口结构不匹配。');
   }
 
-  const parsedAttachments = value.attachments.map(parseAttachment);
+  const parsedRequirements = value.requirements === undefined || value.requirements === null
+    ? []
+    : value.requirements.map(parseRequirement);
+  const attachmentValues = value.attachments as unknown[];
+  const parsedAttachments = attachmentValues.map(attachment => (
+    parseAttachment(attachment, parsedRequirements, attachmentValues)
+  ));
   const article: ArticleDetail = {
     ...parseArticleListItem(value.article),
     bodyText: value.article.bodyText,
@@ -751,6 +773,6 @@ export function parseArticleDetail(value: unknown): ArticleDetailResponse {
     ...(value.revision === undefined || value.revision === null ? {} : { revision: parseRevision(value.revision) }),
     ...(value.requirements === undefined || value.requirements === null
       ? {}
-      : { requirements: value.requirements.map(parseRequirement) }),
+      : { requirements: parsedRequirements }),
   };
 }
