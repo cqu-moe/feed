@@ -15,6 +15,12 @@ export default defineConfig({
   webServer: {
     command: `pnpm build && pnpm exec vite preview --host 127.0.0.1 --port ${port} --strictPort`,
     url: baseURL,
+    env: {
+      VITE_POSTHOG_PROJECT_TOKEN: process.env.VITE_POSTHOG_PROJECT_TOKEN === 'phc_feed_browser_test'
+        ? 'phc_feed_browser_test' : '',
+      VITE_POSTHOG_HOST: `${baseURL}/__telemetry`,
+      VITE_POSTHOG_TEST: 'true',
+    },
     reuseExistingServer: false,
     timeout: 120_000,
   },

@@ -40,3 +40,6 @@ GitHub CI 与 Cloudflare Builds 独立触发，因此 Cloudflare Build command �
 首次运行先执行 `pnpm exec playwright install chromium`，再执行 `pnpm test:browser`。测试会构建前端并启动独立预览服务，不复用已有开发服务器。多 worktree 并行时用 `FEED_TEST_PORT=5191 pnpm test:browser` 指定不同端口。已安装 Chrome 的本地环境也可使用 `PLAYWRIGHT_CHANNEL=chrome pnpm test:browser`，测试仍创建独立无头浏览器上下文。
 
 `pnpm run ci` 保持无浏览器依赖，供 Cloudflare 构建使用。浏览器回归作为 GitHub Actions 的独立步骤执行，不能把 fixture 会话通过当成生产 Auth 登录已验收。
+
+
+PDF 打开事件另用 `VITE_POSTHOG_PROJECT_TOKEN=phc_feed_browser_test pnpm test:browser tests/browser/pdf-telemetry.spec.ts` 验证，GitHub Actions 会运行此步骤。测试配置只接受这个虚拟项目标识，并将统计主机固定为本地截获端点；不会沿用真实项目 token。该测试模拟普通浏览器属性，使 SDK 不因 webdriver 过滤所有事件，再检查真实 SDK 的 HTTP 事件。普通浏览器回归跳过这两项，由此专用步骤执行。
