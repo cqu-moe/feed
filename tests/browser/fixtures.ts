@@ -54,16 +54,16 @@ export function readingDetail(kind: 'html' | 'pdf' = 'html', id = revisionId) {
     id, articleId, revisionNo: old ? 1 : 3,
     title: old ? '历史通知：第一批培养材料' : '关于开展2026—2027学年优异生工作的通知',
     state: 'ready', observedAt: old ? '2026-10-11T03:01:00Z' : '2026-10-14T01:10:00Z',
-    readyAt: '2026-10-14T01:11:00Z', changeKind: old ? 'initial' : 'material', missingCount: 0,
+    readyAt: '2026-10-14T01:11:00Z', changeKind: old ? 'baseline' : 'substantive', missingCount: 0,
   };
   const attachments = [
-    ...(kind === 'pdf' ? [{ id: 'original', name: old ? '历史通知原件.pdf' : '通知原件.pdf', filename: 'attachment-1.pdf', role: 'body-pdf', status: 'saved', contentType: 'application/pdf', bytes: makePdf().length, url: `${prefix}/files/attachment-1.pdf`, downloadUrl: `${prefix}/files/attachment-1.pdf?download=1` }] : []),
-    { id: 'application', name: old ? '历史申请表.doc' : '附件2：优异生申请表.doc', filename: 'attachment-2.doc', role: 'attachment', status: 'saved', contentType: 'application/msword', bytes: 32, url: `${prefix}/files/attachment-2.doc`, downloadUrl: `${prefix}/files/attachment-2.doc?download=1` },
+    ...(kind === 'pdf' ? [{ id: 'original', name: old ? '历史通知原件.pdf' : '通知原件.pdf', filename: 'attachment-1.pdf', role: 'body-pdf', status: 'complete', contentType: 'application/pdf', bytes: makePdf().length, url: `${prefix}/files/attachment-1.pdf`, downloadUrl: `${prefix}/files/attachment-1.pdf?download=1` }] : []),
+    { id: 'application', name: old ? '历史申请表.doc' : '附件2：优异生申请表.doc', filename: 'attachment-2.doc', role: 'attachment', status: 'complete', contentType: 'application/msword', bytes: 32, url: `${prefix}/files/attachment-2.doc`, downloadUrl: `${prefix}/files/attachment-2.doc?download=1` },
   ];
   return {
     article: {
       id: articleId, title: revision.title, sourceId: 'academic', sourceName: '教务处', url: 'https://example.edu/notice/42',
-      publishedAt: '2026-09-24', capturedAt: revision.observedAt, status: 'ready', attachmentCount: attachments.length,
+      publishedAt: '2026-09-24', capturedAt: revision.observedAt, status: 'complete', attachmentCount: attachments.length,
       excerpt: old ? '历史批次材料' : '请各学院开展优异生培养工作。',
       bodyText: old ? '历史正文：第一批材料由学院保存。\n\n历史附件索引：申请表。' : '各学院：\n\n请根据学校要求开展优异生培养工作。\n\n一、优异生选拔\n\n符合条件的学生可向学院提出申请。\n\n附件：1. 优异生指标\n2. 优异生申请表',
       bodyHtml: null, snapshotUrl: `${prefix}/snapshot`, screenshotUrl: `${prefix}/screenshot`,
@@ -100,7 +100,7 @@ export async function installReadingRoutes(page: Page, options: ReadingOptions =
     if (options.authenticated === false) return json({ error: 'unauthorized' }, 401);
     if (options.entitled === false) return json({ error: 'forbidden' }, 403);
     if (path === '/api/sources') return json({ sources: [{ id: 'academic', siteId: 'university', name: '教务处', url: 'https://example.edu/', lastRunAt: null, articleCount: 1 }] });
-    if (path === '/api/articles') return json({ articles: [detail.article], total: 1, hasMore: false });
+    if (path === '/api/articles') return json({ articles: [detail.article], total: 1, page: 1, pageSize: 20 });
     if (path === `/api/articles/${articleId}/revisions`) return json({ revisions: options.revisions ?? [detail.revision, oldDetail.revision] }, options.historyStatus ?? 200);
     if (path.endsWith('/snapshot')) return route.fulfill({ contentType: 'text/html; charset=utf-8', body: `<!doctype html><html lang="zh"><meta charset="utf-8"><title>网页快照</title><h1>${selected.revision.title}的网页快照</h1><p>${selected.article.bodyText}</p><iframe title="快照中的 PDF" src="/reader/${articleId}/revisions/${selected.revision.id}/attachment-1.pdf" style="width:90vw;height:80vh"></iframe></html>` });
     if (path.endsWith('/screenshot')) return route.fulfill({ contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64" fill="white"/></svg>' });
