@@ -5,6 +5,8 @@ import { readdir, readFile, rm, stat } from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { join, resolve } from 'node:path';
 
+import { seedSyntheticReadingArchive } from './reading-fixtures.mjs';
+
 import { Miniflare, convertV4MiniflareOptions, Log, LogLevel } from 'miniflare';
 
 export const FEED_E2E_BASE_COMMIT = 'dc57c11a324e9e0091dfc3f0c0ddf666f205069e';
@@ -181,7 +183,7 @@ export async function seedSyntheticNotification(db, bucket) {
   return { id, objectHash, key, manifestHash, manifestKey };
 }
 
-export async function startFeedRuntime({ buildDir, stateDir, authDir }) {
+export async function startFeedRuntime({ buildDir, stateDir, authDir, corruptReadingPdf = false }) {
   await rm(stateDir, { recursive: true, force: true });
   const feedBundle = await readFile(join(buildDir, 'feed', 'index.js'), 'utf8');
   const authBundle = await readFile(join(buildDir, 'auth', 'index.js'), 'utf8');
@@ -197,6 +199,8 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir }) {
   let mf;
   let feedDb;
   let authDb;
+  let readingArchive;
+  let bucket;
 
   const denyUnexpected = async request => {
     const url = new URL(request.url);
@@ -241,8 +245,8 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir }) {
           TASK_RUNTIME_ENABLED: 'false',
           MAIL_ENABLED: 'false',
           SOURCE_MANAGEMENT_ENABLED: 'true',
-          ARCHIVE_VERSIONS_ENABLED: 'false',
-          ARCHIVE_READS_ENABLED: 'false',
+          ARCHIVE_VERSIONS_ENABLED: 'true',
+          ARCHIVE_READS_ENABLED: 'true',
           MAX_FIRECRAWL_PER_DAY: '0',
           MAX_OCR_PER_DAY: '0',
           MAX_PDF_OCR_PAGES_PER_DAY: '0',
@@ -348,6 +352,24 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir }) {
         ]);
       } else if (input.action === 'set-entitlements') {
         await setFeedEntitlements(authDb, input.userId, { access: input.access, limit: input.limit });
+      } else if (input.action === 'reading-manifest') {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({
+          ...readingArchive.manifest,
+          currentPdfSha256: readingArchive.manifest.currentPdf.sha256,
+          currentPdfByteSize: readingArchive.manifest.currentPdf.byteSize,
+          oldPdfSha256: readingArchive.manifest.oldPdf.sha256,
+          ordinaryPdfSha256: readingArchive.manifest.ordinaryPdf.sha256,
+        }));
+        return;
+      } else if (input.action === 'remove-reading-object' || input.action === 'restore-reading-object') {
+        const object = readingArchive.objects.get(input.kind);
+        if (!object) {
+          response.writeHead(400).end();
+          return;
+        }
+        if (input.action === 'remove-reading-object') await bucket.delete(object.key);
+        else await bucket.put(object.key, object.bytes, { httpMetadata: { contentType: object.mediaType } });
       } else if (input.action === 'revoke-oauth') {
         const now = new Date().toISOString();
         await authDb.batch([
@@ -362,6 +384,7 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir }) {
         await mf.setOptions(makeOptions());
         feedDb = await mf.getD1Database('DB', 'feed');
         authDb = await mf.getD1Database('DATABASE', 'auth');
+        bucket = await mf.getR2Bucket('ARCHIVE', 'feed');
       } else if (['session-state', 'expire-session', 'expire-access'].includes(input.action)) {
         const rows = await feedDb.prepare('SELECT token_hash,payload,revision FROM feed_session').all();
         const key = await crypto.subtle.importKey('raw', createHash('sha256').update('feed-session-v1:feed-e2e-session-encryption-key-never-use').digest(), 'AES-GCM', false, ['decrypt']);
@@ -447,8 +470,13 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir }) {
     };
     if (Object.values(baseline).some(n => n !== 0)) throw new Error('Fresh runtime contains prior user state');
     await authDb.prepare("INSERT INTO entitlement_config(key,value) VALUES ('invitation_required','1') ON CONFLICT(key) DO UPDATE SET value='1'").run();
-    const bucket = await mf.getR2Bucket('ARCHIVE', 'feed');
+    bucket = await mf.getR2Bucket('ARCHIVE', 'feed');
     const synthetic = await seedSyntheticNotification(feedDb, bucket);
+    readingArchive = await seedSyntheticReadingArchive(feedDb, bucket);
+    if (corruptReadingPdf) {
+      const object = readingArchive.objects.get('current-pdf');
+      await bucket.put(object.key, Buffer.concat([object.bytes, Buffer.from('\nFEED02 corrupted bytes negative control\n')]), { httpMetadata: { contentType: object.mediaType } });
+    }
     await new Promise(done => control.listen(0, '127.0.0.1', done));
     const authOrigin = (await mf.unsafeGetDirectURL('auth')).href;
     const feedOrigin = `https://127.0.0.1:${feedPort}`;
@@ -478,8 +506,8 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir }) {
         return values;
       },
       observations,
-      feedDb,
-      authDb,
+      get feedDb() { return feedDb; },
+      get authDb() { return authDb; },
       oauth,
       synthetic,
       mails,

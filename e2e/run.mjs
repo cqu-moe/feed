@@ -1,8 +1,10 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { copyFile, mkdir, readdir, readFile, realpath, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+
+import { exportPublic, redact } from './evidence.mjs';
 
 import { AUTH_E2E_COMMIT, FEED_E2E_BASE_COMMIT, setFeedEntitlements, startFeedRuntime } from './runtime.mjs';
 
@@ -46,6 +48,15 @@ const manifest = {
   runner: 'e2e@0.21.0', engine: '@e2e-dev/web@0.15.0', node: process.version,
   variants: [], errors: [],
 };
+const browserName = process.env.FEED_E2E_BROWSER || 'chromium';
+if (!['chromium', 'firefox', 'webkit'].includes(browserName)) throw new Error('Invalid FEED_E2E_BROWSER');
+const crossBrowser = process.env.FEED_E2E_CROSS_BROWSER === '1';
+if (browserName !== 'chromium' && !crossBrowser && !process.env.FEED_E2E_STOCK_BROWSER) throw new Error('Select the native-engine probe or cross-browser fallback for Firefox/WebKit');
+if (crossBrowser && process.env.FEED_E2E_STOCK_BROWSER) throw new Error('Native-engine probes cannot select the cross-browser fallback');
+if (crossBrowser && !['firefox', 'webkit'].includes(browserName)) throw new Error('Cross-browser fallback is only for Firefox/WebKit');
+manifest.browser = browserName;
+manifest.corruptReadingPdf = process.env.FEED_E2E_CORRUPT_PDF === '1';
+if (crossBrowser) manifest.engine = 'playwright@1.64.0 (e2e 0.15 local TLS gap)';
 const faults = { assertion: process.env.FEED_E2E_BREAK_ASSERTION || '', cleanup: process.env.FEED_E2E_FAIL_CLEANUP === '1' };
 
 try {
@@ -56,7 +67,7 @@ try {
   build(process.execPath, ['node_modules/wrangler/bin/wrangler.js', 'deploy', '--dry-run', '--config', 'e2e/wrangler.jsonc', '--outdir', join(buildDir, 'feed')]);
   build('npm', ['--prefix', 'frontend', 'run', 'build'], { cwd: authDir, env: { VITE_POSTHOG_PROJECT_TOKEN: '', VITE_POSTHOG_HOST: '' } });
   build(process.execPath, ['node_modules/wrangler/bin/wrangler.js', 'deploy', '--dry-run', '--config', 'e2e/wrangler.jsonc', '--outdir', join(buildDir, 'auth')], { cwd: authDir });
-  build(process.execPath, ['node_modules/@e2e-dev/web/dist/bin.js', 'install', 'chromium']);
+  build(process.execPath, ['node_modules/@e2e-dev/web/dist/bin.js', 'install', browserName]);
   manifest.bundles = {
     feed: sha(await readFile(join(buildDir, 'feed/index.js'))),
     auth: sha(await readFile(join(buildDir, 'auth/index.js'))),
@@ -73,7 +84,7 @@ try {
     let accounts = {};
     let rawLog = '';
     try {
-      runtime = await startFeedRuntime({ buildDir, stateDir: join(variantDir, '.runtime'), authDir });
+      runtime = await startFeedRuntime({ buildDir, stateDir: join(variantDir, '.runtime'), authDir, corruptReadingPdf: process.env.FEED_E2E_CORRUPT_PDF === '1' });
       if (process.env.FEED_E2E_FAIL_STARTUP === '1') throw new Error('Injected startup failure after real Worker initialization');
       evidence.readiness = runtime.readiness;
       evidence.migrations = runtime.migrations;
@@ -95,6 +106,7 @@ try {
         FEED_E2E_CONTROL_URL: runtime.controlOrigin, FEED_E2E_CONTROL_SECRET: runtime.controlSecret,
         FEED_E2E_OUTPUT: variantDir, FEED_E2E_MOBILE: variant === 'mobile' ? '1' : '',
         FEED_E2E_BREAK_ASSERTION: faults.assertion,
+        FEED_E2E_BROWSER: browserName,
         FEED_E2E_STOCK_BROWSER: process.env.FEED_E2E_STOCK_BROWSER || '',
         FEED_E2E_OWNER_ID: accounts.owner.userId, FEED_E2E_OTHER_ID: accounts.other.userId,
       };
@@ -102,7 +114,10 @@ try {
         childEnv[`FEED_E2E_${role.toUpperCase()}_EMAIL`] = accounts[role].email;
         childEnv[`FEED_E2E_${role.toUpperCase()}_PASSWORD`] = accounts.password;
       }
-      const child = spawn(process.execPath, ['node_modules/e2e/dist/cli/bin.js', 'run', '--config', 'e2e.config.ts', '--output', variantDir, ...process.argv.slice(2)], {
+      const childArgs = crossBrowser
+        ? ['node_modules/@playwright/test/cli.js', 'test', '--config', 'e2e/cross-browser.config.ts', ...process.argv.slice(2)]
+        : ['node_modules/e2e/dist/cli/bin.js', 'run', '--config', 'e2e.config.ts', '--output', variantDir, ...process.argv.slice(2)];
+      const child = spawn(process.execPath, childArgs, {
         stdio: ['ignore', 'pipe', 'pipe'], env: childEnv,
       });
       for (const stream of [child.stdout, child.stderr]) stream.on('data', chunk => { rawLog += chunk; });
@@ -119,10 +134,16 @@ try {
         process.removeListener('SIGTERM', stop);
       }
       let report;
-      try { report = JSON.parse(await readFile(join(variantDir, 'report.json'), 'utf8')); }
+      try {
+        if (crossBrowser) {
+          const raw = JSON.parse(await readFile(join(variantDir, 'playwright-report.json'), 'utf8'));
+          const s = raw.stats;
+          report = { run: { status: evidence.runnerExit === 0 && !raw.errors.length ? 'passed' : 'failed', summary: { executed: s.expected + s.unexpected + s.flaky, passed: s.expected, failed: s.unexpected + raw.errors.length, skipped: s.skipped, flaky: s.flaky, interrupted: 0 } } };
+        } else report = JSON.parse(await readFile(join(variantDir, 'report.json'), 'utf8'));
+      }
       catch (error) {
         if (error.code !== 'ENOENT') throw error;
-        throw new Error(`e2e exited ${evidence.runnerExit} without a report; original startup/collection error is in runner.log`);
+        throw new Error(`Browser runner exited ${evidence.runnerExit} without a report; original startup/collection error is in runner.log`);
       }
       evidence.summary = report.run.summary;
       const s = evidence.summary;
@@ -142,6 +163,10 @@ try {
       if (error.cleanup) evidence.cleanup = error.cleanup;
     } finally {
       let runtimeSensitive = [];
+      if (runtime) {
+        try { evidence.authLoginRateLimits = (await runtime.authDb.prepare("SELECT key,count FROM rateLimit WHERE key LIKE '%|/sign-in/email' ORDER BY key").all()).results; }
+        catch (error) { evidence.errors.push(`Auth rate-limit readback failed: ${error.message}`); }
+      }
       try { runtimeSensitive = await runtime?.sensitiveValues() ?? []; }
       catch { evidence.errors.push('Sensitive-value inventory failed; public export withheld'); }
       const values = [accounts.password, ...Object.values(accounts).map(a => a?.email), ...runtimeSensitive].filter(Boolean);
@@ -158,7 +183,9 @@ try {
       await writeFile(join(variantDir, 'runner.log'), cleanLog);
       process.stdout.write(cleanLog);
       // Export copies only. Preserve the original runner report and failure evidence.
-      if (!evidence.errors.includes('Sensitive-value inventory failed; public export withheld')) await exportPublic(variantDir, join(output, 'public', variant), values);
+      try {
+        if (!evidence.errors.includes('Sensitive-value inventory failed; public export withheld')) await exportPublic(variantDir, join(output, 'public', variant), values);
+      } catch (error) { evidence.errors.push(...errorMessages(error)); }
       await mkdir(join(output, 'public', variant), { recursive: true });
       await writeFile(join(output, 'public', variant, 'runtime.json'), JSON.stringify(evidence, null, 2) + '\n');
       if (evidence.errors.length) manifest.errors.push(...evidence.errors);
@@ -197,73 +224,4 @@ async function sourceDigest() {
     hashes.push([path, sha(await readFile(path))]);
   }
   return { sha256: sha(JSON.stringify(hashes)), files: Object.fromEntries(hashes) };
-}
-function redact(input, values) {
-  let text = input;
-  for (const value of values) {
-    text = text.replaceAll(value, '[redacted]').replaceAll(encodeURIComponent(value), '[redacted]');
-  }
-  return text
-    .replace(/([?&])(?:token|state|code|nonce)=[^&\s"'<>]+/g, '$1redacted')
-    .replace(/(?:token|state|code|nonce)%3D[^%\s"'<>]+/gi, 'redacted')
-    .replace(/\b[A-Za-z0-9_-]{43}\b/g, '[redacted]')
-    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[redacted-jwt]')
-    .replace(/((?:Bearer|Basic)\s+)[A-Za-z0-9._+/=-]+/gi, '$1[redacted]')
-    .replace(/__(?:Host-)?feed_(?:session|login)=[^;\s"']+/gi, '__Host-feed_session=[redacted]');
-}
-async function exportPublic(source, destination, values) {
-  await mkdir(destination, { recursive: true });
-  async function copy(from, to) {
-    await mkdir(to, { recursive: true });
-    for (const entry of await readdir(from, { withFileTypes: true })) {
-      if (entry.name.startsWith('.') || entry.name === 'public') continue;
-      const src = join(from, entry.name), dst = join(to, entry.name);
-      if (entry.isDirectory()) await copy(src, dst);
-      else if (entry.name.endsWith('.json')) {
-        const parsed = JSON.parse(await readFile(src, 'utf8'));
-        const clean = (value) => typeof value === 'string' ? redact(value, values)
-          : Array.isArray(value) ? value.map(clean)
-          : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([k,v]) => [k, clean(v)]))
-          : value;
-        await writeFile(dst, JSON.stringify(clean(parsed), null, 2) + '\n');
-      } else if (/\.(txt|md|log)$/.test(entry.name)) await writeFile(dst, redact(await readFile(src, 'utf8'), values));
-      // This suite never restores cookies: e2e withholds pixels after the first credential fill.
-      else if (entry.name.endsWith('.png')) await copyFile(src, dst);
-    }
-  }
-  await copy(source, destination);
-  // Text redaction changes byte counts; exported artifact metadata must describe exported bytes.
-  const reportPath = join(destination, 'report.json');
-  let report;
-  try { report = JSON.parse(await readFile(reportPath, 'utf8')); } catch (error) { if (error.code === 'ENOENT') return; throw error; }
-  async function update(value) {
-    if (!value || typeof value !== 'object') return;
-    if (Array.isArray(value.artifacts)) {
-      const artifacts = [];
-      for (const artifact of value.artifacts) {
-        try {
-          const bytes = await readFile(join(destination, 'results', artifact.path));
-          artifacts.push({ ...artifact, size: bytes.byteLength, sha256: sha(bytes) });
-        } catch (error) { if (error.code !== 'ENOENT') throw error; }
-      }
-      value.artifacts = artifacts;
-    }
-    for (const child of Object.values(value)) {
-      if (Array.isArray(child)) { for (const item of child) await update(item); }
-      else if (child && typeof child === 'object') await update(child);
-    }
-  }
-  await update(report);
-  await writeFile(reportPath, JSON.stringify(report, null, 2) + '\n');
-  async function inspect(directory) {
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) await inspect(path);
-      else if (/\.(json|txt|md|log)$/.test(entry.name)) {
-        const text = await readFile(path, 'utf8');
-        if (values.some(value => value && (text.includes(value) || text.includes(encodeURIComponent(value))))) throw new Error('Sensitive synthetic value in public evidence');
-      }
-    }
-  }
-  await inspect(destination);
 }

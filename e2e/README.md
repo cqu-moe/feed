@@ -80,3 +80,53 @@ Negative controls, each expected to exit nonzero (use distinct output paths):
 
 Firefox/WebKit, real devices, production Auth, live school fetches, email delivery
 and paid OCR are outside this ticket's local Chromium acceptance.
+
+## FEED-02 reading acceptance
+
+`reading.e2e.ts` adds real Auth/BFF/D1/R2 journeys over historical synthetic
+archives. These fixtures are reading inputs; they do not prove capture, OCR,
+Queue/Workflow, readiness production, or delivery. The two tests cover Chinese
+search, source filtering, pagination/back, complete versus blocked revisions,
+ordinary attachments, historical bodies/snapshots/screenshots, original PDFs,
+actual canvas pixels, wheel scrolling, page/link navigation, zoom, downloads,
+HEAD/Range/416, snapshot sanitization, retries and immediate entitlement denial.
+Keyboard snapshot/history actions and both themes run in both viewport variants.
+`reading-evidence.json` records observed hashes, geometry and protocol results;
+`reading-failure-evidence.json` records recovery and revoked-response results.
+
+The fixed e2e engine was actually probed against local HTTPS: Firefox failed
+with `SSL_ERROR_UNKNOWN`, WebKit with an invalid-server-certificate error.
+It exposes no `ignoreHTTPSErrors`; its BrowserProvider/CDP interface requires
+Chromium. Supplement only those engines with Playwright's supported isolated
+persistent context and `ignoreHTTPSErrors: true`, using the same runner and
+real services. No system trust/keychain change is needed. These supplemental
+journeys cover both desktop and phone viewports, with disposable profiles and
+explicit close/removal receipts. They do not replace the Chromium e2e tests.
+
+```sh
+FEED_E2E_AUTH_CHECKOUT=.e2e/auth-checkout FEED_E2E_OUTPUT=.e2e/reading-round-1 pnpm test:e2e
+FEED_E2E_AUTH_CHECKOUT=.e2e/auth-checkout FEED_E2E_OUTPUT=.e2e/reading-round-2 pnpm test:e2e
+FEED_E2E_AUTH_CHECKOUT=.e2e/auth-checkout FEED_E2E_OUTPUT=.e2e/reading-firefox FEED_E2E_CROSS_BROWSER=1 FEED_E2E_BROWSER=firefox pnpm test:e2e
+FEED_E2E_AUTH_CHECKOUT=.e2e/auth-checkout FEED_E2E_OUTPUT=.e2e/reading-webkit FEED_E2E_CROSS_BROWSER=1 FEED_E2E_BROWSER=webkit pnpm test:e2e
+```
+
+For the native-engine limitation probe, omit `FEED_E2E_CROSS_BROWSER`, set
+`FEED_E2E_STOCK_BROWSER=1`, and select `FEED_E2E_BROWSER=firefox` or `webkit`.
+Never select stock Chromium: the normal provider verifies the required basic
+password-store, mock-keychain and headless flags from its actual command line.
+
+`FEED_E2E_CORRUPT_PDF=1` appends bytes to the current PDF in actual R2 after
+seeding without changing the archive descriptor. Its valid PDF still renders;
+the original-download checksum must fail. Use a fresh output and
+`--grep 'FEED02 real archive'`, and expect exit 1. The fixture's expected hash
+remains unchanged, so this proves the file-byte check detects storage corruption.
+Binary downloads stay in raw local results. Public exports omit them and prune
+references, while retaining verified hashes and sanitized text artifacts. The
+artifact-export tests independently verify raw preservation, secret redaction,
+ID resolution, omission and recomputed size/SHA256. Run them with
+`node --test tests/e2e-evidence.test.mjs`.
+
+Each Chromium test sends its own reserved synthetic client IP to the real Auth
+origin through the browser network route. This supplies the missing local edge
+`CF-Connecting-IP` header used by the Cloudflare Auth adapter and keeps rate limits enabled; the combined FEED-01/02 suite must
+not share the no-trusted-IP login bucket. Internal responses remain untouched.

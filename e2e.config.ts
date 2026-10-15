@@ -83,7 +83,7 @@ export default {
   targets: [{
     name: process.env.FEED_E2E_MOBILE ? 'mobile' : 'desktop',
     engine: web({
-      browser: process.env.FEED_E2E_STOCK_BROWSER ? 'chromium' : localChromium,
+      browser: process.env.FEED_E2E_STOCK_BROWSER ? (process.env.FEED_E2E_BROWSER as 'chromium' | 'firefox' | 'webkit' ?? 'chromium') : localChromium,
       viewport: process.env.FEED_E2E_MOBILE ? { width: 390, height: 844 } : { width: 1440, height: 900 },
     }),
     app: { url: process.env.FEED_E2E_APP_URL! },
