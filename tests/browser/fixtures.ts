@@ -11,6 +11,61 @@ export interface PdfPage {
   text?: string;
 }
 
+export interface ReadingAttachment {
+  id: string;
+  name: string;
+  filename: string;
+  role?: 'body-pdf' | 'attachment' | (string & {});
+  status: string;
+  error?: string | null;
+  contentType: string;
+  bytes: number;
+  url: string;
+  downloadUrl: string;
+}
+
+export interface ReadingDetail {
+  article: {
+    id: string;
+    title: string;
+    sourceId: string;
+    sourceName: string;
+    url: string;
+    publishedAt: string;
+    capturedAt: string;
+    status: string;
+    attachmentCount: number;
+    excerpt: string;
+    bodyText: string;
+    bodyHtml: null;
+    snapshotUrl: string;
+    screenshotUrl: string;
+  };
+  attachments: ReadingAttachment[];
+  revision: {
+    id: string;
+    articleId: string;
+    revisionNo: number;
+    title: string;
+    state: string;
+    observedAt: string;
+    readyAt: string;
+    changeKind: string;
+    missingCount: number;
+  };
+  requirements: Array<{
+    slotKey: string;
+    kind: string;
+    required: boolean;
+    state: string;
+    name: string | null;
+    filename: string | null;
+    originalUrl: string | null;
+    errorCode: string | null;
+    fetchedAt: string | null;
+  }>;
+}
+
 /** Real, selectable PDF pages, with an internal link from the first to last page. */
 export function makePdf(pages: number | PdfPage[] = 2): Buffer {
   const specs = typeof pages === 'number' ? Array.from({ length: pages }, () => ({} as PdfPage)) : pages;
@@ -47,7 +102,7 @@ export function makePdf(pages: number | PdfPage[] = 2): Buffer {
   return Buffer.from(pdf);
 }
 
-export function readingDetail(kind: 'html' | 'pdf' = 'html', id = revisionId) {
+export function readingDetail(kind: 'html' | 'pdf' = 'html', id = revisionId): ReadingDetail {
   const old = id === oldRevisionId;
   const prefix = `/api/articles/${articleId}/revisions/${id}`;
   const revision = {
@@ -57,8 +112,8 @@ export function readingDetail(kind: 'html' | 'pdf' = 'html', id = revisionId) {
     readyAt: '2026-10-14T01:11:00Z', changeKind: old ? 'baseline' : 'substantive', missingCount: 0,
   };
   const attachments = [
-    ...(kind === 'pdf' ? [{ id: 'original', name: old ? '历史通知原件.pdf' : '通知原件.pdf', filename: 'attachment-1.pdf', role: 'body-pdf', status: 'complete', contentType: 'application/pdf', bytes: makePdf().length, url: `${prefix}/files/attachment-1.pdf`, downloadUrl: `${prefix}/files/attachment-1.pdf?download=1` }] : []),
-    { id: 'application', name: old ? '历史申请表.doc' : '附件2：优异生申请表.doc', filename: 'attachment-2.doc', role: 'attachment', status: 'complete', contentType: 'application/msword', bytes: 32, url: `${prefix}/files/attachment-2.doc`, downloadUrl: `${prefix}/files/attachment-2.doc?download=1` },
+    ...(kind === 'pdf' ? [{ id: 'original', name: old ? '历史通知原件.pdf' : '通知原件.pdf', filename: 'attachment-1.pdf', role: 'body-pdf' as const, status: 'complete', contentType: 'application/pdf', bytes: makePdf().length, url: `${prefix}/files/attachment-1.pdf`, downloadUrl: `${prefix}/files/attachment-1.pdf?download=1` }] : []),
+    { id: 'application', name: old ? '历史申请表.doc' : '附件2：优异生申请表.doc', filename: 'attachment-2.doc', role: 'attachment' as const, status: 'complete', contentType: 'application/msword', bytes: 32, url: `${prefix}/files/attachment-2.doc`, downloadUrl: `${prefix}/files/attachment-2.doc?download=1` },
   ];
   return {
     article: {
@@ -82,8 +137,11 @@ export interface ReadingOptions {
   authenticated?: boolean;
   entitled?: boolean;
   historyStatus?: number;
+  historyDelay?: number;
   detailStatus?: number;
   fileStatus?: number;
+  previewStatus?: number;
+  downloadStatus?: number;
 }
 
 /** External HTTP data only is controlled; routes, components and PDF.js stay real. */
@@ -101,11 +159,17 @@ export async function installReadingRoutes(page: Page, options: ReadingOptions =
     if (options.entitled === false) return json({ error: 'forbidden' }, 403);
     if (path === '/api/sources') return json({ sources: [{ id: 'academic', siteId: 'university', name: '教务处', url: 'https://example.edu/', lastRunAt: null, articleCount: 1 }] });
     if (path === '/api/articles') return json({ articles: [detail.article], total: 1, page: 1, pageSize: 20 });
-    if (path === `/api/articles/${articleId}/revisions`) return json({ revisions: options.revisions ?? [detail.revision, oldDetail.revision] }, options.historyStatus ?? 200);
+    if (path === `/api/articles/${articleId}/revisions`) {
+      if (options.historyDelay) await new Promise(resolve => setTimeout(resolve, options.historyDelay));
+      return json({ revisions: options.revisions ?? [detail.revision, oldDetail.revision] }, options.historyStatus ?? 200);
+    }
     if (path.endsWith('/snapshot')) return route.fulfill({ contentType: 'text/html; charset=utf-8', body: `<!doctype html><html lang="zh"><meta charset="utf-8"><title>网页快照</title><h1>${selected.revision.title}的网页快照</h1><p>${selected.article.bodyText}</p><iframe title="快照中的 PDF" src="/reader/${articleId}/revisions/${selected.revision.id}/attachment-1.pdf" style="width:90vw;height:80vh"></iframe></html>` });
     if (path.endsWith('/screenshot')) return route.fulfill({ contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64" fill="white"/></svg>' });
     if (path.includes('/files/')) {
-      if (options.fileStatus && options.fileStatus !== 200) return json({ error: 'file unavailable' }, options.fileStatus);
+      const fileStatus = url.searchParams.has('download')
+        ? options.downloadStatus ?? options.fileStatus
+        : options.previewStatus ?? options.fileStatus;
+      if (fileStatus && fileStatus !== 200) return json({ error: 'file unavailable' }, fileStatus);
       const filename = path.split('/').at(-1)!;
       const bytes = options.files?.[path] ?? options.files?.[filename] ?? (filename.endsWith('.pdf') ? pdf : Buffer.from(`${selected.revision.id}: original application document`));
       return route.fulfill({ contentType: filename.endsWith('.pdf') ? 'application/pdf' : 'application/msword', headers: { 'Content-Disposition': `${url.searchParams.has('download') ? 'attachment' : 'inline'}; filename="${filename}"` }, body: bytes });

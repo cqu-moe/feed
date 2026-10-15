@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router';
 import {
   Alert,
@@ -13,7 +13,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@cqu-moe/ui';
-import { Archive, ArrowLeft, ExternalLink, FileText, History } from 'lucide-react';
+import { Archive, ArrowLeft, Download, ExternalLink, FileText, History } from 'lucide-react';
 import {
   parseArticleDetail,
   parseArticleRevisions,
@@ -27,7 +27,6 @@ import {
   AccessDeniedState,
   LoginRequiredState,
   RetryButton,
-  articleStatusLabel,
   formatBytes,
   formatDateTime,
   formatPublicationDate,
@@ -47,6 +46,8 @@ type RequestState<T> =
 type DetailState = RequestState<ArticleDetailResponse>;
 type RevisionListState = RequestState<ArticleRevisionsResponse>;
 type DetailPanel = null | 'history' | 'archive';
+type ReadingMode = 'text' | 'original';
+type ReadablePdfAttachment = Attachment & { url: string };
 
 const revisionStates = new Map([
   ['ready', '完整版本'],
@@ -81,6 +82,8 @@ const requirementErrors = new Map([
   ['artifact_missing', '源站产物未保存成功'],
   ['attachment_missing', '附件未保存成功'],
 ]);
+
+const pdfTextUnavailable = 'PDF 正文暂未提取到可搜索文字；可在下方阅读原文件。';
 
 function revisionStateLabel(state: string): string {
   return revisionStates.get(state) ?? state;
@@ -143,7 +146,63 @@ function readingParagraphs(value: string): string[] {
     .replace(/^(?:上一条|下一条)[：:][^\n]*$/gm, '')
     .split(/\n{2,}/)
     .map(paragraph => paragraph.trim())
-    .filter(Boolean);
+    .filter(paragraph => paragraph && paragraph !== pdfTextUnavailable);
+}
+
+function accessibleBodyPdf(attachment: Attachment): attachment is ReadablePdfAttachment {
+  const saved = new Set(['complete', 'downloaded', 'success']);
+  return saved.has(attachment.status.toLowerCase()) && Boolean(attachment.url) && isPdf(attachment);
+}
+
+function readingDocumentKey(data: ArticleDetailResponse): string {
+  return JSON.stringify([
+    data.article.id,
+    data.revision?.id ?? null,
+    data.article.capturedAt,
+    data.attachments.map(attachment => [
+      attachment.id,
+      attachment.filename,
+      attachment.url,
+      attachment.role,
+    ]),
+  ]);
+}
+
+function textUnavailableReason(article: ArticleDetailResponse['article'], paragraphs: string[]): string | null {
+  if (article.ocr?.pages.length) return null;
+  if (paragraphs.length > 0) return null;
+  if (article.ocr?.status === 'pending') return '正文识别结果仍在准备中，请先阅读原件 PDF。';
+  if (article.ocr?.status === 'failed') return '正文识别未完成，请先阅读原件 PDF。';
+  return '这个版本的正文还没有可提取文字，请先阅读原件 PDF。';
+}
+
+function readingDocument(
+  data: ArticleDetailResponse,
+  selectedBodyPdfId?: string,
+): {
+  key: string;
+  bodyPdfs: Attachment[];
+  ordinaryAttachments: Attachment[];
+  selectedBodyPdf?: ReadablePdfAttachment;
+  defaultMode: ReadingMode;
+  paragraphs: string[];
+  textUnavailable: string | null;
+} {
+  const bodyPdfs = data.attachments.filter(attachment => attachment.role === 'body-pdf');
+  const ordinaryAttachments = data.attachments.filter(attachment => attachment.role !== 'body-pdf');
+  const accessibleBodyPdfs = bodyPdfs.filter(accessibleBodyPdf);
+  const selectedBodyPdf = accessibleBodyPdfs.find(attachment => attachment.id === selectedBodyPdfId)
+    ?? accessibleBodyPdfs[0];
+  const paragraphs = readingParagraphs(data.article.bodyText);
+  return {
+    key: readingDocumentKey(data),
+    bodyPdfs,
+    ordinaryAttachments,
+    selectedBodyPdf,
+    defaultMode: selectedBodyPdf ? 'original' : 'text',
+    paragraphs,
+    textUnavailable: textUnavailableReason(data.article, paragraphs),
+  };
 }
 
 export function ArticleDetailPage() {
@@ -154,6 +213,9 @@ export function ArticleDetailPage() {
   const [revisionState, setRevisionState] = useState<RevisionListState>({ kind: 'loading' });
   const [openPanel, setOpenPanel] = useState<DetailPanel>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const [readingMode, setReadingMode] = useState<ReadingMode>('text');
+  const [selectedBodyPdfId, setSelectedBodyPdfId] = useState<string>();
+  const modeDocumentKey = useRef<string | null>(null);
   const openOperation = useRef<{
     key: string;
     id: string;
@@ -176,6 +238,14 @@ export function ArticleDetailPage() {
       signal: controller.signal,
     }).then((result) => {
       if (!controller.signal.aborted) {
+        if (result.ok) {
+          const nextDocument = readingDocument(result.data);
+          if (modeDocumentKey.current !== nextDocument.key) {
+            modeDocumentKey.current = nextDocument.key;
+            setSelectedBodyPdfId(nextDocument.selectedBodyPdf?.id);
+            setReadingMode(nextDocument.defaultMode);
+          }
+        }
         setState(fromResult(result));
         const operation = openOperation.current;
         if (result.ok && operation && (!result.data.revision || result.data.revision.state === 'ready')) {
@@ -245,7 +315,7 @@ export function ArticleDetailPage() {
     );
   }
 
-  const { article, attachments, revision, requirements } = state.data;
+  const { article, revision, requirements } = state.data;
   const revisions = revisionState.kind === 'success' ? revisionState.data.revisions : [];
   const currentRevisionId = revisions.filter((item) => item.state === 'ready')
     .sort((a, b) => b.revisionNo - a.revisionNo)[0]?.id
@@ -255,7 +325,8 @@ export function ArticleDetailPage() {
     : undefined;
   const activeRevisionId = selectedRevisionId || currentRevisionId;
   const canReadRevision = !revision || revision.state === 'ready';
-  const paragraphs = readingParagraphs(article.bodyText);
+  const currentDocument = readingDocument(state.data, selectedBodyPdfId);
+  const { ordinaryAttachments, selectedBodyPdf } = currentDocument;
 
   function selectRevision(revisionId: string | null) {
     const next = new URLSearchParams(params);
@@ -281,9 +352,9 @@ export function ArticleDetailPage() {
         </a>
       </header>
       <nav className="feed-reading-toolbar" aria-label="通知操作">
-        {attachments.length > 0 && (
+        {ordinaryAttachments.length > 0 && (
           <a className="feed-text-action" href="#notice-attachments">
-            附件 {attachments.length}
+            附件 {ordinaryAttachments.length}
           </a>
         )}
         <div className="feed-reading-actions">
@@ -312,15 +383,82 @@ export function ArticleDetailPage() {
         </Alert>
       )}
 
-      <ArticleBody
-        article={article}
-        canRead={canReadRevision}
-        paragraphs={paragraphs}
-        articleId={article.id}
-        revisionId={revision?.id}
-      />
+      {canReadRevision && currentDocument.bodyPdfs.length > 0 && (
+        <nav className="feed-reading-mode" aria-label="阅读方式">
+          <Button
+            type="button"
+            variant={readingMode === 'text' ? 'default' : 'ghost'}
+            size="sm"
+            aria-pressed={readingMode === 'text'}
+            onClick={() => setReadingMode('text')}
+          >
+            正文
+          </Button>
+          {currentDocument.bodyPdfs.map((attachment, bodyPdfIndex) => {
+            const available = accessibleBodyPdf(attachment);
+            const selected = readingMode === 'original' && selectedBodyPdf?.id === attachment.id;
+            const compactLabel = currentDocument.bodyPdfs.length === 1
+              ? '原件 PDF'
+              : `原件 PDF ${bodyPdfIndex + 1}`;
+            return (
+              <Fragment key={attachment.id}>
+                <Button
+                  type="button"
+                  variant={selected ? 'default' : 'ghost'}
+                  size="sm"
+                  aria-pressed={selected}
+                  aria-label={`原件 PDF：${attachment.name}`}
+                  aria-describedby={available ? undefined : `body-pdf-unavailable-${attachment.id}`}
+                  disabled={!available}
+                  title={available ? `原件 PDF：${attachment.name}` : '这个原件还没有可用文件'}
+                  onClick={() => {
+                    setSelectedBodyPdfId(attachment.id);
+                    setReadingMode('original');
+                  }}
+                >
+                  {compactLabel}
+                </Button>
+                {!available && (
+                  <span
+                    id={`body-pdf-unavailable-${attachment.id}`}
+                    className="feed-reading-mode-warning"
+                  >
+                    原件文件尚未保存
+                  </span>
+                )}
+              </Fragment>
+            );
+          })}
+          {currentDocument.bodyPdfs.length > 1 && selectedBodyPdf && (
+            <span className="feed-selected-original">当前原件：{selectedBodyPdf.name}</span>
+          )}
+          {selectedBodyPdf?.downloadUrl && (
+            <a className="feed-reading-source feed-original-download" href={selectedBodyPdf.downloadUrl}>
+              <Download aria-hidden="true" />
+              下载原件 PDF
+            </a>
+          )}
+        </nav>
+      )}
+
+      {canReadRevision && readingMode === 'original' && selectedBodyPdf ? (
+        <BodyPdfView
+          articleId={article.id}
+          revisionId={revision?.id}
+          attachment={selectedBodyPdf}
+        />
+      ) : (
+        <ArticleBody
+          article={article}
+          canRead={canReadRevision}
+          paragraphs={currentDocument.paragraphs}
+          textUnavailable={currentDocument.textUnavailable}
+          articleId={article.id}
+          revisionId={revision?.id}
+        />
+      )}
       <AttachmentList
-        attachments={attachments}
+        attachments={ordinaryAttachments}
         canRead={canReadRevision}
         articleId={article.id}
         revisionId={revision?.id}
@@ -536,18 +674,29 @@ function ArticleBody({
   article,
   canRead,
   paragraphs,
+  textUnavailable,
   articleId,
   revisionId,
 }: {
   article: ArticleDetailResponse['article'];
   canRead: boolean;
   paragraphs: string[];
+  textUnavailable: string | null;
   articleId: string;
   revisionId?: string;
 }) {
   if (!canRead) return null;
   if (article.ocr?.pages.length) {
     return <OcrReading articleId={articleId} revisionId={revisionId} ocr={article.ocr} />;
+  }
+
+  if (textUnavailable) {
+    return (
+      <section className="feed-reading-body feed-reading-text-unavailable" aria-labelledby="feed-reading-body-title">
+        <h2 id="feed-reading-body-title" className="sr-only">通知正文</h2>
+        <p className="feed-reading-empty">{textUnavailable}</p>
+      </section>
+    );
   }
 
   return (
@@ -559,6 +708,29 @@ function ArticleBody({
         <p className="feed-reading-empty">这个版本还没有可发布的完整正文。</p>
       )}
     </section>
+  );
+}
+
+function BodyPdfView({
+  articleId,
+  revisionId,
+  attachment,
+}: {
+  articleId: string;
+  revisionId?: string;
+  attachment: ReadablePdfAttachment;
+}) {
+  return (
+    <iframe
+      className="feed-pdf-frame feed-body-pdf-frame"
+      src={pdfReaderUrl(articleId, attachment, revisionId) ?? attachment.url}
+      title={`${attachment.name} PDF 预览`}
+    >
+      <p>
+        当前浏览器不支持内嵌 PDF。请
+        <a href={attachment.url}>直接打开 PDF</a>。
+      </p>
+    </iframe>
   );
 }
 
