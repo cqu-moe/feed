@@ -7,3 +7,6 @@ allowBuilds:
   '@parcel/watcher': true
   workerd: true
   core-js: false
+minimumReleaseAgeExclude:
+  - '@e2e-dev/web@0.15.0'
+  - e2e@0.21.0

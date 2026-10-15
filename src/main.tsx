@@ -55,11 +55,16 @@ function confirmSession(session: Session, startedAt: number): void {
   }
 }
 
+function loginRedirect() {
+  const current = window.location.pathname + window.location.search;
+  return `/login?next=${encodeURIComponent(current)}`;
+}
+
 async function loadAuthenticatedSession(): Promise<RootLoader> {
   const startedAt = performance.now();
   const result = await requestJson('/api/session', parseSession);
   if (!result.ok) throw new Response(null, { status: result.status });
-  if (!result.data.authenticated) throw redirect('/login');
+  if (!result.data.authenticated) throw redirect(loginRedirect());
   confirmSession(result.data, startedAt);
   return { session: result.data };
 }
@@ -68,7 +73,7 @@ async function loadProtectedSession(): Promise<RootLoader> {
   const startedAt = performance.now();
   const result = await requestJson('/api/session', parseSession);
   if (!result.ok) throw new Response(null, { status: result.status });
-  if (!result.data.authenticated) throw redirect('/login');
+  if (!result.data.authenticated) throw redirect(loginRedirect());
   confirmSession(result.data, startedAt);
   if (!result.data.entitled) {
     const current = window.location.pathname + window.location.search;
@@ -84,14 +89,14 @@ async function loadLogin() {
   if (!result.data.authenticated) return null;
   confirmSession(result.data, startedAt);
   if (!result.data.entitled) throw redirect('/account');
-  throw redirect('/');
+  throw redirect(safeNext(new URL(window.location.href).searchParams.get('next')));
 }
 
 async function loadAccess() {
   const startedAt = performance.now();
   const result = await requestJson('/api/session', parseSession);
   if (!result.ok) throw new Response(null, { status: result.status });
-  if (!result.data.authenticated) throw redirect('/login');
+  if (!result.data.authenticated) throw redirect(loginRedirect());
   confirmSession(result.data, startedAt);
   if (result.data.entitled) {
     throw redirect(safeNext(new URL(window.location.href).searchParams.get('returnTo')));

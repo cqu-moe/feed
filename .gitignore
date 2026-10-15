@@ -8,3 +8,5 @@ worker-configuration.d.ts
 artifacts/
 test-results/
 playwright-report/
+
+.e2e/

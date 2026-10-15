@@ -81,7 +81,7 @@ export function LoginPage() {
           />
           <div className="feed-login-actions">
             <Button asChild>
-              <a href="/auth/login">
+              <a href={`/auth/login?next=${encodeURIComponent(next)}`}>
                 <ExternalLink aria-hidden="true" />
                 使用 auth.cqu.moe 登录
               </a>
