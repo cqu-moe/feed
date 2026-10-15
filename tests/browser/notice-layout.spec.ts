@@ -127,7 +127,8 @@ test('a history failure keeps the saved notice readable', async ({ page }) => {
   await historyTrigger.click();
   await expect(page.getByRole('dialog', { name: '历史版本' })).toBeVisible();
   await expect(page.getByText('版本历史加载失败')).toBeVisible();
-  await expect(page.getByRole('button', { name: '重试版本' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '重试历史' })).toBeVisible();
+  await expect(page.getByText('最新观察版本仍在核对，当前继续显示最后一个完整版本。')).toHaveCount(0);
 
   await page.keyboard.press('Escape');
   await expect(page.getByText('请根据学校要求开展优异生培养工作。')).toBeVisible();

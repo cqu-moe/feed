@@ -43,7 +43,18 @@ type RequestState<T> =
   | { kind: 'unauthorized' }
   | { kind: 'not-found' };
 
-type DetailState = RequestState<ArticleDetailResponse>;
+type DetailState =
+  | { kind: 'loading' }
+  | {
+      kind: 'success';
+      data: ArticleDetailResponse;
+      historical?: boolean;
+      transitioningTo?: string | null;
+    }
+  | { kind: 'error'; message: string }
+  | { kind: 'forbidden' }
+  | { kind: 'unauthorized' }
+  | { kind: 'not-found' };
 type RevisionListState = RequestState<ArticleRevisionsResponse>;
 type DetailPanel = null | 'history' | 'archive';
 type ReadingMode = 'text' | 'original';
@@ -213,6 +224,7 @@ export function ArticleDetailPage() {
   const [revisionState, setRevisionState] = useState<RevisionListState>({ kind: 'loading' });
   const [openPanel, setOpenPanel] = useState<DetailPanel>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const [historyReloadKey, setHistoryReloadKey] = useState(0);
   const [readingMode, setReadingMode] = useState<ReadingMode>('text');
   const [selectedBodyPdfId, setSelectedBodyPdfId] = useState<string>();
   const modeDocumentKey = useRef<string | null>(null);
@@ -225,7 +237,9 @@ export function ArticleDetailPage() {
 
   useEffect(() => {
     const controller = new AbortController();
-    setState({ kind: 'loading' });
+    setState((current) => current.kind === 'success' && current.data.article.id === id
+      ? { ...current, historical: current.historical, transitioningTo: selectedRevisionId }
+      : { kind: 'loading' });
     const operationKey = `${id}\0${selectedRevisionId}`;
     const previous = openOperation.current;
     openOperation.current = previous?.key === operationKey
@@ -246,7 +260,10 @@ export function ArticleDetailPage() {
             setReadingMode(nextDocument.defaultMode);
           }
         }
-        setState(fromResult(result));
+        const nextState = fromResult(result);
+        setState(nextState.kind === 'success'
+          ? { ...nextState, historical: Boolean(selectedRevisionId), transitioningTo: undefined }
+          : nextState);
         const operation = openOperation.current;
         if (result.ok && operation && (!result.data.revision || result.data.revision.state === 'ready')) {
           captureFeedEvent('feed_item_opened', {
@@ -280,7 +297,7 @@ export function ArticleDetailPage() {
       if (!controller.signal.aborted) setRevisionState(fromResult(result));
     });
     return () => controller.abort();
-  }, [id, reloadKey]);
+  }, [id, historyReloadKey]);
 
   if (state.kind === 'forbidden') return <AccessDeniedState title="这篇通知暂时无法访问" />;
   if (state.kind === 'unauthorized') return <LoginRequiredState />;
@@ -320,11 +337,19 @@ export function ArticleDetailPage() {
   const currentRevisionId = revisions.filter((item) => item.state === 'ready')
     .sort((a, b) => b.revisionNo - a.revisionNo)[0]?.id
     ?? (!selectedRevisionId && revision?.state === 'ready' ? revision.id : undefined);
-  const selectedRevision = selectedRevisionId
+  const selectedRevision = state.historical
     ? revision ?? revisions.find((item) => item.id === selectedRevisionId)
     : undefined;
-  const activeRevisionId = selectedRevisionId || currentRevisionId;
+  const activeRevisionId = revision?.id ?? selectedRevision?.id ?? currentRevisionId;
   const canReadRevision = !revision || revision.state === 'ready';
+  const newestRevision = [...revisions].sort(
+    (a, b) => Date.parse(b.observedAt) - Date.parse(a.observedAt),
+  )[0];
+  const latestRevisionUnready = !state.historical
+    && Boolean(currentRevisionId)
+    && Boolean(newestRevision)
+    && newestRevision?.state !== 'ready'
+    && newestRevision?.id !== currentRevisionId;
   const currentDocument = readingDocument(state.data, selectedBodyPdfId);
   const { ordinaryAttachments, selectedBodyPdf } = currentDocument;
 
@@ -352,7 +377,7 @@ export function ArticleDetailPage() {
         </a>
       </header>
       <nav className="feed-reading-toolbar" aria-label="通知操作">
-        {ordinaryAttachments.length > 0 && (
+        {canReadRevision && ordinaryAttachments.length > 0 && (
           <a className="feed-text-action" href="#notice-attachments">
             附件 {ordinaryAttachments.length}
           </a>
@@ -374,6 +399,27 @@ export function ArticleDetailPage() {
         </div>
       </nav>
 
+      {selectedRevision && (
+        <p className="feed-revision-context">
+          正在阅读 {formatDateTime(selectedRevision.observedAt)} 的历史版本
+        </p>
+      )}
+
+      {state.transitioningTo !== null && state.transitioningTo !== undefined && (
+        <p className="feed-revision-context" role="status">
+          正在切换通知版本…
+        </p>
+      )}
+
+      {latestRevisionUnready && newestRevision && (
+        <Alert className="feed-revision-alert">
+          <AlertTitle>新版本暂未就绪</AlertTitle>
+          <AlertDescription>
+            最新观察版本{newestRevision.state === 'blocked' ? '有必需项未完成' : '仍在核对'}，当前继续显示最后一个完整版本。
+          </AlertDescription>
+        </Alert>
+      )}
+
       {revision && !canReadRevision && (
         <Alert variant={revision.state === 'blocked' ? 'destructive' : 'default'} className="feed-revision-alert">
           <AlertTitle>{revisionStateLabel(revision.state)}的版本不能作为完整阅读</AlertTitle>
@@ -383,7 +429,7 @@ export function ArticleDetailPage() {
         </Alert>
       )}
 
-      {canReadRevision && currentDocument.bodyPdfs.length > 0 && (
+      {canReadRevision && (currentDocument.bodyPdfs.length > 0 || Boolean(article.snapshotUrl)) && (
         <nav className="feed-reading-mode" aria-label="阅读方式">
           <Button
             type="button"
@@ -429,6 +475,12 @@ export function ArticleDetailPage() {
               </Fragment>
             );
           })}
+          {article.snapshotUrl && (
+            <a className="feed-text-action" href={article.snapshotUrl}>
+              网页快照
+              <ExternalLink aria-hidden="true" />
+            </a>
+          )}
           {currentDocument.bodyPdfs.length > 1 && selectedBodyPdf && (
             <span className="feed-selected-original">当前原件：{selectedBodyPdf.name}</span>
           )}
@@ -476,7 +528,7 @@ export function ArticleDetailPage() {
           selectRevision(revisionId);
           setOpenPanel(null);
         }}
-        onRetry={() => setReloadKey((key) => key + 1)}
+        onRetry={() => setHistoryReloadKey((key) => key + 1)}
       />
       <ArchiveSheet
         open={openPanel === 'archive'}
@@ -526,13 +578,41 @@ function HistorySheet({
         </SheetHeader>
         <div className="feed-detail-sheet-body">
           {state.kind === 'loading' && <p role="status">正在读取版本历史…</p>}
+          {state.kind === 'unauthorized' && (
+            <Alert variant="destructive">
+              <AlertTitle>需要重新登录</AlertTitle>
+              <AlertDescription>
+                版本历史需要重新登录后才能读取；当前正文仍可阅读。
+                <Button asChild size="sm" variant="outline">
+                  <a href="/auth/login">
+                    <ExternalLink aria-hidden="true" />
+                    重新登录
+                  </a>
+                </Button>
+              </AlertDescription>
+            </Alert>
+          )}
+          {state.kind === 'forbidden' && (
+            <Alert variant="destructive">
+              <AlertTitle>没有版本历史权限</AlertTitle>
+              <AlertDescription>
+                当前账号缺少 feed.access 权益；已打开的通知仍可阅读。
+                <Button asChild size="sm" variant="outline">
+                  <a href="https://auth.cqu.moe/" target="_blank" rel="noreferrer">
+                    <ExternalLink aria-hidden="true" />
+                    前往 auth.cqu.moe
+                  </a>
+                </Button>
+              </AlertDescription>
+            </Alert>
+          )}
           {state.kind === 'error' && (
             <Alert variant="destructive">
               <AlertTitle>版本历史加载失败</AlertTitle>
               <AlertDescription>
                 当前内容仍可阅读。{state.message}
                 <Button type="button" size="sm" variant="outline" onClick={onRetry}>
-                  重试版本
+                  重试历史
                 </Button>
               </AlertDescription>
             </Alert>
@@ -745,6 +825,7 @@ function AttachmentList({
   articleId: string;
   revisionId?: string;
 }) {
+  if (!canRead) return null;
   if (attachments.length === 0) {
     return <p className="feed-reading-empty">这篇通知没有附件。</p>;
   }

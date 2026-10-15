@@ -4,6 +4,7 @@ export { test, expect };
 export const articleId = 'c65a90333229c47e1c30157c';
 export const revisionId = 'current-reading-fixture';
 export const oldRevisionId = 'previous-reading-fixture';
+export const unreadyRevisionId = 'unready-reading-fixture';
 
 export interface PdfPage {
   width?: number;
@@ -131,9 +132,13 @@ export interface ReadingOptions {
   kind?: 'html' | 'pdf';
   detail?: ReturnType<typeof readingDetail>;
   oldDetail?: ReturnType<typeof readingDetail>;
+  unreadyDetail?: ReturnType<typeof readingDetail>;
+  detailDelays?: Record<string, number>;
   revisions?: unknown[];
   pdf?: Buffer;
   files?: Record<string, Buffer | string>;
+  snapshots?: Record<string, Buffer | string>;
+  screenshots?: Record<string, Buffer | string>;
   authenticated?: boolean;
   entitled?: boolean;
   historyStatus?: number;
@@ -148,11 +153,18 @@ export interface ReadingOptions {
 export async function installReadingRoutes(page: Page, options: ReadingOptions = {}) {
   const detail = options.detail ?? readingDetail(options.kind);
   const oldDetail = options.oldDetail ?? readingDetail(options.kind, oldRevisionId);
+  const unreadyDetail = options.unreadyDetail;
   const pdf = options.pdf ?? makePdf();
   await page.context().route('**/api/**', async route => {
     const url = new URL(route.request().url());
     const path = url.pathname;
-    const selected = path.includes(`/revisions/${oldRevisionId}`) ? oldDetail : detail;
+    const revisionMatch = path.match(/\/revisions\/([^/]+)(?:\/|$)/);
+    const requestedRevisionId = revisionMatch?.[1];
+    const selected = requestedRevisionId === oldRevisionId
+      ? oldDetail
+      : requestedRevisionId === unreadyRevisionId && unreadyDetail
+        ? unreadyDetail
+        : detail;
     const json = (body: unknown, status = 200) => route.fulfill({ status, json: body });
     if (path === '/api/session') return json({ authenticated: options.authenticated ?? true, entitled: options.entitled ?? true, user: { id: 'browser-fixture', name: '测试读者' } });
     if (options.authenticated === false) return json({ error: 'unauthorized' }, 401);
@@ -163,8 +175,20 @@ export async function installReadingRoutes(page: Page, options: ReadingOptions =
       if (options.historyDelay) await new Promise(resolve => setTimeout(resolve, options.historyDelay));
       return json({ revisions: options.revisions ?? [detail.revision, oldDetail.revision] }, options.historyStatus ?? 200);
     }
-    if (path.endsWith('/snapshot')) return route.fulfill({ contentType: 'text/html; charset=utf-8', body: `<!doctype html><html lang="zh"><meta charset="utf-8"><title>网页快照</title><h1>${selected.revision.title}的网页快照</h1><p>${selected.article.bodyText}</p><iframe title="快照中的 PDF" src="/reader/${articleId}/revisions/${selected.revision.id}/attachment-1.pdf" style="width:90vw;height:80vh"></iframe></html>` });
-    if (path.endsWith('/screenshot')) return route.fulfill({ contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64" fill="white"/></svg>' });
+    if (path.endsWith('/snapshot')) {
+      const bytes = options.snapshots?.[path] ?? options.snapshots?.[selected.revision.id]
+        ?? `<!doctype html><html lang="zh"><meta charset="utf-8"><title>${selected.revision.title}｜网页快照</title><main><h1>${selected.revision.title}｜网页快照</h1><p>SNAPSHOT ${selected.revision.id}</p><p>${selected.article.bodyText}</p>${
+          selected.attachments.some(attachment => attachment.role === 'body-pdf')
+            ? `<iframe title="快照中的 PDF" src="/reader/${articleId}/revisions/${selected.revision.id}/attachment-1.pdf" style="width:90vw;height:80vh"></iframe>`
+            : ''
+        }</main></html>`;
+      return route.fulfill({ contentType: 'text/html; charset=utf-8', body: bytes });
+    }
+    if (path.endsWith('/screenshot')) {
+      const bytes = options.screenshots?.[path] ?? options.screenshots?.[selected.revision.id]
+        ?? `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64" fill="white"/><text x="4" y="36" font-size="10">SHOT ${selected.revision.id}</text></svg>`;
+      return route.fulfill({ contentType: 'image/svg+xml', body: bytes });
+    }
     if (path.includes('/files/')) {
       const fileStatus = url.searchParams.has('download')
         ? options.downloadStatus ?? options.fileStatus
@@ -174,7 +198,13 @@ export async function installReadingRoutes(page: Page, options: ReadingOptions =
       const bytes = options.files?.[path] ?? options.files?.[filename] ?? (filename.endsWith('.pdf') ? pdf : Buffer.from(`${selected.revision.id}: original application document`));
       return route.fulfill({ contentType: filename.endsWith('.pdf') ? 'application/pdf' : 'application/msword', headers: { 'Content-Disposition': `${url.searchParams.has('download') ? 'attachment' : 'inline'}; filename="${filename}"` }, body: bytes });
     }
-    if (path === `/api/articles/${articleId}` || path.startsWith(`/api/articles/${articleId}/revisions/`)) return json(selected, options.detailStatus ?? 200);
+    if (path === `/api/articles/${articleId}` || path.startsWith(`/api/articles/${articleId}/revisions/`)) {
+      const detailDelay = options.detailDelays?.[selected.revision.id];
+      if (detailDelay) {
+        await new Promise(resolve => setTimeout(resolve, detailDelay));
+      }
+      return json(selected, options.detailStatus ?? 200);
+    }
     return json({ error: 'fixture route not found' }, 404);
   });
   return { detail, oldDetail, pdf };
