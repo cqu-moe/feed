@@ -11,13 +11,9 @@ async function observeEvents(page: Page) {
   // browser only in this local fixture; all capture requests stay intercepted.
   await page.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => false });
-    const userAgentData = (navigator as Navigator & {
-      userAgentData?: { brands: { brand: string; version: string }[] };
-    }).userAgentData;
-    if (userAgentData) {
-      const brands = userAgentData.brands.filter(({ brand }) => !/headless/i.test(brand));
-      Object.defineProperty(userAgentData, 'brands', { get: () => brands });
-    }
+    // Some Chromium builds return a fresh client-hints object on each access.
+    // Model a browser without this optional API instead of mutating one copy.
+    Object.defineProperty(navigator, 'userAgentData', { get: () => undefined });
   });
   const events: CapturedEvent[] = [];
   await page.context().route('**/__telemetry/**', async route => {
