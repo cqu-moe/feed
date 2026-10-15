@@ -7,9 +7,18 @@ test.skip(process.env.VITE_POSTHOG_PROJECT_TOKEN !== 'phc_feed_browser_test', 'R
 type CapturedEvent = { event: string; properties: Record<string, unknown> };
 
 async function observeEvents(page: Page) {
-  // The external SDK filters webdriver. Model a normal browser only inside
-  // this local fixture; every capture request remains intercepted below.
-  await page.addInitScript(() => Object.defineProperty(navigator, 'webdriver', { get: () => false }));
+  // The SDK filters both webdriver and headless client hints. Model a normal
+  // browser only in this local fixture; all capture requests stay intercepted.
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => false });
+    const userAgentData = (navigator as Navigator & {
+      userAgentData?: { brands: { brand: string; version: string }[] };
+    }).userAgentData;
+    if (userAgentData) {
+      const brands = userAgentData.brands.filter(({ brand }) => !/headless/i.test(brand));
+      Object.defineProperty(userAgentData, 'brands', { get: () => brands });
+    }
+  });
   const events: CapturedEvent[] = [];
   await page.context().route('**/__telemetry/**', async route => {
     const request = route.request();
