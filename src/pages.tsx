@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { Link, useParams, useSearchParams, useRouteLoaderData } from 'react-router';
+import { Link, useSearchParams, useRouteLoaderData } from 'react-router';
 import {
   Alert,
   AlertDescription,
@@ -16,28 +16,18 @@ import {
   SelectValue,
 } from '@cqu-moe/ui';
 import {
-  Archive,
-  ArrowLeft,
   ChevronLeft,
   ChevronRight,
-  Download,
   ExternalLink,
   FileText,
   Search,
   UserRound,
 } from 'lucide-react';
 import {
-  parseArticleDetail,
   parseArticleList,
-  parseArticleRevisions,
   parseSources,
   requestJson,
-  type ArticleDetailResponse,
   type ArticleList,
-  type ArticleRevisionsResponse,
-  type ArticleRevision,
-  type Attachment,
-  type RevisionRequirement,
   type Session,
   type SessionAccount,
   type AvailableSessionAccount,
@@ -49,14 +39,10 @@ import {
   RetryButton,
   StandaloneHeader,
   articleStatusLabel,
-  attachmentStatusLabel,
-  formatBytes,
   formatDateTime,
   formatPublicationDate,
-  isPdf,
   safeNext,
 } from './components';
-import { OcrReading } from './ocr-reading';
 import { captureFeedEvent } from './telemetry';
 
 type RequestState<T> =
@@ -69,83 +55,6 @@ type RequestState<T> =
 
 type SourceState = RequestState<Source[]>;
 type ArticleListState = RequestState<ArticleList>;
-type DetailState = RequestState<ArticleDetailResponse>;
-type RevisionListState = RequestState<ArticleRevisionsResponse>;
-
-const revisionStates = new Map([
-  ['ready', '完整版本'],
-  ['assembling', '正在核对'],
-  ['blocked', '缺项或失败'],
-]);
-
-const changeKinds = new Map([
-  ['baseline', '首次存档'],
-  ['substantive', '实质变化'],
-  ['presentation_only', '排版变化'],
-  ['unclassified', '待分类'],
-]);
-
-const requirementKinds = new Map([
-  ['body', '统一正文'],
-  ['snapshot', '原貌存档'],
-  ['attachment', '附件'],
-  ['body_pdf', '正文 PDF'],
-  ['body_ocr', '正文识别'],
-  ['screenshot', '截图'],
-]);
-
-const requirementStates = new Map([
-  ['fulfilled', '已验证'],
-  ['pending', '等待'],
-  ['failed', '失败'],
-]);
-
-const requirementErrors = new Map([
-  ['ocr_pending', '正文扫描页仍在识别中'],
-  ['artifact_missing', '源站产物未保存成功'],
-  ['attachment_missing', '附件未保存成功'],
-]);
-
-function revisionStateLabel(state: string): string {
-  return revisionStates.get(state) ?? state;
-}
-
-function changeKindLabel(changeKind: string): string {
-  return changeKinds.get(changeKind) ?? changeKind;
-}
-
-function requirementKindLabel(kind: string): string {
-  return requirementKinds.get(kind) ?? kind;
-}
-
-function requirementStateLabel(state: string): string {
-  return requirementStates.get(state) ?? state;
-}
-
-function requirementErrorLabel(error: string | null | undefined): string | null {
-  if (!error) return null;
-  return requirementErrors.get(error) ?? error;
-}
-
-function revisionStatusClass(state: string): string {
-  if (['ready', 'complete', 'archived', 'success'].includes(state)) return 'is-ready';
-  if (state === 'blocked') return 'is-blocked';
-  return 'is-assembling';
-}
-
-function attachmentFilename(attachment: Attachment): string | null {
-  const fromUrl = attachment.url?.match(/\/(?:files|reader)\/[^/]+\/(?:revisions\/[^/]+\/)?([^/?#]+\.pdf)$/i);
-  return attachment.filename ?? fromUrl?.[1] ?? null;
-}
-
-function pdfReaderUrl(articleId: string, attachment: Attachment, revisionId?: string): string | null {
-  if (!attachment.url) return null;
-  const filename = attachmentFilename(attachment);
-  if (revisionId && filename) {
-    return `/reader/${encodeURIComponent(articleId)}/revisions/${encodeURIComponent(revisionId)}/${filename}`;
-  }
-  return attachment.url.replace('/api/files/', '/reader/');
-}
 
 function fromResult<T>(
   result: Awaited<ReturnType<typeof requestJson<T>>>,
@@ -602,350 +511,6 @@ export function ArticlesPage() {
         </>
       )}
     </>
-  );
-}
-
-export function ArticleDetailPage() {
-  const { id = '' } = useParams();
-  const [params, setParams] = useSearchParams();
-  const selectedRevisionId = params.get('revision') ?? '';
-  const [state, setState] = useState<DetailState>({ kind: 'loading' });
-  const [revisionState, setRevisionState] = useState<RevisionListState>({ kind: 'loading' });
-  const [reloadKey, setReloadKey] = useState(0);
-  const openOperation = useRef<{
-    key: string;
-    id: string;
-    attemptId: string;
-    startedAt: number;
-  } | null>(null);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    setState({ kind: 'loading' });
-    const operationKey = `${id}\0${selectedRevisionId}`;
-    const previous = openOperation.current;
-    openOperation.current = previous?.key === operationKey
-      ? { ...previous, attemptId: crypto.randomUUID(), startedAt: performance.now() }
-      : { key: operationKey, id: crypto.randomUUID(), attemptId: crypto.randomUUID(), startedAt: performance.now() };
-    const detailPath = selectedRevisionId
-      ? `/api/articles/${encodeURIComponent(id)}/revisions/${encodeURIComponent(selectedRevisionId)}`
-      : `/api/articles/${encodeURIComponent(id)}`;
-    requestJson(detailPath, parseArticleDetail, {
-      signal: controller.signal,
-    }).then((result) => {
-      if (!controller.signal.aborted) {
-        setState(fromResult(result));
-        const operation = openOperation.current;
-        if (result.ok && operation && (!result.data.revision || result.data.revision.state === 'ready')) {
-          captureFeedEvent('feed_item_opened', {
-            operation: 'article_read',
-            flow: 'reading',
-            stage: 'opened',
-            outcome: 'success',
-            operation_id: operation.id,
-            attempt_id: operation.attemptId,
-            article_id: result.data.article.id,
-            revision_id: result.data.revision?.id ?? null,
-            content_kind: 'article',
-            ocr_used: Boolean(result.data.article.ocr?.pages.length),
-            revision_state: result.data.revision?.state ?? 'ready',
-            duration_ms: Math.max(0, Math.round(performance.now() - operation.startedAt)),
-            duration_basis: 'content_request_to_readable_response',
-          });
-          openOperation.current = null;
-        }
-      }
-    });
-    return () => controller.abort();
-  }, [id, selectedRevisionId, reloadKey]);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    setRevisionState({ kind: 'loading' });
-    requestJson(`/api/articles/${encodeURIComponent(id)}/revisions`, parseArticleRevisions, {
-      signal: controller.signal,
-    }).then((result) => {
-      if (!controller.signal.aborted) setRevisionState(fromResult(result));
-    });
-    return () => controller.abort();
-  }, [id, reloadKey]);
-
-  if (state.kind === 'forbidden') {
-    return <AccessDeniedState title="这篇通知暂时无法访问" />;
-  }
-  if (state.kind === 'unauthorized') {
-    return <LoginRequiredState />;
-  }
-  if (state.kind === 'loading') {
-    return <PageState state="loading" title="正在加载通知" description="正在读取正文、附件和存档信息。" />;
-  }
-  if (state.kind === 'error') {
-    return (
-      <PageState
-        state="error"
-        title="暂时无法加载通知"
-        description={`${state.message}请重试，已采集内容仍会保留。`}
-        action={<RetryButton onClick={() => setReloadKey((key) => key + 1)} />}
-      />
-    );
-  }
-  if (state.kind === 'not-found') {
-    return (
-      <PageState
-        state="not-found"
-        title="未找到这篇通知"
-        description="它可能尚未采集，或存档链接已发生变化。"
-        action={
-          <Button asChild variant="outline">
-            <Link to="/">
-              <ArrowLeft aria-hidden="true" />
-              返回通知列表
-            </Link>
-          </Button>
-        }
-      />
-    );
-  }
-
-  const { article, attachments, revision, requirements } = state.data;
-  const revisions = revisionState.kind === 'success' ? revisionState.data.revisions : [];
-  const currentRevisionId = revisions.filter((item) => item.state === 'ready')
-    .sort((a, b) => b.revisionNo - a.revisionNo)[0]?.id
-    ?? (!selectedRevisionId && revision?.state === 'ready' ? revision.id : undefined);
-  const selectedRevision = selectedRevisionId
-    ? revision ?? revisions.find((item) => item.id === selectedRevisionId)
-    : undefined;
-  const activeRevisionId = selectedRevisionId || currentRevisionId;
-  const canReadRevision = !revision || revision.state === 'ready';
-  const paragraphs = article.bodyText.replace(/\r\n/g, '\n').split(/\n{2,}/);
-  const selectedRequirements = selectedRevision ? requirements ?? [] : [];
-
-  function selectRevision(revisionId: string | null) {
-    const next = new URLSearchParams(params);
-    if (revisionId) next.set('revision', revisionId);
-    else next.delete('revision');
-    setParams(next, { replace: false });
-  }
-
-  return (
-    <>
-      <Link className="feed-back-link" to="/">
-        <ArrowLeft aria-hidden="true" />
-        返回通知列表
-      </Link>
-      <PageHeader
-        title={article.title}
-        description={`${article.sourceName} · 发布 ${formatPublicationDate(article.publishedAt)} · 采集 ${
-          formatDateTime(selectedRevision?.observedAt ?? article.capturedAt)
-        }`}
-        actions={
-          <span className={`feed-status feed-revision-status ${revisionStatusClass(revision?.state ?? article.status)}`}>
-            {revision ? revisionStateLabel(revision.state) : articleStatusLabel(article.status)}
-          </span>
-        }
-      />
-
-      <section className="feed-detail-section feed-revision-section" aria-labelledby="feed-revisions-title">
-        <div className="feed-revision-heading">
-          <div>
-            <h2 id="feed-revisions-title">版本时间线</h2>
-            <p>每次观察独立保存。编号保留采集顺序，失败或缺项不会顶替当前完整阅读。</p>
-          </div>
-          {selectedRevisionId && (
-            <Button type="button" variant="outline" onClick={() => selectRevision(null)}>
-              返回最新完整版本
-            </Button>
-          )}
-        </div>
-        {revisionState.kind === 'loading' && (
-          <p className="feed-revision-loading" role="status">正在读取版本历史…</p>
-        )}
-        {revisionState.kind === 'error' && (
-          <Alert variant="destructive">
-            <AlertTitle>版本历史加载失败</AlertTitle>
-            <AlertDescription>
-              当前内容仍可阅读。{revisionState.message}
-              <Button type="button" size="sm" variant="outline" onClick={() => setReloadKey((key) => key + 1)}>
-                重试版本
-              </Button>
-            </AlertDescription>
-          </Alert>
-        )}
-        {revisionState.kind === 'not-found' && (
-          <p className="feed-revision-loading">这篇通知还没有版本时间线，将继续使用兼容阅读数据。</p>
-        )}
-        {revisionState.kind === 'success' && revisions.length === 0 && (
-          <p className="feed-revision-loading">这篇通知还没有版本历史。</p>
-        )}
-        {revisions.length > 0 && (
-          <ol className="feed-revision-list">
-            {revisions.map((item) => {
-              const active = item.id === activeRevisionId;
-              return (
-                <li key={item.id}>
-                  <article className={`feed-revision-card ${active ? 'is-active' : ''}`}>
-                    <div className="feed-revision-card-main">
-                      <div className="feed-revision-topline">
-                        <strong>版本 {item.revisionNo}</strong>
-                        <span className={`feed-status feed-revision-status ${revisionStatusClass(item.state)}`}>
-                          {revisionStateLabel(item.state)}
-                        </span>
-                        {item.id === currentRevisionId && <span className="feed-revision-current">当前完整阅读</span>}
-                      </div>
-                      <p>{formatDateTime(item.observedAt)} · {changeKindLabel(item.changeKind)}</p>
-                      <p>
-                        {item.state === 'ready'
-                          ? `完整于 ${formatDateTime(item.readyAt)}`
-                          : item.state === 'blocked'
-                            ? `${item.missingCount} 个必需项未完成`
-                            : '仍在归档核对中'}
-                      </p>
-                    </div>
-                    <Button
-                      type="button"
-                      variant={active ? 'default' : 'outline'}
-                      size="sm"
-                      aria-pressed={active}
-                      onClick={() => selectRevision(item.id === currentRevisionId ? null : item.id)}
-                    >
-                      {active ? '当前查看' : '查看版本'}
-                    </Button>
-                  </article>
-                </li>
-              );
-            })}
-          </ol>
-        )}
-      </section>
-
-      {revision && !canReadRevision && (
-        <Alert variant={revision.state === 'blocked' ? 'destructive' : 'default'} className="feed-revision-alert">
-          <AlertTitle>{revisionStateLabel(revision.state)}的版本不能作为完整阅读</AlertTitle>
-          <AlertDescription>
-            这次观察只显示元数据和缺项原因。正文、附件链接和原貌入口会在全部必需产物验证后开放；默认阅读仍使用最新完整版本。
-          </AlertDescription>
-        </Alert>
-      )}
-
-      <div className="feed-detail-actions">
-        <Button asChild variant="outline">
-          <a href={article.url} target="_blank" rel="noreferrer">
-            原始通知
-            <ExternalLink aria-hidden="true" />
-          </a>
-        </Button>
-        {canReadRevision && article.snapshotUrl && (
-          <Button asChild>
-            <a href={article.snapshotUrl} target="_blank" rel="noreferrer">
-              <Archive aria-hidden="true" />
-              原貌存档
-            </a>
-          </Button>
-        )}
-        {canReadRevision && article.screenshotUrl && (
-          <Button asChild variant="outline">
-            <a href={article.screenshotUrl} target="_blank" rel="noreferrer">
-              <ExternalLink aria-hidden="true" />
-              存档截图
-            </a>
-          </Button>
-        )}
-      </div>
-
-      {canReadRevision && article.ocr?.pages.length ? (
-        <OcrReading articleId={article.id} revisionId={revision?.id} ocr={article.ocr} />
-      ) : <section className="feed-detail-section" aria-labelledby="feed-body-title">
-        <h2 id="feed-body-title">统一阅读</h2>
-        <div className="feed-article-body">
-          {canReadRevision ? paragraphs.map((paragraph, index) => (
-            <p key={index}>{paragraph}</p>
-          )) : (
-            <p className="feed-revision-empty">这个版本还没有可发布的完整正文。</p>
-          )}
-        </div>
-      </section>}
-
-      {selectedRevision && (
-        <section className="feed-detail-section" aria-labelledby="feed-requirements-title">
-          <h2 id="feed-requirements-title">版本产物</h2>
-          <div className="feed-requirement-list">
-            {selectedRequirements.length === 0 ? (
-              <p className="feed-empty-detail">这个版本还没有可显示的产物清单。</p>
-            ) : selectedRequirements.map((requirement) => (
-              <RequirementRow key={requirement.slotKey} requirement={requirement} />
-            ))}
-          </div>
-        </section>
-      )}
-
-      <section className="feed-detail-section" aria-labelledby="feed-attachments-title">
-        <h2 id="feed-attachments-title">附件与 PDF</h2>
-        {attachments.length === 0 ? (
-          <p className="feed-empty-detail">这篇通知没有采集到附件。</p>
-        ) : (
-          <div className="feed-attachment-list">
-            {attachments.map((attachment) => (
-              <article className="feed-attachment" key={attachment.id}>
-                <div className="feed-attachment-heading">
-                  <div>
-                    <h3>{attachment.name}</h3>
-                    <p>
-                      {formatBytes(attachment.bytes)}
-                      {attachment.contentType ? ` · ${attachment.contentType}` : ''} ·{' '}
-                      {attachmentStatusLabel(attachment.status)}
-                    </p>
-                    {attachment.error && <p className="feed-attachment-error">{attachment.error}</p>}
-                  </div>
-                  {attachment.downloadUrl && (
-                    <Button asChild variant="outline" size="sm">
-                      <a href={attachment.downloadUrl}>
-                        <Download aria-hidden="true" />
-                        下载
-                      </a>
-                    </Button>
-                  )}
-                </div>
-                {canReadRevision && attachment.url && isPdf(attachment) && (
-                  <iframe
-                    className="feed-pdf-frame"
-                    src={pdfReaderUrl(article.id, attachment, revision?.id) ?? attachment.url}
-                    title={`${attachment.name} PDF 预览`}
-                  >
-                    <p>
-                      当前浏览器不支持内嵌 PDF。请
-                      <a href={attachment.url}>直接打开 PDF</a>。
-                      {attachment.downloadUrl && (
-                        <>
-                          或<a href={attachment.downloadUrl}>下载附件</a>。
-                        </>
-                      )}
-                    </p>
-                  </iframe>
-                )}
-              </article>
-            ))}
-          </div>
-        )}
-      </section>
-    </>
-  );
-}
-
-function RequirementRow({ requirement }: { requirement: RevisionRequirement }) {
-  const failed = requirement.state === 'failed';
-  return (
-    <article className={`feed-requirement ${failed ? 'is-failed' : ''}`}>
-      <div>
-        <h3>{requirement.name ?? requirement.filename ?? requirementKindLabel(requirement.kind)}</h3>
-        <p>
-          {requirementKindLabel(requirement.kind)} · {requirement.required ? '必需' : '可选'} ·{' '}
-          {requirementStateLabel(requirement.state)}
-        </p>
-        {requirement.errorCode && (
-          <p className="feed-attachment-error">{requirementErrorLabel(requirement.errorCode)}</p>
-        )}
-      </div>
-    </article>
   );
 }
 
