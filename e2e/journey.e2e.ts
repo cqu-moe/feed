@@ -57,6 +57,9 @@ test('FEED01 real OAuth subscription lifecycle', async ({ app, screen, browser }
   await expect(browser).toHaveURL('/subscriptions?view=saved');
   await app.open('/login?next=https%3A%2F%2Fredirect.example.test%2F');
   await expect(browser).toHaveURL('/');
+  await app.open('/login?next=%2Flogin');
+  await expect(browser).toHaveURL('/');
+  await expect(screen.getByRole('heading', '重大通知存档', { exact: true })).toBeVisible();
   await app.open('/subscriptions');
   const archive = await apiFetch<string>(browser, '/api/snapshots/e2e000000000000000000001');
   expect(archive.status).toBe(200);

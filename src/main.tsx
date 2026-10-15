@@ -13,6 +13,7 @@ import {
   useNavigate,
   useRouteError,
   useRouteLoaderData,
+  type LoaderFunctionArgs,
 } from 'react-router';
 import {
   AppShell,
@@ -82,14 +83,14 @@ async function loadProtectedSession(): Promise<RootLoader> {
   return { session: result.data };
 }
 
-async function loadLogin() {
+async function loadLogin({ request }: LoaderFunctionArgs) {
   const startedAt = performance.now();
   const result = await requestJson('/api/session', parseSession);
   if (!result.ok) return null;
   if (!result.data.authenticated) return null;
   confirmSession(result.data, startedAt);
   if (!result.data.entitled) throw redirect('/account');
-  throw redirect(safeNext(new URL(window.location.href).searchParams.get('next')));
+  throw redirect(safeNext(new URL(request.url).searchParams.get('next')));
 }
 
 async function loadAccess() {
