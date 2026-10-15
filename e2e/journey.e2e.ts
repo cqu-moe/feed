@@ -1,12 +1,21 @@
 import { beforeEach, afterEach, test } from '@e2e-dev/web';
 import type { Browser } from '@e2e-dev/web';
 import { credentials, expect, type JsonValue, type Screen } from 'e2e';
+import {
+  apiFetch,
+  apiFetchMany,
+  control,
+  escapeOrigin,
+  login,
+} from './support';
 
 let unexpected: string[];
+let clientIpSequence = 10;
 let createCommands: { requestId: string; name: string; siteIds: string[]; sourceIds: string[]; emailMode: string }[];
 
 beforeEach(async ({ browser }) => {
   unexpected = [];
+  const clientIp = `192.0.2.${++clientIpSequence}`;
   createCommands = [];
   const feed = new URL(process.env.FEED_E2E_APP_URL!);
   const auth = new URL(process.env.FEED_E2E_AUTH_URL!);
@@ -23,7 +32,9 @@ beforeEach(async ({ browser }) => {
       route.request.method === 'POST' &&
       route.request.postData
     ) createCommands.push(JSON.parse(route.request.postData));
-    await route.continue();
+    await route.continue(target.origin === auth.origin
+      ? { headers: { ...route.request.headers, 'cf-connecting-ip': clientIp } }
+      : {});
   });
 });
 
@@ -297,19 +308,6 @@ test('FEED01 malformed callback and OAuth rejection fail closed', async ({ app, 
   }
 });
 
-type AppSurface = { open(path?: string): Promise<void> };
-
-type ApiRequest = {
-  method?: string;
-  origin?: string;
-  body?: JsonValue;
-};
-
-type ApiResult<T> = {
-  status: number;
-  body: T;
-};
-
 type Subscription = {
   id: string;
   name: string;
@@ -335,34 +333,6 @@ type CreateResponse = {
   subscription: Subscription;
 };
 
-async function apiFetchMany<T>(browser: Browser, path: string, requests: ApiRequest[]): Promise<ApiResult<T>[]> {
-  const payload = await browser.evaluate(async (input: { path: string; requests: ApiRequest[] }) => {
-    async function one(command: ApiRequest) {
-      const response = await fetch(input.path, {
-        method: command.method ?? 'GET',
-        headers: {
-          ...(command.body === undefined ? {} : { 'content-type': 'application/json' }),
-          ...(command.origin ? { origin: command.origin } : {}),
-        },
-        body: command.body === undefined ? undefined : JSON.stringify(command.body),
-      });
-      const text = await response.text();
-      let body: unknown = null;
-      if (text) {
-        try { body = JSON.parse(text); } catch { body = text; }
-      }
-      return JSON.stringify({ status: response.status, body });
-    }
-    return JSON.stringify(await Promise.all(input.requests.map(one)));
-  }, { path, requests });
-  const encoded = JSON.parse(payload) as string[];
-  return encoded.map(item => JSON.parse(item) as ApiResult<T>);
-}
-
-async function apiFetch<T>(browser: Browser, path: string, request: ApiRequest = {}): Promise<ApiResult<T>> {
-  return (await apiFetchMany<T>(browser, path, [request]))[0];
-}
-
 async function listSubscriptions(browser: Browser): Promise<ListResponse> {
   const result = await apiFetch<ListResponse>(browser, '/api/subscriptions');
   expect(result.status).toBe(200);
@@ -374,16 +344,6 @@ async function subscriptionByName(browser: Browser, name: string): Promise<Subsc
   const subscription = list.subscriptions.find(item => item.name === name);
   expect(subscription).toBeDefined();
   return subscription!;
-}
-
-async function control(action: string, input: Record<string, unknown> = {}) {
-  const response = await fetch(`${process.env.FEED_E2E_CONTROL_URL}/control`, {
-    method: 'POST',
-    headers: { authorization: `Bearer ${process.env.FEED_E2E_CONTROL_SECRET}` },
-    body: JSON.stringify({ action, ...input }),
-  });
-  if (!response.ok) throw new Error(`Runtime control ${action} failed (${response.status})`);
-  return response.status === 204 ? null : response.json();
 }
 
 async function sessionState(): Promise<{ revision: number; subject: string; readyForRefresh: boolean; tokenFingerprint: string }> {
@@ -409,16 +369,6 @@ async function csrfProbe(browser: Browser, path: string, body: JsonValue) {
   const responseText = await response.text();
   if (response.status >= 500) throw new Error(`Runtime CSRF probe failed (${response.status}): ${responseText}`);
   return { status: response.status, body: responseText };
-}
-
-async function login(app: AppSurface, screen: Screen, browser: Browser, role: 'OWNER' | 'OTHER') {
-  await app.open('/subscriptions');
-  await screen.getByRole('link', '使用 auth.cqu.moe 登录').click();
-  await expect(browser).toHaveURL(new RegExp(`^${escapeOrigin(new URL(process.env.FEED_E2E_AUTH_URL!).origin)}/login`));
-  await screen.getByLabel('邮箱').fill(credentials.user(role.toLowerCase()).username);
-  await browser.locator('#password').fill(credentials.user(role.toLowerCase()).password);
-  await screen.getByRole('button', '登录', { exact: true }).click();
-  await expect(browser).toHaveURL(/\/subscriptions$/);
 }
 
 async function createSubscription(screen: Screen, name: string, target: string | RegExp) {
@@ -523,8 +473,4 @@ async function readRss(browser: Browser, url: string, ifNoneMatch?: string) {
     });
   }, ifNoneMatch === undefined ? { url } : { url, ifNoneMatch });
   return JSON.parse(payload) as { status: number; etag: string | null; retryAfter: string | null; xml: string };
-}
-
-function escapeOrigin(origin: string) {
-  return origin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
