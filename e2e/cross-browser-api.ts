@@ -42,6 +42,7 @@ const native = base.extend<{ surfaces: Surfaces }>({
     const profiles: Array<{ path: string; removed: boolean; disconnected: boolean }> = [];
     const unexpected: string[] = [], errors: unknown[] = [];
     const viewports: unknown[] = [];
+    const browserErrors: string[] = [];
     const routes: Array<{ pattern: string | RegExp; handler: (route: any) => any }> = [];
     let context: BrowserContext | undefined, page!: Page, profile: typeof profiles[number];
     async function observe() {
@@ -76,6 +77,10 @@ const native = base.extend<{ surfaces: Surfaces }>({
         else { unexpected.push(origin); await route.abort(); }
       });
       page = context.pages()[0] ?? await context.newPage();
+      page.on('pageerror', error => browserErrors.push(error.stack ?? error.message));
+      page.on('console', message => {
+        if (message.type() === 'error') browserErrors.push(message.text());
+      });
       for (const entry of routes) await install(entry.pattern, entry.handler);
     }
     async function install(pattern: string | RegExp, handler: (route: any) => any) {
@@ -122,7 +127,7 @@ const native = base.extend<{ surfaces: Surfaces }>({
               links: Array.from(doc.querySelectorAll('.linkAnnotation a')).map(link => ({ href: link.getAttribute('href'), box: link.getBoundingClientRect().toJSON() })),
               pages: Array.from(doc.querySelectorAll('.feed-reader-page')).map(sheet => ({ box: sheet.getBoundingClientRect().toJSON(), offsetTop: (sheet as HTMLElement).offsetTop })) };
           }));
-          await writeFile(join(out, `native-failure-${info.testId}.json`), JSON.stringify({ attemptId, testId: info.testId, frames }, null, 2));
+          await writeFile(join(out, `native-failure-${info.testId}.json`), JSON.stringify({ attemptId, testId: info.testId, frames, browserErrors }, null, 2));
         } catch (error) { errors.push(error); }
       }
       try { await close(); } catch (error) { errors.push(error); }
