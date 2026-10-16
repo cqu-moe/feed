@@ -1,5 +1,5 @@
-import { beforeEach, afterEach, test, type Browser } from '@e2e-dev/web';
-import { credentials, expect } from 'e2e';
+import { beforeEach, afterEach, test, type Browser } from './test-api';
+import { credentials, expect } from './test-api';
 import { request as httpsRequest } from 'node:https';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';

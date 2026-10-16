@@ -1,5 +1,6 @@
 import type { Browser } from '@e2e-dev/web';
-import { credentials, expect, type JsonValue, type Screen } from 'e2e';
+import { credentials, expect } from './test-api';
+import type { JsonValue, Screen } from 'e2e';
 
 export type AppSurface = { open(path?: string): Promise<void> };
 

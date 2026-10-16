@@ -1,6 +1,7 @@
-import { beforeEach, afterEach, test } from '@e2e-dev/web';
-import type { Browser } from '@e2e-dev/web';
-import { credentials, expect, type JsonValue, type Screen } from 'e2e';
+import { beforeEach, afterEach, test } from './test-api';
+import type { Browser } from './test-api';
+import { credentials, expect } from './test-api';
+import type { JsonValue, Screen } from 'e2e';
 import {
   apiFetch,
   apiFetchMany,

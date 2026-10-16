@@ -78,8 +78,9 @@ Negative controls, each expected to exit nonzero (use distinct output paths):
 - Combine startup/cleanup controls: retain both causes and return nonzero.
 - `FEED_E2E_STOCK_BROWSER=1`: reproduce the stock-engine HTTPS certificate failure.
 
-Firefox/WebKit, real devices, production Auth, live school fetches, email delivery
-and paid OCR are outside this ticket's local Chromium acceptance.
+The original ticket acceptance is Chromium. The release Web gate below adds
+Firefox/WebKit over the original journeys. Real devices, production Auth, live
+school fetches, real email delivery and paid OCR remain separate acceptance.
 
 ## FEED-03 native ingestion
 
@@ -144,21 +145,82 @@ Keyboard snapshot/history actions and both themes run in both viewport variants.
 `reading-evidence.json` records observed hashes, geometry and protocol results;
 `reading-failure-evidence.json` records recovery and revoked-response results.
 
+## Complete Firefox/WebKit release gate
+
 The fixed e2e engine was actually probed against local HTTPS: Firefox failed
 with `SSL_ERROR_UNKNOWN`, WebKit with an invalid-server-certificate error.
 It exposes no `ignoreHTTPSErrors`; its BrowserProvider/CDP interface requires
-Chromium. Supplement only those engines with Playwright's supported isolated
-persistent context and `ignoreHTTPSErrors: true`, using the same runner and
-real services. No system trust/keychain change is needed. These supplemental
-journeys cover both desktop and phone viewports, with disposable profiles and
-explicit close/removal receipts. They do not replace the Chromium e2e tests.
+Chromium. Only those engines use the supported Playwright TLS context. The
+original `journey.e2e.ts` (2), `reading.e2e.ts` (2), `ingestion.e2e.ts` (1),
+and `mail.e2e.ts` (1) execute directly through a small operation adapter;
+no weaker copied reader supplement remains. All existing business assertions
+remain in their original owners. Reader adds unique-result barriers and checks
+URL/visible-page/paint readiness before the next internal-link action. Native
+engines use three actual wheel gestures with observed progress and the same
+total distance (Firefox bounds a large event); Chromium keeps its single wheel.
+Default Chromium still uses e2e and its original provider.
+
+`FEED_E2E_SUITE=reader|ingestion|mail` selects the same original owners in both
+runners. Each command runs desktop 1440×900 and phone viewport 390×844, sequentially.
+For each round, run the three suites for each engine, one command at a time:
 
 ```sh
-FEED_E2E_AUTH_CHECKOUT=.e2e/auth-checkout FEED_E2E_OUTPUT=.e2e/reading-round-1 pnpm test:e2e
-FEED_E2E_AUTH_CHECKOUT=.e2e/auth-checkout FEED_E2E_OUTPUT=.e2e/reading-round-2 pnpm test:e2e
-FEED_E2E_AUTH_CHECKOUT=.e2e/auth-checkout FEED_E2E_OUTPUT=.e2e/reading-firefox FEED_E2E_CROSS_BROWSER=1 FEED_E2E_BROWSER=firefox pnpm test:e2e
-FEED_E2E_AUTH_CHECKOUT=.e2e/auth-checkout FEED_E2E_OUTPUT=.e2e/reading-webkit FEED_E2E_CROSS_BROWSER=1 FEED_E2E_BROWSER=webkit pnpm test:e2e
+FEED_E2E_AUTH_CHECKOUT=.e2e/auth-checkout FEED_E2E_OUTPUT=.e2e/release-firefox-reader-round-1 FEED_E2E_CROSS_BROWSER=1 FEED_E2E_BROWSER=firefox FEED_E2E_SUITE=reader node e2e/run.mjs
+FEED_E2E_AUTH_CHECKOUT=.e2e/auth-checkout FEED_E2E_OUTPUT=.e2e/release-firefox-ingestion-round-1 FEED_E2E_CROSS_BROWSER=1 FEED_E2E_BROWSER=firefox FEED_E2E_SUITE=ingestion node e2e/run.mjs
+FEED_E2E_AUTH_CHECKOUT=.e2e/auth-checkout FEED_E2E_OUTPUT=.e2e/release-firefox-mail-round-1 FEED_E2E_CROSS_BROWSER=1 FEED_E2E_BROWSER=firefox FEED_E2E_SUITE=mail node e2e/run.mjs
 ```
+
+Repeat with `webkit` and fresh output names, then use fresh `round-2` names
+for the second independent round after review. Each full round is 24 business
+attempts (6 original journeys × 2 engines × 2 viewports). A filtered run, list,
+or partial supplement is never complete release coverage. No retries are enabled.
+The gate compares full/selected discovery and actual IDs, the original suite
+files/count, a single native attempt, engine-bound cleanup receipts and actual
+window dimensions. `clearState` recreates the browser with a new disposable
+profile, preserving only attempt-owned routes. All internal app/platform paths
+stay real; context TLS trust is local, not a system/keychain change.
+
+`native-discovery.json`, `native-selected-discovery.json`, original
+`playwright-report.json` and per-test browser cleanup receipts bind actual IDs,
+attempt UUIDs, dimensions, profile deletion and browser disconnection. The runner
+retains its source digest and native bundle hashes. Public copies retain a count
+of known synthetic values and text files verified after redaction. Raw original
+reports stay private. Trace/screenshots/video are off for these native engines;
+original download/byte, pixel and business assertions still run in the journeys.
+
+Export copies are built in a private sibling staging directory and fully scanned
+(including parsed JSON keys) before promotion. The runner stages the entire
+public tree, adds redacted runtime/manifest metadata, scans it again with every
+variant's known synthetic values, then promotes it once. A rejected export
+discards the owned staging tree and publishes only a fixed safe failure summary;
+raw originals and detailed errors stay in dot-prefixed private files. Child
+stdout/stderr is retained only in `.private-child.log`, never replayed to console
+or exported as `runner.log`; control reasons are checked against that private
+file. Native `--list` discovery also captures both streams through explicit pipes
+in `.private-native-*.stdout.log` / `.stderr.log`, including successful discovery.
+Final publication journals recursively retain `AggregateError.errors`, `cause`,
+stacks and filesystem details. A private journal is reserved before publication
+so failure of the normal journal path can retain both the original error chain
+and the journal failure. If even the reserved file cannot be written, the runner
+fails with a fixed diagnostic explicitly saying retention may be incomplete.
+Unknown error text is not copied into public metadata. Native platform
+ERROR logs keep their original stacks/causes in mode600 `.private-platform.log`
+through the runtime-owned logger, with no global console hook. Empty native
+selection also rejects framework errors rather than treating collection faults
+as a valid zero-test control. Publication rejection is nonzero
+even when the browser itself passed; existing public destinations are rejected.
+
+Run the existing eight mail controls once per engine with fresh exclusive roots:
+
+```sh
+FEED_E2E_AUTH_CHECKOUT=.e2e/auth-checkout FEED_E2E_CROSS_BROWSER=1 FEED_E2E_BROWSER=firefox FEED_E2E_CONTROL_OUTPUT=.e2e/release-firefox-controls node e2e/mail-controls.mjs
+```
+
+Repeat for WebKit. They verify the exact assertion/oracle, zero-selection,
+startup/cleanup and disabled-mail-consumer failures against actual attempts;
+none count as the 24 required positive business slots. Ingestion's existing
+`FEED_E2E_DISABLE_CONSUMERS=1` control must also fail at source verification.
+All outputs require a fresh directory; old success is never reusable.
 
 For the native-engine limitation probe, omit `FEED_E2E_CROSS_BROWSER`, set
 `FEED_E2E_STOCK_BROWSER=1`, and select `FEED_E2E_BROWSER=firefox` or `webkit`.

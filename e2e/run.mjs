@@ -4,7 +4,7 @@ import { mkdir, readdir, readFile, realpath, writeFile } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { assertSelectedAttemptCleanup, exportPublic, redact } from './evidence.mjs';
+import { assertSelectedAttemptCleanup, auditNativeAttempts, exportPublic, publishRunEvidence, discoverNativeTests, recordPrivateChildOutput } from './evidence.mjs';
 
 import { AUTH_E2E_COMMIT, FEED_E2E_BASE_COMMIT, setFeedEntitlements, startFeedRuntime } from './runtime.mjs';
 
@@ -29,7 +29,8 @@ const feedDirty = Boolean(git(['status', '--porcelain']));
 const output = resolve(process.env.FEED_E2E_OUTPUT || `.e2e/run-${Date.now()}-${process.pid}`);
 if (!isChild(outputRoot, output) || isChild(authDir, output) || output === authDir) throw new Error('E2E output must be a fresh child of .e2e outside the Auth checkout');
 await mkdir(outputRoot, { recursive: true });
-await mkdir(output);
+await mkdir(output, { mode: 0o700 });
+await mkdir(join(output, '.public-stage'), { mode: 0o700 });
 const buildDir = join(output, 'build');
 const browserDir = resolve('.e2e/browser-cache');
 const privateHome = join(output, '.home');
@@ -65,8 +66,13 @@ if (crossBrowser && process.env.FEED_E2E_STOCK_BROWSER) throw new Error('Native-
 if (crossBrowser && !['firefox', 'webkit'].includes(browserName)) throw new Error('Cross-browser fallback is only for Firefox/WebKit');
 manifest.browser = browserName;
 manifest.corruptReadingPdf = process.env.FEED_E2E_CORRUPT_PDF === '1';
-if (crossBrowser) manifest.engine = 'playwright@1.64.0 (e2e 0.15 local TLS gap)';
+if (crossBrowser) {
+  manifest.runner = 'playwright@1.64.0';
+  manifest.engine = 'native Firefox/WebKit (e2e 0.15 local TLS gap)';
+}
 const faults = { assertion: process.env.FEED_E2E_BREAK_ASSERTION || '', cleanup: process.env.FEED_E2E_FAIL_CLEANUP === '1' };
+const allSensitiveValues = new Set();
+let exportRejected = false;
 
 try {
   build(process.execPath, ['node_modules/typescript/bin/tsc', '--project', 'e2e/tsconfig.json']);
@@ -122,6 +128,7 @@ try {
         FEED_E2E_MAIL_WRONG_ORACLE: process.env.FEED_E2E_MAIL_WRONG_ORACLE || '',
         FEED_E2E_ADMIN_TOKEN: runtime.ingestion?.bindings.ADMIN_TOKEN ?? '',
         FEED_E2E_BROWSER: browserName,
+        FEED_E2E_CROSS_BROWSER: crossBrowser ? '1' : '',
         FEED_E2E_STOCK_BROWSER: process.env.FEED_E2E_STOCK_BROWSER || '',
         FEED_E2E_OWNER_ID: accounts.owner.userId, FEED_E2E_OTHER_ID: accounts.other.userId,
       };
@@ -132,6 +139,11 @@ try {
       const childArgs = crossBrowser
         ? ['node_modules/@playwright/test/cli.js', 'test', '--config', 'e2e/cross-browser.config.ts', ...process.argv.slice(2)]
         : ['node_modules/e2e/dist/cli/bin.js', 'run', '--config', 'e2e.config.ts', '--output', variantDir, ...process.argv.slice(2)];
+      let discovery, selected;
+      if (crossBrowser) {
+        discovery = await discoverNativeTests(variantDir, [], childEnv, 'native-discovery.json');
+        selected = await discoverNativeTests(variantDir, process.argv.slice(2), childEnv, 'native-selected-discovery.json');
+      }
       const child = spawn(process.execPath, childArgs, {
         stdio: ['ignore', 'pipe', 'pipe'], env: childEnv,
       });
@@ -152,13 +164,14 @@ try {
       try {
         if (crossBrowser) {
           const raw = JSON.parse(await readFile(join(variantDir, 'playwright-report.json'), 'utf8'));
+          evidence.nativeAttempts = await auditNativeAttempts(raw, discovery, selected, variantDir, { suite, browser: browserName, variant, allowFailure: evidence.runnerExit !== 0 });
           const s = raw.stats;
           report = { run: { status: evidence.runnerExit === 0 && !raw.errors.length ? 'passed' : 'failed', summary: { executed: s.expected + s.unexpected + s.flaky, passed: s.expected, failed: s.unexpected + raw.errors.length, skipped: s.skipped, flaky: s.flaky, interrupted: 0 } } };
         } else report = JSON.parse(await readFile(join(variantDir, 'report.json'), 'utf8'));
       }
       catch (error) {
         if (error.code !== 'ENOENT') throw error;
-        throw new Error(`Browser runner exited ${evidence.runnerExit} without a report; original startup/collection error is in runner.log`);
+        throw new Error(`Browser runner exited ${evidence.runnerExit} without a report; original startup/collection error is in .private-child.log`);
       }
       evidence.summary = report.run.summary;
       const s = evidence.summary;
@@ -193,8 +206,9 @@ try {
         catch (error) { evidence.errors.push(`Auth rate-limit readback failed: ${error.message}`); }
       }
       try { runtimeSensitive = await runtime?.sensitiveValues() ?? []; }
-      catch { evidence.errors.push('Sensitive-value inventory failed; public export withheld'); }
+      catch { evidence.errors.push('Sensitive-value inventory failed; public export withheld'); exportRejected = true; }
       const values = [accounts.password, ...Object.values(accounts).map(a => a?.email), ...runtimeSensitive].filter(Boolean);
+      for (const value of values) allSensitiveValues.add(value);
       evidence.observations = runtime?.observations ?? [];
       try {
         if (runtime) evidence.cleanup = { status: 'passed', ...(await runtime.close()) };
@@ -204,15 +218,12 @@ try {
         evidence.cleanup.status = 'failed';
         evidence.errors.push(...errorMessages(error));
       }
-      const cleanLog = redact(rawLog, values);
-      await writeFile(join(variantDir, 'runner.log'), cleanLog);
-      process.stdout.write(cleanLog);
+      await recordPrivateChildOutput(variantDir, rawLog);
       // Export copies only. Preserve the original runner report and failure evidence.
       try {
-        if (!evidence.errors.includes('Sensitive-value inventory failed; public export withheld')) await exportPublic(variantDir, join(output, 'public', variant), values);
-      } catch (error) { evidence.errors.push(...errorMessages(error)); }
-      await mkdir(join(output, 'public', variant), { recursive: true });
-      await writeFile(join(output, 'public', variant, 'runtime.json'), JSON.stringify(evidence, null, 2) + '\n');
+        if (!evidence.errors.includes('Sensitive-value inventory failed; public export withheld')) evidence.sanitization = await exportPublic(variantDir, join(output, '.public-stage', variant), values);
+      } catch (error) { exportRejected = true; evidence.errors.push(...errorMessages(error)); }
+      await writeFile(join(variantDir, '.private-runtime.json'), JSON.stringify(evidence, null, 2) + '\n', { mode: 0o600 });
       if (evidence.errors.length) manifest.errors.push(...evidence.errors);
     }
     if (manifest.errors.length) break;
@@ -220,13 +231,12 @@ try {
 } catch (error) {
   manifest.errors.push(...errorMessages(error));
 } finally {
-  await mkdir(join(output, 'public'), { recursive: true });
-  await writeFile(join(output, 'public/run.json'), JSON.stringify(manifest, null, 2) + '\n');
+  const published = await publishRunEvidence(output, manifest, [...allSensitiveValues], { rejected: exportRejected });
   if (manifest.errors.length) {
     process.exitCode = 1;
-    console.error(manifest.errors.join('\n'));
+    console.error(published ? JSON.parse(await readFile(join(output, 'public/run.json'), 'utf8')).errors.join('\n') : 'Run failed; inspect private evidence');
   }
-  console.log(`Evidence: ${relative(process.cwd(), output)}/public`);
+  console.log(`Evidence: ${relative(process.cwd(), output)}${published ? '/public' : ' (private only)'}`);
 }
 
 function git(args) { return execFileSync('git', args, { encoding: 'utf8' }).trim(); }
@@ -246,7 +256,8 @@ async function sourceDigest() {
   const hashes = [];
   for (const path of paths) {
     if (!/^(src\/|worker\/|e2e\/|public\/|scripts\/|migrations\/|tests\/helpers\/mixed-pdf\.mjs$|tsconfig|e2e\.config|package\.json|pnpm-|\.github\/|\.design\/|\.nvmrc|vite\.config|index\.html)/.test(path)) continue;
-    hashes.push([path, sha(await readFile(path))]);
+    try { hashes.push([path, sha(await readFile(path))]); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; hashes.push([path, null]); }
   }
   return { sha256: sha(JSON.stringify(hashes)), files: Object.fromEntries(hashes) };
 }

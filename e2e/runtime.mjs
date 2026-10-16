@@ -3,11 +3,12 @@ import { request as httpsRequest } from 'node:https';
 import { createHash, randomBytes } from 'node:crypto';
 import { readdir, readFile, rm, stat } from 'node:fs/promises';
 import { createConnection } from 'node:net';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 import { seedSyntheticReadingArchive } from './reading-fixtures.mjs';
 
-import { Miniflare, convertV4MiniflareOptions, Log, LogLevel } from 'miniflare';
+import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
+import { privatePlatformLog } from './private-log.mjs';
 import { createMailFixture } from './mail-runtime.mjs';
 import { createIngestionFixture } from './ingestion-runtime.mjs';
 
@@ -189,6 +190,7 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir, ingestion 
   await rm(stateDir, { recursive: true, force: true });
   const feedBundle = await readFile(join(buildDir, 'feed', 'index.js'), 'utf8');
   const authBundle = await readFile(join(buildDir, 'auth', 'index.js'), 'utf8');
+  const platformLog = privatePlatformLog(join(dirname(stateDir), '.private-platform.log'));
   const feedPort = await reservePort();
   const authPort = await reservePort();
   const oauthClientSecret = base64Url(randomBytes(32));
@@ -232,7 +234,7 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir, ingestion 
     port: feedPort,
     https: true,
     resourcePersistencePath: join(stateDir, 'resources'),
-    log: new Log(LogLevel.ERROR),
+    log: platformLog,
     workers: [
       {
         name: 'feed',

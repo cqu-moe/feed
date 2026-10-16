@@ -1,9 +1,9 @@
-import { beforeEach, afterEach, test } from '@e2e-dev/web';
-import type { Browser } from '@e2e-dev/web';
+import { beforeEach, afterEach, test } from './test-api';
+import type { Browser } from './test-api';
 import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { expect } from 'e2e';
+import { expect } from './test-api';
 import { apiFetch, control, login } from './support';
 
 const webArticleId = 'e2e000000000000000000002';
@@ -53,6 +53,7 @@ test('FEED02 real archive search reading and PDF history', async ({ app, screen,
   await screen.getByLabel('搜索通知').fill('FEED02 网页通知唯一关键词');
   await screen.getByLabel('搜索通知').press('Enter');
   await expect(screen.getByRole('heading', { level: 2, name: 'FEED02 网页通知（当前完整版本）' })).toBeVisible();
+  await expect(screen.getByRole('link', '统一阅读')).toHaveCount(1);
   await screen.getByRole('link', '统一阅读').click();
   await expect(screen.getByRole('heading', { level: 1, name: 'FEED02 网页通知（当前完整版本）' })).toBeVisible();
   await expect(screen.getByText('这是当前完整网页正文，包含 FEED02 网页通知唯一关键词。')).toBeVisible();
@@ -163,6 +164,7 @@ test('FEED02 real archive search reading and PDF history', async ({ app, screen,
   await screen.getByLabel('通知来源').click();
   await screen.getByRole('option', '国际处').click();
   await expect(screen.getByRole('heading', { level: 2, name: 'FEED02 PDF 正文通知' })).toBeVisible();
+  await expect(screen.getByRole('link', '统一阅读')).toHaveCount(1);
   await screen.getByRole('link', '统一阅读').click();
   const originalFrame = browser.frameLocator('iframe[title="通知原件.pdf PDF 预览"]');
   await expect(originalFrame.getByText('REAL PDF PAGE ONE', { exact: true })).toBeVisible({ timeout: 15000 });
@@ -174,11 +176,41 @@ test('FEED02 real archive search reading and PDF history', async ({ app, screen,
     const page = doc.querySelector('[aria-label="PDF 第 2 页"]')!.getBoundingClientRect();
     return page.top - region.top + Math.min(page.height, region.height) / 2 - region.height / 2;
   });
-  await browser.mouse.wheel(0, wheelDistance);
-  await expect(originalFrame.getByText('2 / 3')).toBeVisible();
+  try {
+    // Firefox bounds one large wheel event to roughly one scrollport. Use
+    // three actual gestures for native engines; never set scrollTop or retry.
+    const gestures = process.env.FEED_E2E_CROSS_BROWSER === '1' ? 3 : 1;
+    const motion: Array<{ before: number; after: number; requested: number }> = [];
+    const scrollTop = () => browser.evaluate(() => document.querySelector<HTMLIFrameElement>('iframe[title="通知原件.pdf PDF 预览"]')!
+      .contentDocument!.querySelector('[aria-label="PDF 连续阅读"]')!.scrollTop);
+    for (let gesture = 0; gesture < gestures; gesture++) {
+      const before = gestures > 1 ? await scrollTop() : 0;
+      await browser.mouse.wheel(0, wheelDistance / gestures);
+      if (gestures > 1) {
+        await expect.poll(scrollTop).toBeGreaterThan(before);
+        motion.push({ before, after: await scrollTop(), requested: wheelDistance / gestures });
+        await writeFile(join(process.env.FEED_E2E_OUTPUT!, 'wheel-input-evidence.json'), JSON.stringify({ wheelDistance, motion }, null, 2));
+      }
+    }
+    await expect(originalFrame.getByText('2 / 3')).toBeVisible();
+  } catch (error) {
+    try {
+      const observed = await browser.evaluate(() => {
+        const frame = document.querySelector<HTMLIFrameElement>('iframe[title="通知原件.pdf PDF 预览"]')!;
+        const doc = frame.contentDocument!, region = doc.querySelector('[aria-label="PDF 连续阅读"]')!;
+        return { scrollTop: region.scrollTop, height: region.clientHeight, scrollHeight: region.scrollHeight,
+          activePage: new URL(frame.contentWindow!.location.href).searchParams.get('page'),
+          pages: Array.from(doc.querySelectorAll('.feed-reader-page')).map(page => ({ top: (page as HTMLElement).offsetTop, height: page.clientHeight })) };
+      });
+      await writeFile(join(process.env.FEED_E2E_OUTPUT!, 'wheel-failure-evidence.json'), JSON.stringify({ wheelDistance, observed }, null, 2));
+    } catch (captureError) { throw new AggregateError([error, captureError], 'PDF wheel assertion and observation both failed', { cause: error }); }
+    throw error;
+  }
   await expect.poll(() => readerGeometry(browser)).toMatchObject({ page: 2, inScrollport: true, painted: true });
   await originalFrame.getByRole('button', { name: '上一页' }).click();
   await expect(originalFrame.getByText('1 / 3')).toBeVisible();
+  await expect.poll(() => readerGeometry(browser)).toMatchObject({ page: 1, inScrollport: true, painted: true });
+  const beforeInternalLink = await readerGeometry(browser);
   await originalFrame.getByLabel('PDF 第 1 页').getByRole('link').click();
   await expect(originalFrame.getByText('3 / 3')).toBeVisible();
   await expect(originalFrame.getByLabel('PDF 第 3 页')).toBeVisible();
@@ -263,7 +295,7 @@ test('FEED02 real archive search reading and PDF history', async ({ app, screen,
     ordinaryPdfSha256: sha256(await readFile(ordinary.absolutePath)),
     currentScreenshotSha256: sha256(Buffer.from(currentShot.bodyBase64, 'base64')),
     oldScreenshotSha256: sha256(Buffer.from(oldShot.bodyBase64, 'base64')),
-    beforeZoom, afterZoom, snapshotDom, screenshotPixels,
+    beforeInternalLink, beforeZoom, afterZoom, snapshotDom, screenshotPixels,
     head: { status: head.status, byteSize: head.headers['content-length'] },
     range: { status: range.status, contentRange: range.headers['content-range'], bodyBase64: range.bodyBase64 },
     invalidRange: { status: invalidRange.status, contentRange: invalidRange.headers['content-range'] },

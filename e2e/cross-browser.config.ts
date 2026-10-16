@@ -5,12 +5,13 @@ if (!['firefox', 'webkit'].includes(process.env.FEED_E2E_BROWSER ?? '')) throw n
 
 export default defineConfig({
   testDir: '.',
-  testMatch: 'reading.cross-browser.spec.ts',
+  testMatch: process.env.FEED_E2E_SUITE === 'ingestion' ? 'ingestion.e2e.ts'
+    : process.env.FEED_E2E_SUITE === 'mail' ? 'mail.e2e.ts' : ['journey.e2e.ts', 'reading.e2e.ts'],
   workers: 1,
   retries: 0,
   forbidOnly: true,
-  timeout: 120_000,
-  expect: { timeout: 15_000 },
+  timeout: ['ingestion', 'mail'].includes(process.env.FEED_E2E_SUITE ?? '') ? 300_000 : 120_000,
+  expect: { timeout: 10_000 },
   outputDir: join(process.env.FEED_E2E_OUTPUT!, 'results'),
   reporter: [['list'], ['json', { outputFile: join(process.env.FEED_E2E_OUTPUT!, 'playwright-report.json') }]],
   use: { trace: 'off', screenshot: 'off', video: 'off' },
