@@ -402,7 +402,7 @@ export default function PdfReader() {
           <Plus aria-hidden="true" />
         </Button>
         <Button asChild variant="outline" size="sm">
-          <a href={`${file}?download=1`}>
+          <a href={`${file}?download=1`} download>
             <Download aria-hidden="true" />
             下载
           </a>
@@ -425,7 +425,7 @@ export default function PdfReader() {
               <>
                 <Button onClick={retryDocument}>重试预览</Button>
                 <Button asChild variant="outline">
-                  <a href={`${file}?download=1`}>下载 PDF</a>
+                  <a href={`${file}?download=1`} download>下载 PDF</a>
                 </Button>
               </>
             }
@@ -450,7 +450,7 @@ export default function PdfReader() {
                   <>
                     <Button onClick={retryDocument}>重试预览</Button>
                     <Button asChild variant="outline">
-                      <a href={`${file}?download=1`}>下载 PDF</a>
+                      <a href={`${file}?download=1`} download>下载 PDF</a>
                     </Button>
                   </>
                 }

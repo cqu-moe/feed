@@ -483,7 +483,7 @@ export function ArticleDetailPage() {
             <span className="feed-selected-original">当前原件：{selectedBodyPdf.name}</span>
           )}
           {selectedBodyPdf?.downloadUrl && (
-            <a className="feed-reading-source feed-original-download" href={selectedBodyPdf.downloadUrl}>
+            <a className="feed-reading-source feed-original-download" href={selectedBodyPdf.downloadUrl} download>
               <Download aria-hidden="true" />
               下载原件 PDF
             </a>
@@ -867,7 +867,7 @@ function AttachmentRow({
       <div className="feed-attachment-content">
         {attachment.downloadUrl ? (
           <h3>
-            <a href={attachment.downloadUrl}>{attachment.name}</a>
+            <a href={attachment.downloadUrl} download>{attachment.name}</a>
           </h3>
         ) : (
           <h3>{attachment.name}</h3>

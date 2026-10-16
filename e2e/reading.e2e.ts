@@ -335,9 +335,23 @@ test('FEED02 archive failures recover without fake content and denial is immedia
       return fillRect.apply(this, args);
     };
   })();`);
-  await app.open(readerPath);
-  await expect(screen.getByRole('heading', 'PDF 页面暂时无法呈现')).toBeVisible({ timeout: 15000 });
-  const failedDrawDownload = await browser.waitForDownload(() => screen.getByRole('link', '下载 PDF').click());
+  // Keep the real URL-change session read pending across download navigation.
+  let sessionReads = 0;
+  let sessionHeld = false;
+  let resumeSession!: () => void;
+  const pendingSession = new Promise<void>(resolve => { resumeSession = resolve; });
+  await browser.route(`${process.env.FEED_E2E_APP_URL}/api/session`, async route => {
+    if (++sessionReads === 2) { sessionHeld = true; await pendingSession; }
+    await route.continue();
+  });
+  let failedDrawDownload: Awaited<ReturnType<Browser['waitForDownload']>>;
+  try {
+    await app.open(readerPath);
+    await expect(screen.getByRole('heading', 'PDF 页面暂时无法呈现')).toBeVisible({ timeout: 15000 });
+    await expect.poll(() => sessionHeld).toBe(true);
+    failedDrawDownload = await browser.waitForDownload(() => screen.getByRole('link', '下载 PDF').click());
+  } finally { resumeSession(); }
+  await expect(screen.getByRole('button', '重试预览')).toBeVisible();
   const manifest = await control('reading-manifest') as { currentPdfSha256: string };
   expect(sha256(await readFile(failedDrawDownload.absolutePath))).toBe(manifest.currentPdfSha256);
   await screen.getByRole('button', '重试预览').click();
