@@ -297,3 +297,7 @@ still leaves real ready events and prepared messages with zero provider calls.
 Only per-control `public/` directories and the bounded `controls.json` summary
 are suitable for sharing. Real Resend sending/billing, mailbox receipt or reading,
 remote Cloudflare resources, and production rollout remain unverified.
+
+### CI release entry
+
+The existing manual CI workflow runs all three suites in Chromium, Firefox and WebKit, each in two fresh jobs. PR/push checks retain Chromium. Each browser has separate business and negative-control artifact names; only the runner-verified public directory is uploaded. Trigger the manual workflow on the reviewed PR branch to run the 48 Firefox/WebKit business attempts before release.

@@ -43,7 +43,7 @@ jobs:
           retention-days: 7
 
   e2e:
-    name: Real Auth and Feed ${{ matrix.suite }} E2E (round ${{ matrix.round }})
+    name: Real Auth and Feed ${{ matrix.suite }} E2E (${{ matrix.browser }}, round ${{ matrix.round }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -51,6 +51,10 @@ jobs:
       matrix:
         round: [1, 2]
         suite: [reader, ingestion, mail]
+        browser: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["chromium","firefox","webkit"]' || '["chromium"]') }}
+    env:
+      FEED_E2E_BROWSER: ${{ matrix.browser }}
+      FEED_E2E_CROSS_BROWSER: ${{ matrix.browser != 'chromium' && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -71,10 +75,15 @@ jobs:
       - run: npm --prefix .e2e/auth-checkout ci
       - run: pnpm --dir .e2e/auth-checkout/frontend install --frozen-lockfile
       - run: pnpm exec e2e-web install chromium --with-deps
+        if: matrix.browser == 'chromium'
         env:
           PLAYWRIGHT_BROWSERS_PATH: .e2e/browser-cache
           E2E_TELEMETRY_DISABLED: '1'
           DO_NOT_TRACK: '1'
+      - run: pnpm exec playwright install --with-deps "${{ matrix.browser }}"
+        if: matrix.browser != 'chromium'
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: .e2e/browser-cache
       - run: pnpm test:e2e
         env:
           FEED_E2E_AUTH_CHECKOUT: .e2e/auth-checkout
@@ -89,7 +98,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always() && matrix.suite == 'mail' && matrix.round == 1
         with:
-          name: feed-mail-negative-controls
+          name: feed-mail-negative-controls-${{ matrix.browser }}
           path: |
             .e2e/mail-controls/controls.json
             .e2e/mail-controls/*/public/
@@ -98,7 +107,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: feed-auth-${{ matrix.suite }}-e2e-round-${{ matrix.round }}
+          name: feed-auth-${{ matrix.suite }}-e2e-${{ matrix.browser }}-round-${{ matrix.round }}
           path: .e2e/${{ matrix.suite }}-round-${{ matrix.round }}/public/
           if-no-files-found: error
           retention-days: 7
