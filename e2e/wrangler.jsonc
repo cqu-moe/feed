@@ -1,0 +1,6 @@
+{
+  "name": "feed-e2e-build",
+  "main": "../worker/index.mjs",
+  "compatibility_date": "2026-10-11",
+  "compatibility_flags": ["nodejs_compat"]
+}
