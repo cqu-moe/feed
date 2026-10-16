@@ -10,3 +10,6 @@ test-results/
 playwright-report/
 
 .e2e/
+
+# Task-local portable private inputs (never copy values into Git)
+private/

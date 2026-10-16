@@ -1,0 +1,5 @@
+{
+  "extends": "../../../e2e/tsconfig.json",
+  "compilerOptions": { "allowJs": true, "checkJs": false },
+  "include": ["*.ts", "*.mjs", "../browser/provider.ts"]
+}
