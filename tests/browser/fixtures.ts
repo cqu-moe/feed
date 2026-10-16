@@ -1,5 +1,56 @@
-import { test, expect, type Page } from '@playwright/test';
-export { test, expect };
+import { createServer, request } from 'node:http';
+import { test as base, expect, type Page } from '@playwright/test';
+export { expect };
+
+type FileResponse = { status?: number; json?: unknown; contentType?: string; headers?: Record<string, string>; body?: Buffer | string };
+type ReadingServer = { origin: string; download?: (url: URL) => FileResponse };
+const readingServers = new WeakMap<Page, ReadingServer>();
+
+export const test = base.extend<{ readingServer: ReadingServer }>({
+  readingServer: async ({}, use) => {
+    const fixture: ReadingServer = { origin: '' };
+    const upstream = `http://127.0.0.1:${process.env.FEED_TEST_PORT ?? 5190}`;
+    // Chromium's native download requests bypass Playwright route interception.
+    const server = createServer((req, res) => {
+      const url = new URL(req.url!, upstream);
+      if (url.pathname.includes('/files/') && url.searchParams.has('download') && fixture.download) {
+        const response = fixture.download(url);
+        res.writeHead(response.status ?? 200, {
+          'content-type': response.json === undefined ? response.contentType ?? 'application/octet-stream' : 'application/json',
+          ...response.headers,
+        });
+        res.end(response.json === undefined ? response.body : JSON.stringify(response.json));
+        return;
+      }
+      const proxy = request(upstream, { path: url.pathname + url.search, method: req.method,
+        headers: { ...req.headers, host: new URL(upstream).host } }, response => {
+        res.writeHead(response.statusCode ?? 502, response.headers);
+        response.pipe(res);
+      });
+      proxy.on('error', () => { res.writeHead(502); res.end('Fixture upstream unavailable'); });
+      req.pipe(proxy);
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Reading fixture did not bind TCP');
+    fixture.origin = `http://127.0.0.1:${address.port}`;
+    try { await use(fixture); }
+    finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close(error => error ? reject(error) : resolve());
+        server.closeAllConnections();
+      });
+    }
+  },
+  baseURL: async ({ readingServer }, use) => use(readingServer.origin),
+  page: async ({ page, readingServer }, use) => {
+    readingServers.set(page, readingServer);
+    try { await use(page); } finally { readingServers.delete(page); }
+  },
+});
 
 export const articleId = 'c65a90333229c47e1c30157c';
 export const revisionId = 'current-reading-fixture';
@@ -155,6 +206,25 @@ export async function installReadingRoutes(page: Page, options: ReadingOptions =
   const oldDetail = options.oldDetail ?? readingDetail(options.kind, oldRevisionId);
   const unreadyDetail = options.unreadyDetail;
   const pdf = options.pdf ?? makePdf();
+  const fileResponse = (url: URL): FileResponse => {
+    if (options.authenticated === false) return { status: 401, json: { error: 'unauthorized' } };
+    if (options.entitled === false) return { status: 403, json: { error: 'forbidden' } };
+    const fileStatus = url.searchParams.has('download')
+      ? options.downloadStatus ?? options.fileStatus
+      : options.previewStatus ?? options.fileStatus;
+    if (fileStatus && fileStatus !== 200) return { status: fileStatus, json: { error: 'file unavailable' } };
+    const requestedRevisionId = url.pathname.match(/\/revisions\/([^/]+)(?:\/|$)/)?.[1];
+    const selected = requestedRevisionId === oldRevisionId ? oldDetail
+      : requestedRevisionId === unreadyRevisionId && unreadyDetail ? unreadyDetail : detail;
+    const filename = url.pathname.split('/').at(-1)!;
+    const bytes = options.files?.[url.pathname] ?? options.files?.[filename]
+      ?? (filename.endsWith('.pdf') ? pdf : Buffer.from(`${selected.revision.id}: original application document`));
+    return { contentType: filename.endsWith('.pdf') ? 'application/pdf' : 'application/msword',
+      headers: { 'Content-Disposition': `${url.searchParams.has('download') ? 'attachment' : 'inline'}; filename="${filename}"` }, body: bytes };
+  };
+  const server = readingServers.get(page);
+  if (!server) throw new Error('Use the reading test fixture for download support');
+  server.download = fileResponse;
   await page.context().route('**/api/**', async route => {
     const url = new URL(route.request().url());
     const path = url.pathname;
@@ -189,15 +259,7 @@ export async function installReadingRoutes(page: Page, options: ReadingOptions =
         ?? `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64" fill="white"/><text x="4" y="36" font-size="10">SHOT ${selected.revision.id}</text></svg>`;
       return route.fulfill({ contentType: 'image/svg+xml', body: bytes });
     }
-    if (path.includes('/files/')) {
-      const fileStatus = url.searchParams.has('download')
-        ? options.downloadStatus ?? options.fileStatus
-        : options.previewStatus ?? options.fileStatus;
-      if (fileStatus && fileStatus !== 200) return json({ error: 'file unavailable' }, fileStatus);
-      const filename = path.split('/').at(-1)!;
-      const bytes = options.files?.[path] ?? options.files?.[filename] ?? (filename.endsWith('.pdf') ? pdf : Buffer.from(`${selected.revision.id}: original application document`));
-      return route.fulfill({ contentType: filename.endsWith('.pdf') ? 'application/pdf' : 'application/msword', headers: { 'Content-Disposition': `${url.searchParams.has('download') ? 'attachment' : 'inline'}; filename="${filename}"` }, body: bytes });
-    }
+    if (path.includes('/files/')) return route.fulfill(fileResponse(url));
     if (path === `/api/articles/${articleId}` || path.startsWith(`/api/articles/${articleId}/revisions/`)) {
       const detailDelay = options.detailDelays?.[selected.revision.id];
       if (detailDelay) {
