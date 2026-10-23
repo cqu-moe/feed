@@ -107,13 +107,14 @@ test('configured item and UTF-8 payload limits split a large digest without losi
       await subscriptionsInvoke(f.mf,'change',{id:'digest-owner'},{requestId:'digest-size-create',name:'每日通知',sourceIds:['jwc'],emailMode:'daily_digest'});
       const ids=[];
       for(let i=0;i<5;i++){
-        const id=await seedReadyEvent(f.mf,{id:`d${i}`+'4'.repeat(22),sourceId:'jwc',firstSeenAt:morning+1,observedAt:morning+1,readyAt:morning+2,publishedAt:new Date(morning+1).toISOString(),datePrecision:'minute',title:`第${i}篇`+'字'.repeat(mode==='bytes'?497:4)});
+        const title=mode==='bytes'&&i===0?'&'.repeat(12000):`第${i}篇`+'字'.repeat(mode==='bytes'?497:4);
+        const id=await seedReadyEvent(f.mf,{id:`d${i}`+'4'.repeat(22),sourceId:'jwc',firstSeenAt:morning+1,observedAt:morning+1,readyAt:morning+2,publishedAt:new Date(morning+1).toISOString(),datePrecision:'minute',title});
         ids.push(id);await notificationInvoke(f.mf,'enqueueEvent',id);await notificationInvoke(f.mf,'replayMatchOutbox');
       }
       await f.mailClock(evening);
       for(let i=0;i<5;i++){await f.mail('recover');await f.replayMail();}
       if(mode==='items')assert.equal(sent.length,3);
-      else assert.ok(sent.length>1);
+      else {assert.ok(sent.length>1);assert.ok(sent.some(mail=>mail.body.text.includes('&'.repeat(500)+'…')));}
       assert.equal(new Set(sent.map(mail=>mail.key)).size,sent.length);
       for(const mail of sent){
         assert.ok(Buffer.byteLength(JSON.stringify(mail.body))<=8192);

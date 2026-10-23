@@ -1,8 +1,13 @@
 const escape=value=>String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const baseText='font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",sans-serif;';
 
+function mailTitle(title){
+  return title.length<=500?title:title.slice(0,500).replace(/[\uD800-\uDBFF]$/,'')+'…';
+}
+
 export function renderImmediateMail({from,to,label,title,link,manageUrl,productUrl,messageId}){
   checkSender(from);
+  title=mailTitle(title);
   const subject=`${label}：${title}`.replace(/[\r\n]/g,' ').slice(0,200);
   const text=`CQU Feed\n${label}\n${title}\n阅读原版本：${link}\n管理订阅：${manageUrl}\n\n系统通知不支持回复。\n进入 CQU Feed：${productUrl}`;
   return {from,to,subject,text,
@@ -19,6 +24,7 @@ export function renderImmediateMail({from,to,label,title,link,manageUrl,productU
 
 export function renderDigestMail({from,to,date,chunk=0,items,manageUrl,productUrl,messageId}){
   checkSender(from);
+  items=items.map(item=>({...item,title:mailTitle(item.title)}));
   const batch=chunk?` · 第${chunk+1}批`:'', heading=`每日摘要 · ${date}${batch}`;
   const rows=items.map((item,index)=>`
       <div class="mail-item" style="padding:18px 0;${index?'border-top:1px solid #e6e8eb;':''}">

@@ -8,11 +8,12 @@ const link='https://feed.cqu.moe/articles/event?revision=revision';
 const common={from,to:'reader@example.test',manageUrl:'https://feed.cqu.moe/subscriptions',
   productUrl:'https://feed.cqu.moe',messageId:'a11111111111111111111111'};
 
-test('immediate mail preserves identity, full title, escaped HTML, and both links',()=>{
+test('immediate mail bounds long titles while preserving identity, escaped HTML, and both links',()=>{
   const mail=renderImmediateMail({...common,label:'内容更新',title,link});
 
   assert.equal(mail.from,from);
-  assert.ok(mail.text.includes(title));
+  assert.ok(mail.text.includes(title.slice(0,500)+'…'));
+  assert.ok(!mail.text.includes(title));
   assert.ok(mail.html.includes('&lt;b&gt;标题&lt;/b&gt;'));
   assert.ok(!mail.html.includes('<b>标题</b>'));
   assert.match(mail.html,/src="https:\/\/feed\.cqu\.moe\/brand\/icon-192\.png"/);
@@ -24,7 +25,7 @@ test('immediate mail preserves identity, full title, escaped HTML, and both link
   assert.match(mail.text,/进入 CQU Feed：https:\/\/feed\.cqu\.moe/);
 });
 
-test('digest mail preserves every complete item and its original version link',()=>{
+test('digest mail preserves every item and original version link while bounding long titles',()=>{
   const secondTitle='第二条通知';
   const secondLink='https://feed.cqu.moe/articles/second?revision=second';
   const mail=renderDigestMail({...common,date:'2026-10-12',chunk:1,items:[
@@ -35,11 +36,18 @@ test('digest mail preserves every complete item and its original version link',(
   assert.equal(mail.subject,'每日摘要 · 2026-10-12 · 第2批');
   assert.match(mail.html,/>每日摘要<\/h1>/);
   assert.match(mail.html,/2026-10-12 · 第2批/);
-  assert.ok(mail.text.includes(title));
+  assert.ok(mail.text.includes(title.slice(0,500)+'…'));
   assert.ok(mail.text.includes(secondTitle));
   assert.ok(mail.html.includes('&lt;b&gt;标题&lt;/b&gt;'));
   assert.ok(mail.html.includes(secondTitle));
   assert.ok(mail.html.includes(`href="${link}"`));
   assert.ok(mail.html.includes(`href="${secondLink}"`));
   assert.match(mail.text,/管理订阅：https:\/\/feed\.cqu\.moe\/subscriptions/);
+});
+
+test('title excerpts do not split a Unicode surrogate pair',()=>{
+  const title='字'.repeat(499)+'📚后续';
+  const mail=renderImmediateMail({...common,label:'新通知',title,link});
+  assert.ok(mail.text.includes('字'.repeat(499)+'…'));
+  assert.ok(!/[\uD800-\uDFFF]/.test(mail.text));
 });
