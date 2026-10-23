@@ -1,7 +1,7 @@
 import {sha} from './utils.mjs';
+import {renderDigestMail} from './mail-template.mjs';
 
 const day=86400_000;
-const escape=value=>String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 
 // This compiler owns window membership. The existing mail sender owns transport and recovery.
 export function createDigestCompiler(env,{now,assess,savePrivate,gate}){
@@ -99,12 +99,9 @@ function render(env,items,id,windowEnd,chunk){
   const origin=new URL(env.BASE_URL);
   if(!['https:','http:'].includes(origin.protocol)||origin.username||origin.password||origin.pathname!=='/'||origin.search||origin.hash)
     throw new Error('mail_origin_invalid');
-  if(typeof env.MAIL_FROM!=='string'||!env.MAIL_FROM||/[\r\n]/.test(env.MAIL_FROM))throw new Error('mail_sender_missing');
   const date=new Date(windowEnd+8*3600_000).toISOString().slice(0,10);
-  const lines=items.map(({assessment:{event}})=>({title:event.title.slice(0,500),label:event.kind==='update'?'更新':'新通知',
+  const lines=items.map(({assessment:{event}})=>({title:event.title,label:event.kind==='update'?'内容更新':'新通知',
     link:`${origin.origin}/articles/${event.articleId}?revision=${event.revisionId}`}));
-  return {from:env.MAIL_FROM,to:items[0].assessment.recipient,subject:`每日摘要 · ${date}${chunk?` · 第${chunk+1}批`:''}`,
-    text:`每日摘要 · ${date}\n\n${lines.map(item=>`【${item.label}】${item.title}\n${item.link}`).join('\n\n')}\n\n管理订阅：${origin.origin}/subscriptions`,
-    html:`<h1>每日摘要 · ${date}</h1><ul>${lines.map(item=>`<li>【${escape(item.label)}】<a href="${escape(item.link)}">${escape(item.title)}</a></li>`).join('')}</ul><p><a href="${escape(origin.origin)}/subscriptions">管理订阅</a></p>`,
-    tags:[{name:'feed_message_id',value:id}]};
+  return renderDigestMail({from:env.MAIL_FROM,to:items[0].assessment.recipient,date,chunk,items:lines,
+    manageUrl:`${origin.origin}/subscriptions`,productUrl:origin.origin,messageId:id});
 }

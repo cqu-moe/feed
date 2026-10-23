@@ -2,12 +2,12 @@ import {sha} from './utils.mjs';
 import {createNotifications} from './notifications.mjs';
 import {createResendProvider} from './mail-provider-resend.mjs';
 import {createDigestCompiler} from './mail-digest.mjs';
+import {renderImmediateMail} from './mail-template.mjs';
 import {captureFeedWorkerEvent} from './telemetry.mjs';
 
 const idPattern=/^[a-f0-9]{24}$/;
 const minute=60_000;
 const terminal=new Set(['accepted','delivered','bounced','complained','cancelled','rejected']);
-const escape=value=>String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const safeCode=value=>/^[a-z0-9_]{1,80}$/.test(value??'')?value:'provider_unavailable';
 
 // Notifications owns the delivery ledger; transport and provider adapters never claim items.
@@ -102,14 +102,11 @@ export function createMail(env,{now=()=>Date.now(),provider=createResendProvider
       const origin=new URL(env.BASE_URL);
       if(!['https:','http:'].includes(origin.protocol)||origin.username||origin.password||origin.pathname!=='/'||origin.search||origin.hash)
         throw new Error('mail_origin_invalid');
-      const event=assessment.event,title=event.title.slice(0,500);
+      const event=assessment.event,title=event.title;
       const link=`${origin.origin}/articles/${event.articleId}?revision=${event.revisionId}`;
       const label=event.kind==='update'?'内容更新':'新通知';
-      const payload={from:env.MAIL_FROM,to:assessment.recipient,subject:`${label}：${title}`.replace(/[\r\n]/g,' ').slice(0,200),
-        text:`${label}\n${title}\n查看完整版本：${link}\n管理订阅：${origin.origin}/subscriptions`,
-        html:`<h1>${escape(label)}</h1><p>${escape(title)}</p><p><a href="${escape(link)}">查看完整版本</a></p><p><a href="${escape(origin.origin)}/subscriptions">管理订阅</a></p>`,
-        tags:[{name:'feed_message_id',value:id}]};
-      if(typeof payload.from!=='string'||!payload.from||/[\r\n]/.test(payload.from))throw new Error('mail_sender_missing');
+      const payload=renderImmediateMail({from:env.MAIL_FROM,to:assessment.recipient,label,title,link,
+        manageUrl:`${origin.origin}/subscriptions`,productUrl:origin.origin,messageId:id});
       const object=await savePrivate(JSON.stringify(payload));
       const recipientHash=await sha(payload.to.trim().toLowerCase());
       const checked=gate(assessment),key=`feed-mail/${id}`,outboxId=(await sha(`mail:${id}:0`)).slice(0,24);

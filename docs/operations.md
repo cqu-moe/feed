@@ -534,6 +534,8 @@ node scripts/compare-ocr.mjs publish textin-xparse-auto
 
 启用前应用 0014 迁移，配置独立 `FEED_MAIL` Queue 与 DLQ、`MAIL_FROM`，并通过 Worker secrets 设置 `RESEND_API_KEY` 和 `RESEND_WEBHOOK_SECRET`。生产使用仅限 `feed.cqu.moe` 的 Sending access API key；发件域须在 Resend 验证。签名 webhook 更新受理、送达和退信事实，不需要 Full access。主动 `GET /emails/:id` 对账不在该 Key 权限内：遇到结果不明时保持原投递状态，在 Resend 后台核对，不自动重发。Full access 仅用于隔离验收或管理端配置，不注入正式 Feed Worker。Webhook 地址为当前环境的 `/webhooks/resend`，使用该 endpoint 自己的签名密钥。不得把密钥写入 Git、请求日志或操作记录。`MAIL_ENABLED` 默认 false，不会因合入代码自动发信。
 
+当前 `MAIL_FROM` 为 `CQU Feed <noreply@feed.cqu.moe>`。新准备的即时通知和每日摘要由 Worker 共享模板生成 HTML 与纯文本，品牌头使用 `https://feed.cqu.moe/brand/icon-192.png`。邮件展示标题沿用500长度上限，超出时加省略号并保留原版本链接，避免异常源标题阻塞摘要；存档原始标题不变。模板改版只影响之后新准备的邮件；已冻结在私有 R2 的旧 payload 不回填、不重写，同一幂等 key 也不因模板变化重写 payload 或重发。
+
 匹配完成后准备及时邮件；Cron 每五分钟恢复遗漏准备、持久延期、超时提交及已落盘但尚未处理的回调，再分发 outbox。`MAIL_PREPARE_LIMIT` 每轮默认20、上限50，`MAX_MAIL_ATTEMPTS` 默认6、上限10。定时器和 Queue 同时触发也共用 delivery 条件占用。每代 outbox 的投递次数也受同一上限约束；快照读取等提交前故障耗尽 Queue 重试后，不会被 Cron 无限重新入队，而是保留消息与占用、停止自动恢复，显示待人工处理。关闭发送时，保留 webhook 签名密钥仍会继续恢复已落盘回执；该流程不准备或提交新邮件。
 
 管理员 `GET /internal/mail` 查看安全状态；`POST /internal/mail/prepare` 与 `/internal/mail/recover` 复用生产准备/恢复规则。`POST /internal/mail/:id/reconcile` 仅查询已经确认的 provider ID，不发送新邮件；未知 provider ID 不能靠猜测恢复。受理表示服务商接受，delivered 表示收件服务器接受，均不等于读者已阅读。退信/投诉独立抑制邮箱，不关闭订阅或 RSS。
