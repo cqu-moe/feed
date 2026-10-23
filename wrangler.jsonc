@@ -21,7 +21,7 @@
     "CRAWL_ENABLED":"true",
     "TASK_RUNTIME_ENABLED":"true",
     "MAIL_ENABLED":"true",
-    "MAIL_FROM":"重大通知 <notifications@feed.cqu.moe>",
+    "MAIL_FROM":"CQU Feed <noreply@feed.cqu.moe>",
     "MAX_MAIL_ATTEMPTS":"6",
     "MAIL_PREPARE_LIMIT":"20",
     "DIGEST_MAX_ITEMS":"20",

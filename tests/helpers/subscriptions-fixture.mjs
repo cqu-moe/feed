@@ -273,7 +273,7 @@ export async function subscriptionsFixture({
         script: app.outputFiles[0].text,
         compatibilityDate: '2026-10-11',
         compatibilityFlags: ['nodejs_compat'],
-        bindings: { ...(mailHarness?{MAIL_ENABLED:'true',MAIL_FROM:'Feed <notifications@feed.test>',RESEND_API_KEY:'test-key',RESEND_WEBHOOK_SECRET:'whsec_dGVzdC1zaWduaW5nLWtleQ==',...mailHarness.bindings}:{}),...provider.bindings, ADMIN_TOKEN: 'test-admin-token', BASE_URL: feedOrigin, SOURCE_MANAGEMENT_ENABLED: 'true', FEED_AUTH_RPC_CLIENT_ID: 'feed-rpc-client', FEED_AUTH_RPC_CLIENT_SECRET: 'feed-rpc-secret', ...(notificationPageSize === undefined ? {} : { NOTIFICATION_MATCH_PAGE_SIZE: notificationPageSize }), ...(recheckMigration ? { ARCHIVE_VERSIONS_ENABLED: 'true', ARCHIVE_READS_ENABLED: 'true', TASK_RUNTIME_ENABLED: 'true', CRAWL_ENABLED: 'true', BRIDGE_SECRET: 'test-bridge-secret', ...recheckVars } : {}) },
+        bindings: { ...(mailHarness?{MAIL_ENABLED:'true',MAIL_FROM:'CQU Feed <noreply@feed.cqu.moe>',RESEND_API_KEY:'test-key',RESEND_WEBHOOK_SECRET:'whsec_dGVzdC1zaWduaW5nLWtleQ==',...mailHarness.bindings}:{}),...provider.bindings, ADMIN_TOKEN: 'test-admin-token', BASE_URL: feedOrigin, SOURCE_MANAGEMENT_ENABLED: 'true', FEED_AUTH_RPC_CLIENT_ID: 'feed-rpc-client', FEED_AUTH_RPC_CLIENT_SECRET: 'feed-rpc-secret', ...(notificationPageSize === undefined ? {} : { NOTIFICATION_MATCH_PAGE_SIZE: notificationPageSize }), ...(recheckMigration ? { ARCHIVE_VERSIONS_ENABLED: 'true', ARCHIVE_READS_ENABLED: 'true', TASK_RUNTIME_ENABLED: 'true', CRAWL_ENABLED: 'true', BRIDGE_SECRET: 'test-bridge-secret', ...recheckVars } : {}) },
         ...(mailHarness?{outboundService:request=>mailHarness.fetch(request)}:{}),
         d1Databases: ['DB'],
         r2Buckets: ['ARCHIVE'],

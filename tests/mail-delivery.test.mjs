@@ -127,6 +127,7 @@ test('two subscriptions and duplicate preparation submit one immutable version e
     await fixture.replayMail({duplicate:true});
     assert.equal(submissions.length,1);
     assert.equal(submissions[0].body.to,'reader@example.test');
+    assert.equal(submissions[0].body.from,'CQU Feed <noreply@feed.cqu.moe>');
     assert.match(submissions[0].body.html,/&lt;script&gt;/);
     assert.ok(!submissions[0].body.html.includes('<script>'));
     assert.match(submissions[0].body.text,new RegExp(`/articles/${eventId}\\?revision=${eventId}`));
