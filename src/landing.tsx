@@ -49,7 +49,7 @@ function Brand() {
 
 function NoticeList({ onSelect }: { onSelect: (notice: Notice) => void }) {
   const [query, setQuery] = useState('');
-  const matches = notices.filter(notice => notice.title.includes(query.trim()));
+  const matches = notices.filter(notice => `${notice.title} ${notice.topic}`.includes(query.trim()));
   return <div className="fl-inbox" data-ui="notice-list">
     <div className="fl-inbox-title"><strong>教务处通知</strong><span>内容示例</span></div>
     <label className="fl-search"><Search aria-hidden="true" /><span className="fl-visually-hidden">搜索通知示例</span>

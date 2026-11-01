@@ -44,6 +44,11 @@ test('landing demo search keeps archive and delivery previews synchronized', asy
   await page.getByRole('button', { name: '查看全部示例' }).click();
   await expect(page.getByText('4 条通知示例')).toBeVisible();
 
+  await page.getByRole('button', { name: '选课', exact: true }).click();
+  await expect(page.getByText('1 条通知示例')).toBeVisible();
+  await expect(page.getByRole('button', { name: /关于开展本科生课程补选的通知/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: new RegExp(examTitle) })).not.toBeVisible();
+
   await page.getByRole('button', { name: '考试', exact: true }).click();
   await expect(page.getByText('1 条通知示例')).toBeVisible();
   await page.getByRole('button', { name: new RegExp(examTitle) }).click();
