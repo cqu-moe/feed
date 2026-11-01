@@ -22,7 +22,7 @@ afterEach(async () => { await mark(); expect(unexpected).toEqual([]); });
 
 test('FEED04 real mail Queue, signed callbacks, policy and unknown recovery', async ({ app, browser, screen }) => {
   await app.open('/subscriptions');
-  await expect(screen.getByRole('heading', '登录重大通知存档', { exact: true })).toBeVisible();
+  await expect(screen.getByRole('heading', /^重大通知/)).toBeVisible();
   if (process.env.FEED_E2E_BREAK_ASSERTION === '1') await expect(screen.getByRole('heading', '故意错误的邮件成功断言')).toBeVisible();
   const empty = await ingestion();
   for (const table of ['articles', 'tasks', 'revisions', 'events', 'objects']) expect(empty[table]).toEqual([]);
@@ -44,12 +44,15 @@ test('FEED04 real mail Queue, signed callbacks, policy and unknown recovery', as
     await ok(`/internal/sources/${source.id}`, 'PATCH', { enabled: true });
   }
   await login(app, screen, browser, 'OWNER');
-  await screen.getByLabel('订阅名称').fill('邮件主订阅');
-  await screen.getByRole('checkbox', '邮件栏目a', { exact: true }).click();
-  await screen.getByRole('checkbox', '邮件栏目b', { exact: true }).click();
-  await screen.getByRole('combobox', '邮件模式', { exact: true }).click();
+  await screen.getByRole('button', '新建订阅').first().click();
+  const sheet = screen.getByRole('dialog', '新建订阅');
+  await expect(sheet).toBeVisible();
+  await sheet.getByLabel('订阅名称').fill('邮件主订阅');
+  await sheet.getByRole('checkbox', '邮件栏目a', { exact: true }).click();
+  await sheet.getByRole('checkbox', '邮件栏目b', { exact: true }).click();
+  await sheet.getByRole('combobox', '邮件模式', { exact: true }).click();
   await screen.getByRole('option', '及时提醒', { exact: true }).click();
-  await screen.getByRole('button', '创建订阅').click();
+  await sheet.getByRole('button', '创建订阅').click();
   await expect(screen.getByRole('article', '订阅：邮件主订阅')).toBeVisible();
   const second = await apiFetch<Row>(browser, '/api/subscriptions', { method: 'POST', body: {
     requestId: 'feed04-second-subscription', name: '重复命中订阅', sourceIds: sources, emailMode: 'immediate',

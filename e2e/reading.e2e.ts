@@ -152,13 +152,16 @@ test('FEED02 real archive search reading and PDF history', async ({ app, screen,
   await app.open('/');
   await screen.getByLabel('搜索通知').fill('FEED02 分页存档资料');
   await screen.getByRole('button', '搜索').click();
-  await expect(screen.getByText('共 22 条通知 · 第 1 / 2 页')).toBeVisible();
+  await expect(screen.getByText(/^共 22 条通知/)).toBeVisible();
+  await expect(screen.getByRole('navigation', '通知分页').getByText('第 1 / 2 页')).toBeVisible();
   await screen.getByRole('button', '下一页').click();
   await expect(browser).toHaveURL(/q=FEED02(?:%20|\+)%E5%88%86%E9%A1%B5%E5%AD%98%E6%A1%A3%E8%B5%84%E6%96%99&page=2/);
-  await expect(screen.getByText('共 22 条通知 · 第 2 / 2 页')).toBeVisible();
+  await expect(screen.getByText(/^共 22 条通知/)).toBeVisible();
+  await expect(screen.getByRole('navigation', '通知分页').getByText('第 2 / 2 页')).toBeVisible();
   await browser.back();
   await expect(browser).toHaveURL(/q=FEED02(?:%20|\+)%E5%88%86%E9%A1%B5%E5%AD%98%E6%A1%A3%E8%B5%84%E6%96%99$/);
-  await expect(screen.getByText('共 22 条通知 · 第 1 / 2 页')).toBeVisible();
+  await expect(screen.getByText(/^共 22 条通知/)).toBeVisible();
+  await expect(screen.getByRole('navigation', '通知分页').getByText('第 1 / 2 页')).toBeVisible();
   await screen.getByRole('button', '清除筛选').click();
 
   await screen.getByLabel('通知来源').click();

@@ -30,10 +30,11 @@ import { BellPlus, House, RefreshCw, UserRound } from 'lucide-react';
 import { parseSession, requestJson, type Session } from './api';
 import { AccessDeniedState, FeedBrand, LoginRequiredState, LogoutButton, safeNext } from './components';
 import { ArticleDetailPage } from './article-detail';
-import { AccessPage, AccountPage, ArticlesPage, LoginPage, SourcesPage } from './pages';
+import { AccessPage, AccountPage, LoginPage, SourcesPage } from './pages';
 import { AdminTasksPage } from './admin-tasks';
 import { AdminSourcesPage } from './admin-sources';
 import { SubscriptionsPage } from './subscriptions';
+import { ArticlesPage } from './notices';
 import {
   initFeedTelemetry,
   markFeedSessionReady,

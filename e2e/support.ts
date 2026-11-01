@@ -57,7 +57,7 @@ export async function control(action: string, input: Record<string, unknown> = {
 
 export async function login(app: AppSurface, screen: Screen, browser: Browser, role: 'OWNER' | 'OTHER') {
   await app.open('/subscriptions');
-  await screen.getByRole('link', '使用 auth.cqu.moe 登录').click();
+  await screen.getByRole('link', '登录并开始阅读').first().click();
   await expect(browser).toHaveURL(new RegExp(`^${escapeOrigin(new URL(process.env.FEED_E2E_AUTH_URL!).origin)}/login`));
   await screen.getByLabel('邮箱').fill(credentials.user(role.toLowerCase()).username);
   await browser.locator('#password').fill(credentials.user(role.toLowerCase()).password);

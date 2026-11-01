@@ -48,7 +48,7 @@ test('FEED01 real OAuth subscription lifecycle', async ({ app, screen, browser }
     await app.open(path);
     await expect(browser).toHaveURL(`/login?next=${encodeURIComponent(path)}`);
   }
-  await expect(screen.getByRole('heading', '登录重大通知存档', { exact: true })).toBeVisible();
+  await expect(screen.getByRole('heading', /^重大通知/)).toBeVisible();
   if (process.env.FEED_E2E_BREAK_ASSERTION === '1') {
     await expect(screen.getByRole('heading', '故意错误的成功断言')).toBeVisible();
   }
@@ -91,7 +91,10 @@ test('FEED01 real OAuth subscription lifecycle', async ({ app, screen, browser }
   await control('add-verified-source');
   await browser.reload();
   await expect(screen.getByRole('article', '订阅：教务处快照')).toBeVisible();
-  await expect(screen.getByText('FEED 新栏目')).toBeVisible();
+  await chooseRowAction(screen, '教务处快照', '编辑订阅');
+  const sourceSheet = screen.getByRole('dialog', '编辑订阅');
+  await expect(sourceSheet.getByRole('checkbox', /FEED 新栏目/)).toBeVisible();
+  await sourceSheet.getByRole('button', '取消', { exact: true }).click();
   let snapshot = await subscriptionByName(browser, '教务处快照');
   expect(snapshot.targetSourceIds).toEqual(['jwc']);
 
@@ -274,9 +277,9 @@ test('FEED01 real OAuth subscription lifecycle', async ({ app, screen, browser }
   const loggedOut = await apiFetch<Record<string, unknown>>(browser, '/api/subscriptions');
   expect(loggedOut.status).toBe(401);
   await app.open('/subscriptions');
-  await expect(screen.getByRole('heading', '登录重大通知存档', { exact: true })).toBeVisible();
+  await expect(screen.getByRole('heading', /^重大通知/)).toBeVisible();
   // The central Auth session is separate; the BFF session is created again by real OAuth.
-  await screen.getByRole('link', '使用 auth.cqu.moe 登录').click();
+  await screen.getByRole('link', '登录并开始阅读').first().click();
   await expect(browser).toHaveURL(/\/subscriptions$/);
   expect((await apiFetch(browser, '/api/session')).status).toBe(200);
   await control('expire-session', { userId: process.env.FEED_E2E_OTHER_ID });
@@ -296,16 +299,16 @@ test('FEED01 malformed callback and OAuth rejection fail closed', async ({ app, 
 
     await browser.goto(`${new URL(process.env.FEED_E2E_APP_URL!).origin}/auth/callback?code=synthetic-code&state=synthetic-state`);
     await expect(browser).toHaveURL(/\/login\?auth=invalid/);
-    await expect(screen.getByRole('heading', '登录重大通知存档', { exact: true })).toBeVisible();
+    await expect(screen.getByRole('heading', /^重大通知/)).toBeVisible();
 
-    await screen.getByRole('link', '使用 auth.cqu.moe 登录').click();
+    await screen.getByRole('link', '登录并开始阅读').first().click();
     await expect(browser).toHaveURL(new RegExp(`^${escapeOrigin(new URL(process.env.FEED_E2E_AUTH_URL!).origin)}/login`));
     await screen.getByLabel('邮箱').fill(credentials.user('reject').username);
     await browser.locator('#password').fill(credentials.user('reject').password);
     await screen.getByRole('button', '登录', { exact: true }).click();
     await screen.getByRole('button', '拒绝', { exact: true }).click();
     await expect(browser).toHaveURL(/\/login\?auth=invalid/);
-    await expect(screen.getByRole('heading', '登录重大通知存档', { exact: true })).toBeVisible();
+    await expect(screen.getByRole('heading', /^重大通知/)).toBeVisible();
     expect((await apiFetch(browser, '/api/subscriptions')).status).toBe(401);
   } finally {
     await control('set-consent-client', { enabled: false });
@@ -376,9 +379,12 @@ async function csrfProbe(browser: Browser, path: string, body: JsonValue) {
 }
 
 async function createSubscription(screen: Screen, name: string, target: string | RegExp) {
-  await screen.getByLabel('订阅名称').fill(name);
-  await screen.getByRole('checkbox', target).click();
-  await screen.getByRole('button', '创建订阅').click();
+  await screen.getByRole('button', '新建订阅').first().click();
+  const sheet = screen.getByRole('dialog', '新建订阅');
+  await expect(sheet).toBeVisible();
+  await sheet.getByLabel('订阅名称').fill(name);
+  await sheet.getByRole('checkbox', target).click();
+  await sheet.getByRole('button', '创建订阅').click();
   await expect(screen.getByRole('article', `订阅：${name}`)).toBeVisible();
 }
 
@@ -389,54 +395,61 @@ async function editSubscription(
   changes: { name?: string; addSource?: string; removeSource?: string; emailMode?: string; priority?: number },
 ) {
   const card = screen.getByRole('article', `订阅：${name}`);
-  await card.getByRole('button', '编辑订阅').click();
-  if (changes.name) await card.getByLabel('订阅名称').fill(changes.name);
-  if (changes.addSource) await card.getByRole('checkbox', changes.addSource).click();
-  if (changes.removeSource) await card.getByRole('checkbox', changes.removeSource).click();
+  await card.getByRole('button', `更多操作：${name}`).click();
+  await screen.getByRole('menuitem', '编辑订阅', { exact: true }).click();
+  const sheet = screen.getByRole('dialog', '编辑订阅');
+  await expect(sheet).toBeVisible();
+  if (changes.name) await sheet.getByLabel('订阅名称').fill(changes.name);
+  if (changes.addSource) await sheet.getByRole('checkbox', changes.addSource, { exact: false }).click();
+  if (changes.removeSource) await sheet.getByRole('checkbox', changes.removeSource, { exact: false }).click();
   if (changes.emailMode) {
-    await card.getByRole('combobox', '编辑邮件模式').click();
+    await sheet.getByRole('combobox', '邮件模式').click();
     await screen.getByRole('option', changes.emailMode).click();
   }
-  if (changes.priority !== undefined) await card.getByLabel(/运行优先级/).fill(String(changes.priority));
-  await card.getByRole('button', '保存修改').click();
+  if (changes.priority !== undefined) {
+    await sheet.getByText('运行设置', { exact: true }).click();
+    await sheet.getByLabel(/运行优先级/).fill(String(changes.priority));
+  }
+  await sheet.getByRole('button', '保存修改').click();
   const renamed = changes.name ?? name;
   await expect(screen.getByRole('article', `订阅：${renamed}`)).toBeVisible();
   expect(await listSubscriptions(browser)).toMatchObject({ usage: expect.any(Number) });
 }
 
 async function pauseAndResume(screen: Screen, browser: Browser, name: string) {
-  let card = screen.getByRole('article', `订阅：${name}`);
-  await card.getByRole('button', '暂停订阅').click();
+  await chooseRowAction(screen, name, '暂停订阅');
   await expect(screen.getByRole('article', `订阅：${name}`)).toContainText('已暂停');
   const paused = await subscriptionByName(browser, name);
   expect(paused.requestedEnabled).toBe(false);
   await browser.reload();
   await expect(screen.getByRole('article', `订阅：${name}`)).toContainText('已暂停');
-  card = screen.getByRole('article', `订阅：${name}`);
-  await card.getByRole('button', '启用订阅').click();
+  await chooseRowAction(screen, name, '启用订阅');
   await expect(screen.getByRole('article', `订阅：${name}`)).toContainText('运行中');
   expect((await subscriptionByName(browser, name)).requestedEnabled).toBe(true);
 }
 
 async function deleteSubscription(screen: Screen, name: string) {
-  const card = screen.getByRole('article', `订阅：${name}`);
-  await card.getByRole('button', '删除订阅').click();
-  await screen.getByRole('button', '确认操作').click();
+  await chooseRowAction(screen, name, '删除订阅');
+  await screen.getByRole('button', '确认删除').click();
+  await screen.getByRole('button', '已删除', { exact: true }).click();
   await expect(screen.getByRole('article', `订阅：${name}`)).toContainText('已删除');
 }
 
 async function restoreSubscription(screen: Screen, browser: Browser, name: string) {
+  await screen.getByRole('button', '已删除', { exact: true }).click();
   const card = screen.getByRole('article', `订阅：${name}`);
   await card.getByRole('button', '恢复订阅').click();
-  await card.getByRole('button', '确认恢复订阅').click();
+  const sheet = screen.getByRole('dialog', '恢复订阅');
+  await sheet.getByRole('button', '确认恢复订阅').click();
+  await screen.getByRole('button', '全部', { exact: true }).click();
   await expect(screen.getByRole('article', `订阅：${name}`)).toContainText('运行中');
   expect((await subscriptionByName(browser, name)).deletedAt).toBeNull();
 }
 
 async function rotateRss(screen: Screen, browser: Browser, name: string, oldUrl: string, guid: string) {
   const card = screen.getByRole('article', `订阅：${name}`);
-  await card.getByRole('button', '重置 RSS').click();
-  await screen.getByRole('button', '确认操作').click();
+  await chooseRowAction(screen, name, '重置 RSS');
+  await screen.getByRole('button', '生成新链接').click();
   await expect(card.getByText('修改已保存。')).toBeVisible();
   const next = await subscriptionByName(browser, name);
   expect(next.rssUrl).not.toBeNull();
@@ -451,15 +464,21 @@ async function rotateRss(screen: Screen, browser: Browser, name: string, oldUrl:
 async function revokeRss(screen: Screen, browser: Browser, name: string) {
   const oldUrl = (await subscriptionByName(browser, name)).rssUrl!;
   const card = screen.getByRole('article', `订阅：${name}`);
-  await card.getByRole('button', '撤销 RSS').click();
-  await screen.getByRole('button', '确认操作').click();
-  await expect(card).toContainText('RSS 已撤销。');
+  await chooseRowAction(screen, name, '撤销 RSS');
+  await screen.getByRole('button', '确认撤销').click();
+  await expect(card).toContainText('RSS 已撤销');
   const current = await subscriptionByName(browser, name);
   expect(current.rssUrl).toBeNull();
   expect(current.rssStatus).toBe('rss_revoked');
   expect((await readRss(browser, new URL(oldUrl, process.env.FEED_E2E_APP_URL).href)).status).toBe(404);
   await browser.reload();
-  await expect(screen.getByRole('article', `订阅：${name}`)).toContainText('RSS 已撤销。');
+  await expect(screen.getByRole('article', `订阅：${name}`)).toContainText('RSS 已撤销；可重置生成新链接。');
+}
+
+async function chooseRowAction(screen: Screen, name: string, action: string) {
+  const card = screen.getByRole('article', `订阅：${name}`);
+  await card.getByRole('button', `更多操作：${name}`).click();
+  await screen.getByRole('menuitem', action, { exact: true }).click();
 }
 
 async function readRss(browser: Browser, url: string, ifNoneMatch?: string) {

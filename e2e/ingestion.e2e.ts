@@ -32,7 +32,7 @@ afterEach(async () => {
 
 test('FEED03 native Queue Workflow ingestion, completeness, replay and recovery', async ({ app, browser, screen }) => {
   await app.open('/subscriptions');
-  await expect(screen.getByRole('heading', '登录重大通知存档', { exact: true })).toBeVisible();
+  await expect(screen.getByRole('heading', /^重大通知/)).toBeVisible();
   if (process.env.FEED_E2E_BREAK_ASSERTION === '1') await expect(screen.getByRole('heading', '故意错误的采集成功断言')).toBeVisible();
   const empty = await state();
   for (const table of ['articles', 'tasks', 'revisions', 'events', 'objects'] as const) expect(empty[table]).toEqual([]);
@@ -93,7 +93,7 @@ test('FEED03 native Queue Workflow ingestion, completeness, replay and recovery'
   expect(observed.events).toHaveLength(2);
   await mark('live pagination, canonical URL across columns and duplicate delivery without recollection');
 
-  await screen.getByRole('link', '使用 auth.cqu.moe 登录').click();
+  await screen.getByRole('link', '登录并开始阅读').first().click();
   await screen.getByLabel('邮箱').fill(credentials.user('owner').username);
   await browser.locator('#password').fill(credentials.user('owner').password);
   await screen.getByRole('button', '登录', { exact: true }).click();

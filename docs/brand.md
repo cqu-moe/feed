@@ -2,10 +2,15 @@
 
 Logo 使用用户确认的「通知叠页＋汇聚的信息流」，规范源为 [design PR #6](https://github.com/cqu-moe/design/pull/6) 中 `assets/brand/path-family/feed/`。
 
-- 页面：`logo-black.svg` / `logo-white.svg`，跟随根节点 `data-theme`，固定 32px。已有品牌文字，图片使用空 alt。
-- favicon：彩色 `favicon.svg`，随系统浅深主题选择莓红 / 浅莓红；`favicon.ico` 含 16、32、48px 回退。
-- 触屏书签：`icon-192.png`。素材来自 design 同步脚本，8 个文件逐项 SHA-256 一致。
-- 登录入口与 AppShell 使用同一个 FeedBrand；窄屏品牌名称与用户名允许省略，保留完整可访问文字与退出/外观操作。
+- 页面：沿用原始 Logo 几何轮廓，通过 CSS mask 跟随 `--primary` 主题色，固定 32px。已有品牌文字，标识对辅助技术隐藏。
+- favicon：`favicon.svg` 随系统主题使用石墨灰 `#222222` / 浅灰 `#dedede`；`favicon.ico` 含 16、32、48px 回退。
+- 触屏书签与邮件：`icon-192.png`、`icon-512.png` 由 `logo.svg` 使用 `rsvg-convert` 渲染；BIMI 保持白底与 tiny-ps 格式，标识同步石墨灰。
+- `logo.svg` / `logo-dark.svg` 是本项目的主题适配资产，轮廓与设计源相同；黑白版本保留供 mask 和单色使用。
+- 首页与 AppShell 使用同一轮廓及主题令牌，品牌文字统一为 CQU Feed。窄屏仍保留完整可访问名称和外观/退出操作。
+
+## 2026-11-02 主题适配
+
+使用 ui / theme 1.1.0 的无彩色调，未修改共享包或增加依赖。仅更新颜色及其光栅导出，几何路径不变。当前视觉方向见 [前端设计决策](frontend-design.md)。
 
 ## 验证 · 2026-10-13
 
