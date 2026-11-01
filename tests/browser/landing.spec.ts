@@ -7,6 +7,31 @@ async function openAnonymousLanding(page: Page, next: string) {
   await expect(page.getByRole('heading', { level: 1, name: /^重大通知/ })).toBeVisible();
 }
 
+test('saved theme applies before the app starts under a self-only script policy', async ({ page }) => {
+  await installReadingRoutes(page, { authenticated: false });
+  await page.addInitScript(() => localStorage.setItem('cqu-moe-theme', 'dark'));
+  let releaseApp!: () => void;
+  const appReleased = new Promise<void>(resolve => { releaseApp = resolve; });
+  await page.route(/\/assets\/index-[^/]+\.js$/, async route => {
+    await appReleased;
+    await route.continue();
+  });
+  await page.route(/\/login\?/, async route => {
+    const response = await route.fetch();
+    await route.fulfill({ response, headers: {
+      ...response.headers(),
+      'content-security-policy': "script-src 'self'",
+    } });
+  });
+  await page.goto('/login?next=%2F', { waitUntil: 'commit' });
+  try {
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  } finally {
+    releaseApp();
+  }
+  await expect(page.getByRole('heading', { level: 1, name: /^重大通知/ })).toBeVisible();
+});
+
 test('anonymous landing CTAs preserve a safe return target', async ({ page }) => {
   const cases = [
     { next: '/subscriptions?view=saved', authNext: '/subscriptions?view=saved' },
