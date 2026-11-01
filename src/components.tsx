@@ -87,11 +87,8 @@ export function isPdf(attachment: { name: string; url: string | null; contentTyp
 export function FeedBrand() {
   return (
     <Link className="feed-brand" to="/">
-      <span className="feed-brand-mark" aria-hidden="true">
-        <img className="feed-logo-light" src="/brand/logo-black.svg" alt="" width="32" height="32" />
-        <img className="feed-logo-dark" src="/brand/logo-white.svg" alt="" width="32" height="32" />
-      </span>
-      <span className="feed-brand-name">重大通知存档</span>
+      <span className="feed-brand-mark" aria-hidden="true" />
+      <span className="feed-brand-name">CQU Feed</span>
     </Link>
   );
 }
@@ -114,12 +111,12 @@ export function AccessDeniedState({ title = '没有访问权限' }: { title?: st
       <div className="feed-standalone-card">
         <PageHeader
           title={title}
-          description="重大通知存档需要 auth.cqu.moe 授予 feed.access 权益后才能访问。"
+          description="登录成功后，还需要开通 Feed 访问权限才能阅读通知存档。"
         />
         <PageState
           state="forbidden"
-          title="缺少 feed.access 权益"
-          description="如果你可以管理自己的权益，请前往 auth.cqu.moe 添加；添加后回到这里重新进入。"
+          title="尚未开通 Feed"
+          description="前往统一账号查看或申请 Feed 访问权限，开通后重新进入。"
           action={
             <Button asChild>
               <a href="https://auth.cqu.moe/" target="_blank" rel="noreferrer">
