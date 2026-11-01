@@ -400,8 +400,8 @@ async function editSubscription(
   const sheet = screen.getByRole('dialog', '编辑订阅');
   await expect(sheet).toBeVisible();
   if (changes.name) await sheet.getByLabel('订阅名称').fill(changes.name);
-  if (changes.addSource) await sheet.getByRole('checkbox', changes.addSource).click();
-  if (changes.removeSource) await sheet.getByRole('checkbox', changes.removeSource).click();
+  if (changes.addSource) await sheet.getByRole('checkbox', changes.addSource, { exact: false }).click();
+  if (changes.removeSource) await sheet.getByRole('checkbox', changes.removeSource, { exact: false }).click();
   if (changes.emailMode) {
     await sheet.getByRole('combobox', '邮件模式').click();
     await screen.getByRole('option', changes.emailMode).click();
