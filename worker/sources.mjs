@@ -359,7 +359,7 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
       let result;
       try{
         result=await savedDiscoveryPage(env,source,taskId,currentUrl,{
-          scrape,now,
+          scrape,now,allowExternalOnly:page>1,
           baselineCutoffAt:isBackfill?context.windowStart:(source.baselineCutoffAt??cutoffDate(timestamp())),
         });
       }catch(error){

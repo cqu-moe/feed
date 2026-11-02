@@ -141,3 +141,30 @@ test('explicit datetime preserves minute precision and timezone', async ({ page 
     }),
   ]);
 });
+
+test('dated WeChat cards are skipped only on continuation pages, while empty/error pages still fail', async ({ page }) => {
+  const bundle = await build({ entryPoints: ['worker/discovery.mjs'], bundle: true, write: false,
+    platform: 'node', format: 'esm', external: ['cloudflare:workers'] });
+  const { discoverList } = await import('data:text/javascript;base64,' + Buffer.from(bundle.outputFiles[0].text).toString('base64'));
+  const source = { url: 'https://youth.cqu.edu.cn/', articlePattern: '^/info/\\d+/\\d+\\.htm$' };
+  let html = '<ul><li><span>2026-10-20</span><a href="https://mp.weixin.qq.com/s/public-article">公众号文章</a></li></ul><a href="/index/zdqn/1.htm">下一页</a>';
+  await page.route('**/*', route => route.fulfill({ contentType: 'text/html; charset=utf-8', body: html }));
+  const scrape = async (_env: unknown, url: string, options: { actions: { script: string }[] }) => {
+    await page.goto(url);
+    return { actions: { javascriptReturns: [{ value: await page.evaluate(options.actions[0].script) }] } };
+  };
+  const url = 'https://youth.cqu.edu.cn/index/zdqn/2.htm';
+  await expect(discoverList({}, source, url, { scrape })).rejects.toThrow('No article links found in list');
+  const result = await discoverList({}, source, url, { scrape, allowExternalOnly: true });
+  expect(result.articles).toEqual([]);
+  expect(result.next).toEqual(['https://youth.cqu.edu.cn/index/zdqn/1.htm']);
+  for (const body of [
+    '<title>访问验证</title><p>请通过验证后继续访问。</p>',
+    '<ul><li><a href="https://mp.weixin.qq.com/s/public-article">2026-10-20 只有标题包含日期</a></li></ul>',
+    '<footer><li>2026-10-20<a href="https://mp.weixin.qq.com/s/public-article">关注我们</a></li></footer>',
+    '<ul><li>2026-10-20<a href="https://other.example/s/public-article">其他外链</a></li></ul>',
+  ]) {
+    html = body;
+    await expect(discoverList({}, source, url, { scrape, allowExternalOnly: true })).rejects.toThrow('No article links found in list');
+  }
+});

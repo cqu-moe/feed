@@ -25,7 +25,7 @@ async function collectEvidence(env,source,scrapeDependency){
   if(!first.articles.length)throw validationError('Sample verification found no article links');
   const paginationUrls=[];
   for(const url of first.next.slice(0,1)){
-    await discoverList(env,source,url,{scrape:scrapeDependency,baselineCutoffAt:first.baselineCutoff});
+    await discoverList(env,source,url,{scrape:scrapeDependency,baselineCutoffAt:first.baselineCutoff,allowExternalOnly:true});
     paginationUrls.push(url);
   }
   if(!Array.isArray(first.next))throw validationError('Sample verification could not inspect pagination');

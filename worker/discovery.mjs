@@ -22,11 +22,23 @@ function listPage(input) {
     return url;
   };
   const articles=[],next=[],pattern=new RegExp(input.articlePattern);
+  let externalArticleCount=0;
   for(const anchor of document.querySelectorAll('a[href]')){
-    const url=articleUrl(anchor);if(!url)continue;
     if(anchor.closest('nav,.nav,.pup-nav,.subpage-nav,header,footer'))continue;
     const heading=anchor.querySelector('.title,[class*=title],h1,h2,h3,h4,.det .p1');
     const title=(anchor.getAttribute('title')||heading?.innerText||anchor.innerText||'').replace(/^[●•·\s]+/,'').trim();
+    const url=articleUrl(anchor);
+    if(!url){
+      // Youth mixes local articles and dated WeChat cards. Recognize the latter
+      // only to distinguish a valid continuation from an empty/error page.
+      let external;try{external=new URL(anchor.getAttribute('href'),location.href);}catch{continue;}
+      const card=anchor.closest('li');
+      if(title&&card&&external.origin==='https://mp.weixin.qq.com'&&/^\/s(?:\/|$)/.test(external.pathname)){
+        const copy=card.cloneNode(true);copy.querySelectorAll('a').forEach(link=>link.remove());
+        if(date(copy.textContent))externalArticleCount++;
+      }
+      continue;
+    }
     if(pattern.test(url.pathname)){
       let publishedAt=null,fallback=null;
       // Stop at the article boundary so an undated card cannot borrow its neighbour's date.
@@ -59,10 +71,10 @@ function listPage(input) {
       next.push(url.href);
     }
   }
-  return {articles,next:[...new Set(next)],title:document.title};
+  return {articles,next:[...new Set(next)],title:document.title,externalArticleCount};
 }
 
-export async function discoverList(env,source,url,{scrape:scrapeDependency=scrape,baselineCutoffAt,now=()=>Date.now()}={}){
+export async function discoverList(env,source,url,{scrape:scrapeDependency=scrape,baselineCutoffAt,allowExternalOnly=false,now=()=>Date.now()}={}){
   const target=canonicalUrl(url),origin=new URL(source.url).origin;
   if(target.origin!==origin)throw new Error('Unexpected list origin');
   const pattern=source.config?.articlePattern??source.articlePattern;
@@ -84,7 +96,7 @@ export async function discoverList(env,source,url,{scrape:scrapeDependency=scrap
       ...published,
     });
   }
-  if(!articles.length)throw new Error('No article links found in list');
+  if(!articles.length&&!(allowExternalOnly&&page.externalArticleCount>0))throw new Error('No article links found in list');
   return {
     articles,added:articles.length,dated:articles.filter(row=>row.precision!=='unknown').length,
     undated:articles.length-articles.filter(row=>row.precision!=='unknown').length,
