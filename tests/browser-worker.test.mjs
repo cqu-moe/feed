@@ -133,24 +133,39 @@ test('capture adapter and browser worker complete one accepted scrape over the s
   const {worker,FeedBrowser}=await loadWorker();
   const instance=new FeedBrowser();
   const browserService={getByName:()=>instance};
-  const binding={fetch:(input,init)=>worker.fetch(new Request(input,init),{BROWSER:browserService})};
+  const bindingCalls=[];
+  const binding={fetch:async(input,init)=>{
+    const request=new Request(input,init);
+    const response=await worker.fetch(request,{BROWSER:browserService});
+    bindingCalls.push({method:request.method,path:new URL(request.url).pathname,body:init.body});
+    return response;
+  }};
   const response=await scrape({BROWSER:binding},job.url,{
     source:{id:'jwc',siteId:'7fd03676e5751e9b6dd95ecb',name:'教务处'},
     formats:['rawHtml'],
     actions:job.actions,
   });
   assert.equal(response.metadata.statusCode,200);
-  const requests=instance.proxyEvents.filter(event=>event.request);
-  assert.equal(requests.length,2,'scrape and explicit completion should each reach the container proxy');
-  const scrapeRequest=JSON.parse(requests[0].body);
+  assert.equal(bindingCalls.length,2);
+  assert.equal(bindingCalls[0].method,'POST');
+  assert.equal(bindingCalls[0].path,'/scrape');
+  assert.equal(bindingCalls[1].method,'POST');
+  assert.equal(bindingCalls[1].path,'/scrape-complete');
+  assert.deepEqual(JSON.parse(bindingCalls[1].body),{jobId:JSON.parse(bindingCalls[0].body).jobId});
+  const containerRequests=instance.proxyEvents.filter(event=>event.request);
+  assert.equal(containerRequests.length,1,'completion must remain control-plane only');
+  const scrapeRequest=JSON.parse(containerRequests[0].body);
   assert.deepEqual(scrapeRequest,{
     url:job.url,siteId:job.siteId,jobId:scrapeRequest.jobId,formats:['rawHtml'],actions:job.actions,
   });
   assert.match(scrapeRequest.jobId,/^[0-9a-f-]{36}$/i);
-  assert.equal(requests[1].request.method,'POST');
-  assert.equal(new URL(requests[1].request.url).pathname,'/scrape-complete');
-  assert.deepEqual(JSON.parse(requests[1].body),{jobId:scrapeRequest.jobId});
+  const stale=await worker.fetch(new Request('https://browser.internal/scrape-complete',{
+    method:'POST',headers:{'content-type':'application/json','x-feed-browser-site-id':job.siteId},
+    body:JSON.stringify({jobId:scrapeRequest.jobId}),
+  }),{BROWSER:browserService});
+  assert.deepEqual(await stale.json(),{stopped:false});
   assert.equal(instance.proxyEvents.filter(event=>event.stoppedAt).length,1);
+  assert.equal(instance.proxyEvents.filter(event=>event.request).length,1);
 });
 
 test('a cold-start failure does not strand a later accepted job completion',async()=>{

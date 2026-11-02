@@ -27,12 +27,6 @@ export class FeedBrowser extends Container{
       let completion;
       try{completion=await request.json();}
       catch{return new Response('Invalid completion',{status:400});}
-      await super.fetch(new Request(request.url,{
-        method:'POST',
-        headers:Object.fromEntries(request.headers),
-        body:JSON.stringify(completion),
-        signal:request.signal,
-      }));
       const stopped=await this.completeScrape(completion);
       return Response.json({stopped});
     }
