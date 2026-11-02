@@ -12,6 +12,7 @@
   "assets": {"directory":"./dist", "binding":"ASSETS", "not_found_handling":"single-page-application", "run_worker_first":true},
   "vars": {
     "BASE_URL":"https://feed.cqu.moe",
+    "BRIDGE_BASE_URL":"https://cqu-feed.user-unauthorized.workers.dev",
     "AUTH_BASE_URL":"https://auth.cqu.moe",
     "POSTHOG_HOST":"https://p.cqu.moe",
     "ENVIRONMENT":"production",

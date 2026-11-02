@@ -36,7 +36,7 @@ async function collectArticle(env,source,article,dependencies,captureContext){
     AND (? IS NULL OR EXISTS(SELECT 1 FROM tasks WHERE id=? AND attempt_no=? AND state='running'))`;
   const runId=crypto.randomUUID(),prefix=`articles/${article.id}/${runId}`;
   const grant=await issueGrant(env,source,runId,article.id);
-  const bridgeURL=new URL('/internal/bridge',env.BASE_URL);bridgeURL.searchParams.set('grant',grant.token);
+  const bridgeURL=new URL('/internal/bridge',env.BRIDGE_BASE_URL??env.BASE_URL);bridgeURL.searchParams.set('grant',grant.token);
   const input={id:article.id,url:article.url,title:article.title.replace(/^[●•·\s]+|[…]+$/g,'').slice(0,18),bridgeURL:bridgeURL.href,bridgeOrigin:bridgeURL.origin,channel:grant.channel,bundle,options:{...options,selfExtractingArchive:false,maxResourceSize:3,maxResourceSizeEnabled:true,networkTimeout:8000,insertMetaCSP:false}};
   const data=await scrapeDependency(env,article.url,{formats:['markdown','rawHtml',{type:'screenshot',fullPage:true}],onlyMainContent:true,actions:[{type:'executeJavascript',script:`var __name=value=>value; (${captchaPage.toString()})(${JSON.stringify(input)})`}]});
   let page=data.actions?.javascriptReturns?.[0]?.value;if(typeof page==='string')page=JSON.parse(page);

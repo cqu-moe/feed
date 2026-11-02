@@ -24,6 +24,7 @@
 | 变量 | 当前值 | 作用 |
 | --- | --- | --- |
 | `BASE_URL` | `https://feed.cqu.moe` | OAuth 回调、桥接 URL 和安全 Origin 判断 |
+| `BRIDGE_BASE_URL` | `https://cqu-feed.user-unauthorized.workers.dev` | 机器采集的验证码/附件辅助窗口；缺省时沿用 `BASE_URL`，使用现有 Worker 入口避免业务域名的浏览器挑战阻断弹窗 |
 | `AUTH_BASE_URL` | `https://auth.cqu.moe` | OAuth/JWKS/userinfo/introspection 基础地址 |
 | `MAX_FIRECRAWL_PER_DAY` | `0` | 不设应用调用上限；每次尝试仍按 UTC 日记账 |
 | `MAX_OCR_PER_DAY` | `0` | 不设验证码调用上限；Workers AI 按实际神经元计量 |
