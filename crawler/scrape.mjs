@@ -20,7 +20,7 @@ export async function scrapePage(job,signal){
   const start=Date.now(),browser=await openBrowser({signal});
   try{
     await browser.navigate(job.url);
-    const readyDeadline=Date.now()+45000;
+    const readyDeadline=Date.now()+120000;
     let state,ready=false;
     const readiness=JSON.stringify(job.readiness??{});
     while(Date.now()<readyDeadline){
