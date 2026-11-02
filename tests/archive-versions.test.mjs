@@ -476,11 +476,12 @@ before(async () => {
     '0009_subscriptions.sql',
     '0010_subscription_editing.sql',
     '0013_notification_matching.sql',
+    '0019_site_execution_leases.sql',
   ]) {
     await applyMigration(db, await readFile(`migrations/${name}`, 'utf8'));
   }
 
-  await db.prepare("INSERT OR IGNORE INTO sources(id,name,url) VALUES ('jwc','教务处','https://jwc.cqu.edu.cn/')").run();
+  await db.prepare("INSERT OR IGNORE INTO sources(id,site_id,name,url,list_url) VALUES ('jwc','7fd03676e5751e9b6dd95ecb','教务处','https://jwc.cqu.edu.cn/','https://jwc.cqu.edu.cn/index/tzgg.htm')").run();
   await db.prepare(`INSERT INTO articles(id,source_id,url,title,published_at,discovered_at,status,attempts,lease_until)
     VALUES (?,'jwc',?,'不可变版本通知','2026-01-03','2026-01-01','pending',0,0),
       (?,'jwc',?,'提交失败重试通知','2026-01-04','2026-01-01','pending',0,0),

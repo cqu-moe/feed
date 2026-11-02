@@ -125,6 +125,8 @@ https://<feed-origin>/auth/callback
 - `0009_subscriptions.sql`：个人订阅配置、目标区间和 RSS 凭证。
 - `0010_subscription_editing.sql`：订阅版本、删除时的栏目快照、编辑命令回执、所有者偏好版本和恢复额度原子计数。
 - `0018_outbox_receipts.sql`：记录三条业务 outbox 的消费者处理、失败和人工重放回执。
+- `0019_site_execution_leases.sql`：每站一条执行租约，防止同站不同栏目同时唤醒浏览器。
+- `0020_daily_source_schedule.sql`：现有栏目统一每日，以稳定站点顺序错开首次窗口；不改变启停、配置/校验版本或旧任务终态。
 
 远程迁移：
 

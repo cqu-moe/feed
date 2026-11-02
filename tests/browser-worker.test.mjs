@@ -1,9 +1,10 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {build} from 'esbuild';
-import {scrape} from '../worker/browser-scrape.mjs';
+const adapter=await build({entryPoints:['worker/browser-scrape.mjs'],bundle:true,write:false,format:'esm',platform:'node'});
+const {scrape}=await import(`data:text/javascript;base64,${Buffer.from(adapter.outputFiles[0].text).toString('base64')}`);
 
-const job={url:'https://jwc.cqu.edu.cn/info/1080/6203.htm',siteId:'site-7fd03676e5751e9b6dd95ecb',jobId:'11111111-2222-3333-4444-555555555555',
+const job={url:'https://jwc.cqu.edu.cn/info/1080/6203.htm',siteId:'site-7fd03676e5751e9b6dd95ecb',jobId:'11111111-2222-3333-4444-555555555555',generation:1,
   formats:['rawHtml'],actions:[{type:'executeJavascript',script:'1'}]};
 const successBody=JSON.stringify({success:true,data:{metadata:{statusCode:200}}});
 
@@ -44,6 +45,9 @@ async function loadWorker(){
                 return new Response(stream,{status:200,headers:{'content-type':'application/json'}});
               }
               async stop(){this.proxyEvents.push({stoppedAt:Date.now()});}
+              async onStop(){}
+              renewActivityTimeout(){this.renewed=true;}
+              async onActivityExpired(){await this.stop();}
             }
           `,
         }));
@@ -56,8 +60,8 @@ async function loadWorker(){
 const requestFor=(body=job)=>new Request('https://browser.internal/scrape',{
   method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body),
 });
-const completionFor=jobId=>new Request('https://browser.internal/scrape-complete',{
-  method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jobId}),
+const completionFor=(jobId,generation=1)=>new Request('https://browser.internal/scrape-complete',{
+  method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jobId,generation}),
 });
 
 test('capture adapter uses the existing Worker namespace and stops only after receiving the complete result',async()=>{
@@ -82,8 +86,7 @@ test('capture adapter uses the existing Worker namespace and stops only after re
   const sent=JSON.parse(bindingCalls[0].body);
   assert.match(sent.jobId,/^[0-9a-f-]{36}$/i);
   assert.deepEqual(sent,{url:job.url,siteId:job.siteId,jobId:sent.jobId,formats:['rawHtml'],actions:job.actions});
-  assert.deepEqual(JSON.parse(bindingCalls[1].body),{jobId:sent.jobId});
-  assert.equal(instance.proxyEvents.filter(event=>event.request).length,1,'completion must remain control-plane only');
+  assert.deepEqual(JSON.parse(bindingCalls[1].body),{jobId:sent.jobId,stop:true});
   assert.deepEqual(await (await instance.fetch(completionFor(sent.jobId))).json(),{stopped:false});
   assert.equal(instance.proxyEvents.filter(event=>event.stoppedAt).length,1);
 });
@@ -95,7 +98,7 @@ test('busy or stale requests cannot stop another accepted response stream',async
   instance.busy=true;
   const secondId='aaaaaaaa-1111-4222-8333-444444444444';
   const busy=await instance.fetch(requestFor({...job,jobId:secondId}));
-  assert.equal(busy.status,429);
+  assert.equal(busy.status,503);
   assert.deepEqual(await (await instance.fetch(completionFor(secondId))).json(),{stopped:false});
   assert.equal(instance.proxyEvents.some(event=>event.stoppedAt),false);
   assert.deepEqual(JSON.parse(await response.text()),JSON.parse(successBody));
@@ -141,4 +144,22 @@ test('container transport distinguishes capacity from executed source failures a
       return true;
     });
   }
+});
+
+test('a cold start is busy and a new request waits for stop acknowledgement',async()=>{
+  const {FeedBrowser}=await loadWorker(),instance=new FeedBrowser();
+  const pending=instance.fetch(requestFor());
+  await new Promise(resolve=>setTimeout(resolve,5));
+  // A previous container's delayed exit callback can arrive during this start.
+  await instance.onStop({exitCode:0,reason:'exit'});
+  await instance.onActivityExpired();
+  assert.equal(instance.proxyEvents.some(event=>event.stoppedAt),false);
+  const response=await pending;await response.text();
+  await instance.fetch(completionFor(job.jobId));
+  const next={...job,jobId:'bbbbbbbb-1111-4222-8333-444444444444',generation:2};
+  assert.equal((await instance.fetch(requestFor(next))).status,503);
+  await instance.onStop({exitCode:0,reason:'stopped'});
+  const resumed=await instance.fetch(requestFor(next));assert.equal(resumed.status,200);await resumed.text();
+  assert.deepEqual(await(await instance.fetch(completionFor(job.jobId))).json(),{stopped:false});
+  assert.deepEqual(await(await instance.fetch(completionFor(next.jobId,2))).json(),{stopped:true});
 });

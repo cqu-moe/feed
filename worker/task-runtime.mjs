@@ -6,6 +6,7 @@ import {reconcileRevision} from './archive-reconcile.mjs';
 import {launchDedupeKey,launchOutboxId,launchOutboxStatement} from './task-statements.mjs';
 import {createNotifications} from './notifications.mjs';
 import {captureFailure} from './capture-error.mjs';
+import {browserTaskKind,claimSiteExecution,delayBusyLaunch} from './site-scheduler.mjs';
 
 const activeStates=['queued','starting','running'];
 const platformStates=new Set(['queued','running','paused','waiting','waitingForPause','rollingBack']);
@@ -69,7 +70,7 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
           await target.send(message,{contentType:'json'});
           // Sending first intentionally permits duplicates after a crash. The consumer owns idempotency.
           await env.DB.prepare(`UPDATE outbox SET state='sent',attempts=attempts+1,last_error=NULL,updated_at=?
-            WHERE id=? AND state='queued'`).bind(timestamp,row.id).run();
+            WHERE id=? AND state='queued' AND available_at<=?`).bind(timestamp,row.id,timestamp).run();
           dispatched.push(row.id);
         }catch(error){
           await env.DB.prepare(`UPDATE outbox SET attempts=attempts+1,last_error=?,available_at=?,updated_at=?
@@ -93,6 +94,14 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
       if(!['capture','recheck','discover','backfill','ocr'].includes(task.kind))throw new SchemaError('Unsupported workflow kind');
       const instanceId=workflowInstanceId(task.id,message.attempt),timestamp=now();
       const workflowBinding=selectWorkflow(env,{workflow,workflows},task.kind);
+      let siteClaim=null;
+      if(browserTaskKind(task.kind)){
+        siteClaim=await claimSiteExecution(env,{...task,attempt_no:message.attempt},timestamp);
+        if(!siteClaim.admitted){
+          await delayBusyLaunch(env,task.id,message.attempt,timestamp);
+          return {state:task.state,acked:'site-busy'};
+        }
+      }
       await env.DB.batch([
         env.DB.prepare(`UPDATE tasks SET state='starting',updated_at=? WHERE id=? AND state='queued' AND attempt_no=?`)
           .bind(timestamp,task.id,message.attempt),
@@ -102,6 +111,7 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
       ]);
       task=await env.DB.prepare('SELECT * FROM tasks WHERE id=?').bind(task.id).first();
       if(task.attempt_no!==message.attempt||!activeStates.includes(task.state))return {state:task.state,acked:'superseded'};
+      if(siteClaim && (!siteClaim.siteId || siteClaim.generation===undefined))throw new Error('Site execution claim is missing');
       const attempt=await env.DB.prepare('SELECT * FROM task_attempts WHERE task_id=? AND attempt_no=?')
         .bind(task.id,message.attempt).first();
       if(attempt?.workflow_instance_id!==instanceId)throw new Error('Workflow attempt ledger is missing');
@@ -255,7 +265,7 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
           &&!await admitDiscovery(env,message.taskId,message.attempt,timestamp))return false;
         await target.send(message,{contentType:'json'});
         await env.DB.prepare(`UPDATE outbox SET state='sent',attempts=attempts+1,last_error=NULL,updated_at=?
-          WHERE id=? AND state='queued'`).bind(timestamp,row.id).run();
+          WHERE id=? AND state='queued' AND available_at<=?`).bind(timestamp,row.id,timestamp).run();
         return true;
       }catch(error){
         await env.DB.prepare(`UPDATE outbox SET attempts=attempts+1,last_error=?,available_at=?,updated_at=?
@@ -440,6 +450,12 @@ async function finishTask(env,kind,taskId,attemptNo,result,now=()=>Date.now()){
       AND EXISTS(SELECT 1 FROM tasks WHERE id=? AND attempt_no=? AND state=?)`)
       .bind(state,JSON.stringify(result),timestamp,errorCode,taskId,attemptNo,taskId,attemptNo,state),
     ...(kind==='backfill'?[backfillFailureStatement(env,taskId,attemptNo,timestamp)]:[]),
+    ...(browserTaskKind(kind)?[
+      env.DB.prepare(`UPDATE site_execution_leases
+        SET owner_task_id=NULL,owner_attempt_no=NULL,acquired_at=NULL,lease_until=0,generation=generation+1
+        WHERE owner_task_id=? AND owner_attempt_no=?`)
+        .bind(taskId,attemptNo)
+    ]:[]),
     ...(kind==='discover'&&result.error?[env.DB.prepare(`UPDATE sources SET error=?,updated_at=?
       WHERE EXISTS(SELECT 1 FROM tasks t WHERE t.id=? AND t.attempt_no=? AND t.state=?
         AND t.source_id=sources.id AND json_extract(t.payload_json,'$.source.configVersion')=sources.config_version

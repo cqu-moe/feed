@@ -74,13 +74,14 @@ function listPage(input) {
   return {articles,next:[...new Set(next)],title:document.title,externalArticleCount};
 }
 
-export async function discoverList(env,source,url,{scrape:scrapeDependency=scrape,baselineCutoffAt,allowExternalOnly=false,now=()=>Date.now()}={}){
+export async function discoverList(env,source,url,{scrape:scrapeDependency=scrape,baselineCutoffAt,allowExternalOnly=false,now=()=>Date.now(),siteAdmission,executionHandoff}={}){
   const target=canonicalUrl(url),origin=new URL(source.url).origin;
   if(target.origin!==origin)throw new Error('Unexpected list origin');
   const pattern=source.config?.articlePattern??source.articlePattern;
   const actionSource={articlePattern:pattern};
   const data=await scrapeDependency(env,target.href,{
     source,formats:['links'],readiness:{articlePattern:pattern,allowExternalOnly},
+    ...(siteAdmission?{siteAdmission}:{}),...(executionHandoff===false?{executionHandoff:false}:{}),
     actions:[{type:'executeJavascript',script:`var __name=value=>value; (${listPage.toString()})(${JSON.stringify(actionSource)})`}],
   });
   let page=data.actions?.javascriptReturns?.[0]?.value;

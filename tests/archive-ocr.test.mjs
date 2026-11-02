@@ -186,11 +186,11 @@ test('mixed PDF OCR is cached, adopted per revision, and reconciles out of order
   }));
   try{
     const db=await mf.getD1Database('DB');
-    for(const name of ['0001_feed.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql','0007_archive_versions.sql','0008_content_events.sql','0018_outbox_receipts.sql']){
+    for(const name of ['0001_feed.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql','0007_archive_versions.sql','0008_content_events.sql','0018_outbox_receipts.sql','0019_site_execution_leases.sql']){
       await applyMigration(db,await readFile(`migrations/${name}`,'utf8'));
     }
     const now=Date.now();
-    await db.prepare("INSERT INTO sources(id,name,url) VALUES ('jwc','教务处','https://jwc.cqu.edu.cn/')").run();
+    await db.prepare("INSERT INTO sources(id,site_id,name,url,list_url) VALUES ('jwc','7fd03676e5751e9b6dd95ecb','教务处','https://jwc.cqu.edu.cn/','https://jwc.cqu.edu.cn/index/tzgg.htm')").run();
     await db.prepare(`INSERT INTO articles(id,source_id,url,title,published_at,discovered_at,status,attempts,lease_until)
       VALUES (?,'jwc',?,'混合正文通知','2026-01-03','2026-01-01','pending',0,0)`).bind(articleId,articleUrl).run();
     for(const [id,key] of [[taskId,'first'],[secondTaskId,'second'],[thirdTaskId,'third'],[fourthTaskId,'fourth'],[fifthTaskId,'fifth']]){

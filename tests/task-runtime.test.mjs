@@ -63,6 +63,7 @@ const browserPlugin={
           }
           if(mode==='quota')throw new Error('Archive upload quota exhausted');
           if(mode==='network')throw Object.assign(new Error('Browser connection closed'),{code:'browser_transient',retryable:true});
+          if(mode==='capacity')throw Object.assign(new Error('Browser HTTP 503: There is no Container instance available'),{code:'container_capacity',retryable:true});
           if(mode==='hang'){
             while(globalThis.TASK_RUNTIME_SCRAPE_MODE==='hang')await new Promise(resolve=>setTimeout(resolve,10));
             return success();
@@ -90,6 +91,11 @@ async function fixture({
         import {createTaskRuntime,handleFeedJobs} from './worker/task-runtime.mjs';
         import {CaptureWorkflow} from './worker/capture-workflow.mjs';
         import {workflowStep as step} from './tests/helpers/workflow-step.mjs';
+        globalThis.TASK_RUNTIME_WORKFLOW_SLEEPS=step.sleeps;
+        step.sleep=async(name,duration)=>{
+          step.sleeps.push({name,duration});
+          while(globalThis.TASK_RUNTIME_SCRAPE_MODE==='capacity')await new Promise(resolve=>setTimeout(resolve,10));
+        };
 
         globalThis.TASK_RUNTIME_QUEUE_BODIES=[];
         globalThis.TASK_RUNTIME_WORKFLOW_CALLS=[];
@@ -246,6 +252,7 @@ async function fixture({
             if(url.pathname==='/fixture/workflows')return Response.json({
               calls:globalThis.TASK_RUNTIME_WORKFLOW_CALLS,
               instances:[...instances.entries()].map(([id,value])=>({id,status:value.status})),
+            sleeps:globalThis.TASK_RUNTIME_WORKFLOW_SLEEPS,
             });
             if(url.pathname.startsWith('/api/'))return apiRoute(request,env);
             return worker.fetch(request,env);
@@ -290,7 +297,7 @@ async function fixture({
   const db=await mf.getD1Database('DB'),bucket=await mf.getR2Bucket('ARCHIVE');
   for(const name of ['0001_feed.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql',
     ...(recheckRuntime?['0007_archive_versions.sql','0008_content_events.sql','0017_archive_recheck.sql']:[]),
-    '0018_outbox_receipts.sql']){
+    '0018_outbox_receipts.sql','0019_site_execution_leases.sql']){
     await applyMigration(db,await readFile(`migrations/${name}`,'utf8'));
   }
   await db.prepare("UPDATE sources SET site_id='7fd03676e5751e9b6dd95ecb',list_url='https://jwc.cqu.edu.cn/index/tzgg.htm' WHERE id='jwc'").run();
@@ -904,6 +911,64 @@ async function workflowStatus(mf,id){
   return workflows.instances.find(instance=>instance.id===id)?.status??null;
 }
 
+test('same-site launch admission preserves task identity and attempts without a container call',async()=>{
+  const {mf,db}=await fixture();
+  try{
+    await mf.dispatchFetch('https://feed.test/fixture/scrape-mode',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'hang'}),
+    });
+    const first=await createCaptureTask(mf,'same-site-busy-first');
+    await waitFor(async()=>assert.equal((await task(db,first)).state,'running'));
+    const second=await createCaptureTask(mf,'same-site-busy-second');
+    const rows=await db.prepare('SELECT id,state,attempt_no AS attemptNo FROM tasks ORDER BY created_at').all();
+    assert.deepEqual(rows.results.map(row=>[row.id,row.state,row.attemptNo]).at(-1),[second,'queued',1]);
+    const lease=await db.prepare('SELECT owner_task_id FROM site_execution_leases').first();
+    assert.equal(lease.owner_task_id,first);
+    await mf.dispatchFetch('https://feed.test/fixture/scrape-mode',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'success',release:true}),
+    });
+    await waitFor(async()=>assert.equal((await task(db,first)).state,'succeeded'));
+    await waitFor(async()=>assert.equal((await task(db,second)).state,'succeeded'));
+    assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM task_attempts WHERE task_id=?').bind(second).first()).n,1);
+    assert.equal((await db.prepare('SELECT attempts FROM articles WHERE id=?').bind(articleId).first()).attempts,2);
+  }finally{await mf.dispose();}
+});
+
+test('platform capacity keeps the exact task attempt alive and does not charge it twice',async()=>{
+  const {mf,db}=await fixture();
+  try{
+    await mf.dispatchFetch('https://feed.test/fixture/scrape-mode',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'capacity'}),
+    });
+    const created=await createCaptureTask(mf,'platform-capacity-wait');
+    await waitFor(async()=>{
+      const lease=await db.prepare('SELECT owner_task_id,lease_until FROM site_execution_leases').first();
+      assert.ok(lease);assert.equal(lease.owner_task_id,null);assert.equal(lease.lease_until,0);
+    });
+    assert.equal((await task(db,created)).attemptNo,1);
+    assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM task_attempts WHERE task_id=?').bind(created).first()).n,1);
+    assert.equal((await db.prepare('SELECT attempts FROM articles WHERE id=?').bind(articleId).first()).attempts,0);
+    const workflows=await(await mf.dispatchFetch('https://feed.test/fixture/workflows')).json();
+    assert.deepEqual(workflows.sleeps,[{name:'capture-capacity-wait-0',duration:30000}]);
+    assert.equal(workflows.instances.find(instance=>instance.id===`task-${created}-a1`)?.status,'running');
+    const scrapes=await(await mf.dispatchFetch('https://feed.test/fixture/scrapes')).json();
+    assert.equal(scrapes.calls.length,1);
+    await mf.dispatchFetch('https://feed.test/fixture/scrape-mode',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'success'}),
+    });
+  }finally{await mf.dispose();}
+});
+
+async function createCaptureTask(mf,requestId){
+  const response=await mf.dispatchFetch('https://feed.test/internal/capture-tasks',{
+    method:'POST',headers:{Authorization:'Bearer test-admin-token','Content-Type':'application/json'},
+    body:JSON.stringify({articleId,requestId}),
+  });
+  const body=await response.json();
+  assert.equal(response.status,202,JSON.stringify(body));
+  return body.task.id;
+}
+
 async function waitFor(check){
   let lastError;
   for(let i=0;i<80;i++){
@@ -919,7 +984,7 @@ async function waitFor(check){
 }
 
 async function applyMigration(db,sql){
-  const statements=sql.split(/;\s*\n(?=CREATE|ALTER|PRAGMA|$)/)
+  const statements=sql.split(/;\s*\n(?=CREATE|ALTER|WITH|PRAGMA|$)/)
     .map(statement=>statement.trim())
     .filter(statement=>statement&&!/^PRAGMA\b/i.test(statement));
   for(const statement of statements)await db.prepare(statement).run();

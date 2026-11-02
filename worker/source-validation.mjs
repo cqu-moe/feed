@@ -8,11 +8,11 @@ import {canonicalUrl} from './sources.mjs';
 import {articleId,fileKind,sha,cleanError} from './utils.mjs';
 import {Buffer} from 'node:buffer';
 
-export async function verifySource(env,sources,sourceId,{source,taskId,attemptNo,scrape:scrapeDependency=scrape}){
+export async function verifySource(env,sources,sourceId,{source,taskId,attemptNo,scrape:scrapeDependency=scrape,siteAdmission}){
   const current=await sources.find(sourceId);
   if(!current||current.configVersion!==source.configVersion||current.validationTaskId!==taskId||current.enabled)return {superseded:true};
   try{
-    const evidence=await collectEvidence(env,source,scrapeDependency);
+    const evidence=await collectEvidence(env,source,scrapeDependency,siteAdmission);
     return sources.recordValidation(source.id,source.configVersion,evidence,{taskId,attemptNo});
   }catch(error){
     await sources.recordValidationFailure(source.id,source.configVersion,error,{taskId,attemptNo});
@@ -20,12 +20,13 @@ export async function verifySource(env,sources,sourceId,{source,taskId,attemptNo
   }
 }
 
-async function collectEvidence(env,source,scrapeDependency){
-  const first=await discoverList(env,source,source.listUrl,{scrape:scrapeDependency,baselineCutoffAt:source.baselineCutoffAt??today()});
+async function collectEvidence(env,source,scrapeDependency,siteAdmission){
+  const scrapeOptions=siteAdmission?{siteAdmission,executionHandoff:false}:{};
+  const first=await discoverList(env,source,source.listUrl,{...scrapeOptions,scrape:scrapeDependency,baselineCutoffAt:source.baselineCutoffAt??today()});
   if(!first.articles.length)throw validationError('Sample verification found no article links');
   const paginationUrls=[];
   for(const url of first.next.slice(0,1)){
-    await discoverList(env,source,url,{scrape:scrapeDependency,baselineCutoffAt:first.baselineCutoff,allowExternalOnly:true});
+    await discoverList(env,source,url,{...scrapeOptions,scrape:scrapeDependency,baselineCutoffAt:first.baselineCutoff,allowExternalOnly:true});
     paginationUrls.push(url);
   }
   if(!Array.isArray(first.next))throw validationError('Sample verification could not inspect pagination');
@@ -45,6 +46,7 @@ async function collectEvidence(env,source,scrapeDependency){
   };
   const data=await scrapeDependency(env,sample.href,{
     source,formats:['markdown','rawHtml',{type:'screenshot',fullPage:true}],onlyMainContent:true,
+    ...(siteAdmission?{siteAdmission}:{}),
     actions:[{type:'executeJavascript',script:`var __name=value=>value; (${captchaPage.toString()})(${JSON.stringify(input)})`}],
   });
   let report=data.actions?.javascriptReturns?.[0]?.value;

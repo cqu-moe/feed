@@ -16,7 +16,7 @@ export function createArchive(env,{
   lifecycle,
 }={}){
   return {
-    async captureTask(taskId,attemptNo){
+    async captureTask(taskId,attemptNo,{siteAdmission}={}){
       if(!/^[a-f0-9]{24}$/.test(taskId??''))throw new Error('Invalid capture task id');
       const task=await env.DB.prepare(`SELECT t.payload_json,t.source_id AS task_source_id,a.id,a.source_id,a.title,a.url,a.published_at,ta.result_json
         FROM tasks t JOIN articles a ON a.id=t.article_id
@@ -29,9 +29,9 @@ export function createArchive(env,{
       if(!source||source.id!==(task.task_source_id??task.source_id)||new URL(source.url).origin!==new URL(task.url).origin
         ||!new RegExp(source.articlePattern).test(new URL(task.url).pathname))throw new Error('Capture source context is invalid');
       const captureIntent=taskPayload.captureIntent??(taskPayload.recheck?'recheck':'live');
-      return this.capture(source,task,{taskId,attemptNo,captureIntent});
+      return this.capture(source,task,{taskId,attemptNo,captureIntent,siteAdmission});
     },
-    async capture(source,article,{taskId=null,attemptNo=null,captureIntent='live'}={}){
+    async capture(source,article,{taskId=null,attemptNo=null,captureIntent='live',siteAdmission}={}){
       const timestamp=Date.now();
       const versioned=taskId&&env.ARCHIVE_VERSIONS_ENABLED==='true';
       const lease=await env.DB.prepare(`UPDATE articles
@@ -43,7 +43,7 @@ export function createArchive(env,{
         .bind(timestamp+10*60000,article.id,timestamp,taskId,taskId,taskId,attemptNo).first();
       if(!lease)return {skipped:true};
       try{
-        return await collector(env,source,article,{fence:lease.capture_fence,taskId,attemptNo,observationNo:lease.observation_no,captureIntent});
+        return await collector(env,source,article,{fence:lease.capture_fence,taskId,attemptNo,observationNo:lease.observation_no,captureIntent,siteAdmission});
       }catch(error){
         if(taskId){
           const receipt=await env.DB.prepare('SELECT result_json FROM task_attempts WHERE task_id=? AND attempt_no=?')

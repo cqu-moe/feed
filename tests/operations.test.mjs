@@ -133,7 +133,7 @@ async function fixture({bindings={}}={}){
   for(const name of ['0001_feed.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql',
     '0006_sources.sql','0007_archive_versions.sql','0008_content_events.sql','0009_subscriptions.sql',
     '0010_subscription_editing.sql','0011_archive_migration.sql','0013_notification_matching.sql',
-    '0014_mail_delivery.sql','0015_history_backfill.sql','0016_mail_digests.sql','0018_outbox_receipts.sql']){
+    '0014_mail_delivery.sql','0015_history_backfill.sql','0016_mail_digests.sql','0018_outbox_receipts.sql','0019_site_execution_leases.sql']){
     await applyMigration(db,await readFile(`migrations/${name}`,'utf8'));
   }
   await seed(db);

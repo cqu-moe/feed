@@ -12,6 +12,8 @@ function validate(job){
     throw new Error('One bounded page action is required');
   if(!/^[0-9a-f-]{36}$/i.test(job?.jobId??''))
     throw new Error('Scrape job identity is required');
+  if(job?.generation!==undefined&&(!Number.isSafeInteger(job.generation)||job.generation<1))
+    throw new Error('Scrape generation is invalid');
 }
 
 export class FeedBrowser extends Container{
@@ -19,6 +21,8 @@ export class FeedBrowser extends Container{
   sleepAfter='1s';
   startingJobs=new Set;
   activeJobs=new Set;
+  generation=0;
+  stopRequested=false;
 
   async fetch(request){
     const path=new URL(request.url).pathname;
@@ -27,8 +31,7 @@ export class FeedBrowser extends Container{
       let completion;
       try{completion=await request.json();}
       catch{return new Response('Invalid completion',{status:400});}
-      const stopped=await this.completeScrape(completion);
-      return Response.json({stopped});
+      return Response.json(await this.completeScrape(completion));
     }
 
     if(path!=='/scrape')return new Response('Not found',{status:404});
@@ -41,6 +44,15 @@ export class FeedBrowser extends Container{
       method:'POST',headers:{'content-type':'application/json','x-feed-browser-job-id':jobId},
       body:JSON.stringify(job),signal:request.signal,
     });
+    if(this.stopRequested)
+      return Response.json({success:false,error:'Browser stop is in progress',code:'container_capacity',retryable:true},
+        {status:503,headers:{'retry-after':'1'}});
+    if(this.startingJobs.size||this.activeJobs.size)
+      return Response.json({success:false,error:'Site browser busy',code:'container_capacity',retryable:true},
+        {status:503,headers:{'retry-after':'1'}});
+    if(job.generation!==undefined&&job.generation<this.generation)
+      return new Response('Browser generation is stale',{status:409});
+    if(job.generation!==undefined)this.generation=job.generation;
     this.startingJobs.add(jobId);
     let response;
     try{response=await super.fetch(request);}
@@ -60,12 +72,30 @@ export class FeedBrowser extends Container{
     return new Response(response.body,{status:response.status,headers});
   }
 
+  async onActivityExpired(){
+    // The SDK arms its idle alarm before port readiness and inflight tracking.
+    // A real cold-start job is work, not idle time; defer only that gap.
+    if(this.startingJobs.size){
+      this.renewActivityTimeout();
+      return;
+    }
+    await super.onActivityExpired();
+  }
+
   async completeScrape(completion){
     const jobId=completion?.jobId;
-    if(typeof jobId!=='string'||!this.activeJobs.has(jobId))return false;
-    this.activeJobs.delete(jobId);
-    if(this.startingJobs.size||this.activeJobs.size)return false;
+    if(typeof jobId!=='string'||!this.activeJobs.delete(jobId))return {stopped:false};
+    if(completion.stop===false||this.startingJobs.size||this.activeJobs.size)return {stopped:false};
+    if(completion.generation!==undefined&&completion.generation<this.generation)return {stopped:false};
+    this.stopRequested=true;
     await this.stop();
-    return true;
+    return {stopped:true};
+  }
+
+  async onStop(params){
+    this.stopRequested=false;
+    // The SDK can deliver the previous exit while a new fetch is starting.
+    this.activeJobs.clear();
+    await super.onStop(params);
   }
 }

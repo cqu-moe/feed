@@ -42,7 +42,7 @@ async function collectArticle(env,source,article,dependencies,captureContext){
     const sites=await env.DB.prepare('SELECT id FROM sites WHERE origin=?').bind(new URL(source.url).origin).all();
     if(sites.results.length===1)source={...source,siteId:sites.results[0].id};
   }
-  const data=await scrapeDependency(env,article.url,{source,formats:['markdown','rawHtml',{type:'screenshot',fullPage:true}],onlyMainContent:true,actions:[{type:'executeJavascript',script:`var __name=value=>value; (${captchaPage.toString()})(${JSON.stringify(input)})`}]});
+  const data=await scrapeDependency(env,article.url,{source,...(captureContext?.siteAdmission?{siteAdmission:captureContext.siteAdmission}:{}),formats:['markdown','rawHtml',{type:'screenshot',fullPage:true}],onlyMainContent:true,actions:[{type:'executeJavascript',script:`var __name=value=>value; (${captchaPage.toString()})(${JSON.stringify(input)})`}]});
   let page=data.actions?.javascriptReturns?.[0]?.value;if(typeof page==='string')page=JSON.parse(page);
   if(!page?.bodyRecognized||new URL(page.page.url).origin!==new URL(source.url).origin)throw new Error('Article body not recognized');
   const report={id:article.id,runId,url:article.url,captureFence:fence,capturedAt:new Date().toISOString(),bodyCapturedAt:page.bodyCapturedAt??null,provider:{name:'browser-container',siteId:source.siteId,statusCode:data.metadata?.statusCode,elapsedMs:data.metadata?.elapsedMs},artifacts:[],errors:[...(page.errors??[])]};

@@ -2,6 +2,7 @@ import {backfillEnabledSql,readBackfillControl} from './backfill-control.mjs';
 import staticSources from './sources.json';
 import {savedDiscoveryPage} from './discovery-journal.mjs';
 import {verifySource} from './source-validation.mjs';
+import {verifySiteExecution} from './site-scheduler.mjs';
 import {launchOutboxId,launchOutboxStatement} from './task-statements.mjs';
 import {articleSourceAssociationStatements} from './notifications.mjs';
 import {articleId,cleanError,cutoffDate,sha} from './utils.mjs';
@@ -322,7 +323,10 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
       if(!task)return {superseded:true};
       if(task.result_json)return JSON.parse(task.result_json);
       const context=JSON.parse(task.payload_json),source=context.source;
-      if(context.mode==='validate')return verifySource(env,this,source.id,{source,taskId,attemptNo,scrape});
+      if(context.mode==='validate'){
+        const siteAdmission=await verifySiteExecution(env,taskId,attemptNo);
+        return verifySource(env,this,source.id,{source,taskId,attemptNo,scrape,siteAdmission});
+      }
       if(source?.id!==task.source_id||source?.configVersion===undefined)throw validationError('Discovery source snapshot is invalid');
       const isBackfill=context.mode==='backfill';
       let backfillMaxPages;
@@ -342,9 +346,11 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
       if(typeof currentUrl!=='string'||visited.has(currentUrl))throw validationError('Discovery cursor is invalid');
       let result;
       try{
+        const siteAdmission=await verifySiteExecution(env,taskId,attemptNo);
         result=await savedDiscoveryPage(env,source,taskId,currentUrl,{
           scrape,now,allowExternalOnly:page>1,
           baselineCutoffAt:isBackfill?context.windowStart:(source.baselineCutoffAt??cutoffDate(timestamp())),
+          siteAdmission,
         });
       }catch(error){
         if(isBackfill)await env.DB.prepare(`UPDATE sources SET backfill_last_error=?,updated_at=?
@@ -471,7 +477,8 @@ async function discoveryTaskStatements(env,source,context,{timestamp,advanceSour
   const businessKey=`discover:${source.id}:${source.configVersion}:${context.scheduledSlot}:p${context.page}`;
   const taskId=(await sha(businessKey)).slice(0,24);
   const payload={source,checkpoint:context.checkpoint,page:context.page,scheduledSlot:context.scheduledSlot};
-  const nextDue=timestamp+source.refreshIntervalSec*1000;
+  const previous=Number(context.scheduledSlot)||timestamp,interval=source.refreshIntervalSec*1000;
+  const nextDue=previous+(Math.floor(Math.max(0,timestamp-previous)/interval)+1)*interval;
   const statements=[];
   const sourceGuard=advanceSource
     ?'enabled=1 AND validation_state=\'verified\' AND next_discovery_at=?'

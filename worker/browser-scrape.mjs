@@ -1,4 +1,6 @@
 import {bounded} from './utils.mjs';
+import {handoffOrReleaseSiteExecution} from './site-scheduler.mjs';
+import {createTaskRuntime} from './task-runtime.mjs';
 
 function siteIdentity(source){
   const identity=source?.siteId;
@@ -10,7 +12,7 @@ function siteIdentity(source){
 export async function scrape(env,url,options={}){
   if(!env.BROWSER?.getByName)throw new Error('Browser container binding unavailable');
   const signal=AbortSignal.timeout(285000);
-  const {source,...request}=options;
+  const {source,siteAdmission,executionHandoff=true,...request}=options;
   const jobId=crypto.randomUUID();
   const siteId=siteIdentity(source);
   const browser=env.BROWSER.getByName(siteId);
@@ -18,18 +20,23 @@ export async function scrape(env,url,options={}){
     const response=await browser.fetch(new Request('https://browser.internal/scrape',{
       method:'POST',
       headers:{'content-type':'application/json','x-feed-browser-job-id':jobId},
-      body:JSON.stringify({url,siteId,jobId,...request}),
+      body:JSON.stringify({url,siteId,jobId,...request,...(siteAdmission?{generation:siteAdmission.generation}:{})}),
       signal,
     }));
     const bytes=await bounded(response,40*1024*1024);
     const acceptedJobId=response.headers.get('x-feed-browser-job-id');
     if(acceptedJobId===jobId){
+      let stop=executionHandoff,outboxId;
+      if(siteAdmission&&executionHandoff){
+        const handoff=await handoffOrReleaseSiteExecution(env,siteAdmission);
+        outboxId=handoff.outboxId;
+        if(outboxId)stop=false;
+      }
       await browser.fetch(new Request('https://browser.internal/scrape-complete',{
-        method:'POST',
-        body:JSON.stringify({jobId}),
-        signal:AbortSignal.timeout(10000),
-        headers:{'content-type':'application/json','x-feed-browser-site-id':siteId},
+        method:'POST',body:JSON.stringify({jobId,stop,...(siteAdmission?{generation:siteAdmission.generation}:{})}),
+        signal:AbortSignal.timeout(10000),headers:{'content-type':'application/json'},
       })).catch(()=>{});
+      if(outboxId)await createTaskRuntime(env).dispatchOutbox(outboxId).catch(()=>false);
     }
     const text=new TextDecoder().decode(bytes);
     let result;
