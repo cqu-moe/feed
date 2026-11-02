@@ -104,6 +104,8 @@ export async function openBrowser({signal}={}){
     await call('Page.enable');
     mainFrameId=(await call('Page.getFrameTree')).frameTree.frame.id;
     await call('Network.enable');
+    // VSB visit counters can stall the HTML parser before the notice body.
+    await call('Network.setBlockedURLs',{urls:['*/system/resource/js/counter.js*','*/system/resource/js/dynclicks.js*']});
     await call('Emulation.setLocaleOverride',{locale:'zh-CN'});
     await call('Emulation.setTimezoneOverride',{timezoneId:'Asia/Shanghai'});
     const {product}=await call('Browser.getVersion');

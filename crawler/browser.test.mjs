@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {readFile,readdir} from 'node:fs/promises';
 import {setTimeout as delay} from 'node:timers/promises';
 import {openBrowser} from './browser.mjs';
+import {createServer} from 'node:http';
 
 async function processes(){
   const rows=[];
@@ -38,5 +39,36 @@ test('closing a stalled capture terminates the Chrome process tree before deleti
   }finally{
     if(group){try{process.kill(-group,'SIGKILL');}catch(error){if(error.code!=='ESRCH')throw error;}}
     await browser.close();
+  }
+});
+
+
+test('stalled VSB counters cannot block article parsing while content scripts still run',async()=>{
+  const requested=[];
+  const server=createServer((request,response)=>{
+    requested.push(request.url);
+    if(request.url.startsWith('/system/resource/js/'))return;
+    if(request.url==='/content.js'){
+      response.setHeader('content-type','text/javascript');
+      return response.end('window.articleValue="loaded"');
+    }
+    response.setHeader('content-type','text/html');
+    response.end('<script src="/system/resource/js/counter.js"></script><script src="/system/resource/js/dynclicks.js"></script><script src="/content.js"></script><article>Public notice</article>');
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  const browser=await openBrowser({signal:AbortSignal.timeout(15000)});
+  try{
+    await browser.navigate(`http://127.0.0.1:${server.address().port}/`);
+    let page;
+    for(let i=0;i<40;i++){
+      page=await browser.evaluate('({body:document.querySelector("article")?.textContent,value:window.articleValue})');
+      if(page?.body)break;
+      await delay(100);
+    }
+    assert.deepEqual(page,{body:'Public notice',value:'loaded'});
+    assert.equal(requested.some(url=>url.startsWith('/system/resource/js/')),false);
+  }finally{
+    await browser.close();server.closeAllConnections();
+    await new Promise(resolve=>server.close(resolve));
   }
 });
