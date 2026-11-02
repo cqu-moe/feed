@@ -9,14 +9,15 @@ before(async()=>{
   const bundle=await build({stdin:{contents:`
     import {reserveBudget} from './worker/utils.mjs';
     import {reservePages} from './worker/ocr-cache.mjs';
-    import {scrape} from './worker/firecrawl.mjs';
+    import {budgetLimit} from './worker/utils.mjs';
     let providerCalls=0;
     globalThis.fetch=async()=>{providerCalls++;return Response.json({success:true,data:{}})};
     export default {async fetch(request,env){
       const input=await request.json();
       try{
         if(input.kind==='scrape'){
-          await scrape({...env,MAX_FIRECRAWL_PER_DAY:input.limit},'https://example.test/');
+          await reserveBudget(env,'ocr',budgetLimit(input.limit,100));
+          await fetch('https://model.example.test/');
           return Response.json({providerCalls});
         }
         const result=input.kind==='pdf'
@@ -40,8 +41,8 @@ beforeEach(async()=>{
 });
 const reserve=input=>mf.dispatchFetch('https://fixture.test/reserve',{method:'POST',body:JSON.stringify(input)});
 
-test('uncapped Firecrawl and CAPTCHA requests still count every concurrent reservation above old limits',async()=>{
-  for(const kind of ['firecrawl','ocr']){
+test('uncapped CAPTCHA requests still count every concurrent reservation above old limits',async()=>{
+  for(const kind of ['ocr']){
     const results=await Promise.all(Array.from({length:12},()=>reserve({kind,limit:0})));
     assert.ok(results.every(r=>r.ok));
     assert.equal((await db.prepare('SELECT used FROM usage WHERE kind=?').bind(kind).first()).used,12);
@@ -49,10 +50,10 @@ test('uncapped Firecrawl and CAPTCHA requests still count every concurrent reser
 });
 
 test('finite request budgets stay atomic and invalid configuration cannot disable protection',async()=>{
-  const results=await Promise.all(Array.from({length:8},()=>reserve({kind:'firecrawl',limit:3})));
+  const results=await Promise.all(Array.from({length:8},()=>reserve({kind:'ocr',limit:3})));
   assert.equal(results.filter(r=>r.ok).length,3);
-  for(const limit of [-1,1.5,null])assert.equal((await reserve({kind:'firecrawl',limit})).status,409);
-  assert.equal((await db.prepare("SELECT used FROM usage WHERE kind='firecrawl'").first()).used,3);
+  for(const limit of [-1,1.5,null])assert.equal((await reserve({kind:'ocr',limit})).status,409);
+  assert.equal((await db.prepare("SELECT used FROM usage WHERE kind='ocr'").first()).used,3);
 });
 
 test('uncapped PDF pages preserve day and month ledgers beyond previous allowances',async()=>{
@@ -79,7 +80,7 @@ test('disabling either PDF cap retains the other cap and keeps failed reservatio
 test('malformed environment limits never grant an unlimited paid request',async()=>{
   for(const limit of [' ','',false,'0x0','NaN',-1]){
     const response=await reserve({kind:'scrape',limit});
-    assert.equal(response.status,409,`Firecrawl limit ${JSON.stringify(limit)}`);
+    assert.equal(response.status,409,`CAPTCHA limit ${JSON.stringify(limit)}`);
     assert.equal((await db.prepare('SELECT COUNT(*) count FROM usage').first()).count,0);
   }
   for(const limits of [{daily:' ',monthly:0},{daily:0,monthly:' '}]){

@@ -1,5 +1,5 @@
-import {scrape} from './firecrawl.mjs';
-import {articleId,normalizedDate} from './utils.mjs';
+import {scrape} from './browser-scrape.mjs';
+import {normalizedDate} from './utils.mjs';
 import {canonicalUrl} from './sources.mjs';
 
 function listPage(input) {
@@ -74,13 +74,14 @@ function listPage(input) {
   return {articles,next:[...new Set(next)],title:document.title,externalArticleCount};
 }
 
-export async function discoverList(env,source,url,{scrape:scrapeDependency=scrape,baselineCutoffAt,allowExternalOnly=false,now=()=>Date.now()}={}){
+export async function discoverList(env,source,url,{scrape:scrapeDependency=scrape,baselineCutoffAt,allowExternalOnly=false,now=()=>Date.now(),siteAdmission,executionHandoff}={}){
   const target=canonicalUrl(url),origin=new URL(source.url).origin;
   if(target.origin!==origin)throw new Error('Unexpected list origin');
   const pattern=source.config?.articlePattern??source.articlePattern;
   const actionSource={articlePattern:pattern};
   const data=await scrapeDependency(env,target.href,{
-    formats:['links'],
+    source,formats:['links'],readiness:{articlePattern:pattern,allowExternalOnly},
+    ...(siteAdmission?{siteAdmission}:{}),...(executionHandoff===false?{executionHandoff:false}:{}),
     actions:[{type:'executeJavascript',script:`var __name=value=>value; (${listPage.toString()})(${JSON.stringify(actionSource)})`}],
   });
   let page=data.actions?.javascriptReturns?.[0]?.value;
@@ -105,21 +106,6 @@ export async function discoverList(env,source,url,{scrape:scrapeDependency=scrap
     }).filter(Boolean))],
     baselineCutoff:baselineCutoffAt,observedAt:Number(now()),rawPage:page,providerMetadata:data.metadata??{},
   };
-}
-
-export async function discoverPage(env,source,url,cutoff){
-  const result=await discoverList(env,source,url,{baselineCutoffAt:cutoff});
-  if(result.dated===0&&result.undated===0)throw new Error('No article links found in list');
-  if(result.dated===0)throw new Error('List dates missing; refusing to guess the 30-day window');
-  let added=0,recent=0;
-  for(const row of result.articles){
-    if(row.publishedDay<cutoff||row.publishedDay>new Date(Date.now()+86400000).toISOString().slice(0,10))continue;
-    recent++;
-    const inserted=await env.DB.prepare('INSERT OR IGNORE INTO articles(id,source_id,url,title,published_at,discovered_at) VALUES (?,?,?,?,?,?) RETURNING id')
-      .bind(await articleId(row.url),source.id,row.url,row.title,row.publishedDay,new Date().toISOString()).first();
-    if(inserted)added++;
-  }
-  return {added,recent,dated:result.dated,undated:result.undated,next:recent?result.next:[]};
 }
 
 // A date without a clock is deliberately not promoted to midnight. Ambiguous

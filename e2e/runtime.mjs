@@ -257,7 +257,6 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir, ingestion 
           SOURCE_MANAGEMENT_ENABLED: 'true',
           ARCHIVE_VERSIONS_ENABLED: 'true',
           ARCHIVE_READS_ENABLED: 'true',
-          MAX_FIRECRAWL_PER_DAY: '0',
           MAX_OCR_PER_DAY: '0',
           MAX_PDF_OCR_PAGES_PER_DAY: '0',
           MAX_PDF_OCR_PAGES_PER_MONTH: '0',
@@ -266,6 +265,7 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir, ingestion 
         },
         d1Databases: { DB: 'feed-e2e-database' },
         r2Buckets: { ARCHIVE: 'feed-e2e-archive' },
+        ...(ingest ? { durableObjects: { BROWSER: { className: 'SyntheticBrowser', scriptName: 'browser-fixture', useSQLite: true } } } : {}),
         queueProducers: { FEED_JOBS: 'feed-e2e-jobs', FEED_EVENTS: 'feed-e2e-events', FEED_MAIL: 'feed-e2e-mail' },
         ...(ingest ? { queueConsumers: disableConsumers ? {} : { ...ingest.consumers, ...(mailFixture && !disableMailConsumer ? { 'feed-e2e-mail': { maxBatchSize: 1, maxBatchTimeout: 0, maxRetries: 0, deadLetterQueue: 'feed-e2e-dlq' } } : {}) } } : {}),
         workflows: {
@@ -289,7 +289,7 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir, ingestion 
           assetConfig: { not_found_handling: 'single-page-application' },
         },
       },
-      ...(ingest ? [ingest.deadLetterObserver] : []),
+      ...(ingest ? [ingest.deadLetterObserver, ingest.browserWorker] : []),
       {
         name: 'auth',
         modules: [{ type: 'ESModule', path: join(buildDir, 'auth', 'index.js'), contents: authBundle }],

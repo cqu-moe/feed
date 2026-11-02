@@ -13,16 +13,16 @@ const workersPlugin={
   setup(buildApi){
     buildApi.onResolve({filter:/^cloudflare:workers$/},()=>({path:'cloudflare-workers',namespace:'sources-workers-stub'}));
     buildApi.onLoad({filter:/.*/,namespace:'sources-workers-stub'},()=>({
-      loader:'js',contents:'export class WorkflowEntrypoint{constructor(env={}){this.env=env;}}',
+      loader:'js',contents:'export class DurableObject{}; export class WorkerEntrypoint{}; export class WorkflowEntrypoint{constructor(env={}){this.env=env;}}',
     }));
   },
 };
 
-const firecrawlPlugin={
-  name:'sources-firecrawl-stub',
+const browserPlugin={
+  name:'sources-browser-stub',
   setup(buildApi){
-    buildApi.onResolve({filter:/\.\/firecrawl\.mjs$/},()=>({path:'firecrawl',namespace:'sources-firecrawl-stub'}));
-    buildApi.onLoad({filter:/.*/,namespace:'sources-firecrawl-stub'},()=>({
+    buildApi.onResolve({filter:/\.\/browser-scrape\.mjs$/},()=>({path:'browser',namespace:'sources-browser-stub'}));
+    buildApi.onLoad({filter:/.*/,namespace:'sources-browser-stub'},()=>({
       loader:'js',
       contents:`
         const calls=[];
@@ -84,7 +84,7 @@ const firecrawlPlugin={
           }
           return {
             markdown:'多来源样本正文',rawHtml:'<html></html>',
-            metadata:{statusCode:200,creditsUsed:1,proxyUsed:true},
+            metadata:{statusCode:200,provider:'browser-container'},
             actions:{javascriptReturns:[{value:JSON.stringify(value)}]},
           };
         }
@@ -241,7 +241,7 @@ async function fixture({versioned=false,notifications=false,discoveryPages=2,env
       sourcefile:'sources-fixture.mjs',
     },
     bundle:true,write:false,format:'esm',platform:'browser',external:['node:buffer','node:*'],
-    plugins:[workersPlugin,firecrawlPlugin],
+    plugins:[workersPlugin,browserPlugin],
   });
   const provider=oauthProvider();
   const gate={url:null,held:false,release:null};
@@ -295,7 +295,7 @@ async function fixture({versioned=false,notifications=false,discoveryPages=2,env
   });
   const mf=new Miniflare(convertV4MiniflareOptions({workers}));
   const db=await mf.getD1Database('DB');
-  const migrationNames=['0001_feed.sql','0002_auth.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql','0007_archive_versions.sql','0008_content_events.sql','0018_outbox_receipts.sql'];
+  const migrationNames=['0001_feed.sql','0002_auth.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql','0007_archive_versions.sql','0008_content_events.sql','0018_outbox_receipts.sql','0019_site_execution_leases.sql'];
   for(const name of migrationNames){
     await applyMigration(db,await readFile(`migrations/${name}`,'utf8'));
   }

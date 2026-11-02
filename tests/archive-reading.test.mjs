@@ -75,10 +75,10 @@ async function fixture({failAfterOcrStore=false}={}){
   const pdf=scannedPdf();
   const cloudflarePlugin={name:'reading-workflow-platform',setup(api){
     api.onResolve({filter:/^cloudflare:workers$/},()=>({path:'workers',namespace:'reading-platform'}));
-    api.onLoad({filter:/.*/,namespace:'reading-platform'},()=>({loader:'js',contents:'export class WorkflowEntrypoint{constructor(env){this.env=env;}}'}));
+    api.onLoad({filter:/.*/,namespace:'reading-platform'},()=>({loader:'js',contents:'export class DurableObject{}; export class WorkerEntrypoint{}; export class WorkflowEntrypoint{constructor(env){this.env=env;}}'}));
   }};
-  const providerPlugin={name:'reading-firecrawl-provider',setup(api){
-    api.onResolve({filter:/\.\/firecrawl\.mjs$/},()=>({path:'provider',namespace:'reading-provider'}));
+  const providerPlugin={name:'reading-browser-provider',setup(api){
+    api.onResolve({filter:/\.\/browser-scrape\.mjs$/},()=>({path:'provider',namespace:'reading-provider'}));
     api.onLoad({filter:/.*/,namespace:'reading-provider'},()=>({loader:'js',contents:`
       const encoded=value=>btoa(String.fromCharCode(...new TextEncoder().encode(value)));
       export async function scrape(){
@@ -88,7 +88,7 @@ async function fixture({failAfterOcrStore=false}={}){
           downloads:[{url:'https://jwc.cqu.edu.cn/archive.pdf',originalFile:true,fetchedAt:new Date().toISOString(),saved:{name:'attachment-1.pdf'}}],
           artifacts:[{name:'snapshot.html',base64:encoded(html),contentType:'text/html'},{name:'offline.html',base64:encoded(html),contentType:'text/html'},
             {name:'attachment-1.pdf',base64:encoded(${JSON.stringify(pdf)}),contentType:'application/pdf'}]};
-        return {markdown:'',rawHtml:html,metadata:{statusCode:200,creditsUsed:1},actions:{javascriptReturns:[{value:JSON.stringify(page)}]}};
+        return {markdown:'',rawHtml:html,metadata:{statusCode:200,provider:'browser-container'},actions:{javascriptReturns:[{value:JSON.stringify(page)}]}};
       }
     `}));
   }};
@@ -167,7 +167,7 @@ async function fixture({failAfterOcrStore=false}={}){
     queueConsumers:{'feed-jobs':{maxBatchSize:1,maxRetries:0},'feed-events':{maxBatchSize:1,maxRetries:0}},
   }));
   const db=await mf.getD1Database('DB');
-  for(const name of ['0001_feed.sql','0002_auth.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql','0007_archive_versions.sql','0008_content_events.sql','0009_subscriptions.sql','0010_subscription_editing.sql','0013_notification_matching.sql']){
+  for(const name of ['0001_feed.sql','0002_auth.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql','0007_archive_versions.sql','0008_content_events.sql','0009_subscriptions.sql','0010_subscription_editing.sql','0013_notification_matching.sql','0019_site_execution_leases.sql']){
     const sql=await readFile('migrations/'+name,'utf8');
     for(const statement of sql.split(/;\s*\n(?=CREATE|ALTER|PRAGMA|INSERT|UPDATE|$)/).map(s=>s.trim()).filter(s=>s&&!/^PRAGMA\b/.test(s)))await db.prepare(statement).run();
   }

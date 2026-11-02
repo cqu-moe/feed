@@ -1,4 +1,5 @@
 import {test} from 'node:test';
+import {createHash} from 'node:crypto';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {build} from 'esbuild';
@@ -25,11 +26,14 @@ async function fixture(){
         import {apiRoute} from './worker/api.mjs';
         import {createArchive} from './worker/archive.mjs';
         import {createCollector} from './worker/collect.mjs';
+        import {bridgeRoute} from './worker/bridge.mjs';
 
         const base64=value=>btoa(String.fromCharCode(...new TextEncoder().encode(value)));
         const pdf='%PDF-1.7\\n测试附件';
         const snapshot='<html><body><main><h1>通知正文</h1><p>中文归档正文</p></main></body></html>';
         const attachmentUrl='https://jwc.cqu.edu.cn/system/_content/download.jsp?urltype=1501&file.pdf';
+        const uploadUrl='https://jwc.cqu.edu.cn/system/_content/download.jsp?urltype=1501&large.zip';
+        const uploadedBytes=Buffer.alloc(2*1024*1024+17,42);uploadedBytes.set([0x50,0x4b,0x03,0x04]);
         const page={
           bodyRecognized:true,
           page:{url:${JSON.stringify(articleUrl)}},
@@ -49,25 +53,44 @@ async function fixture(){
         };
         globalThis.SCRAPE_CALLS=[];
         globalThis.HOLD_SCRAPE=false;
-        const scrape=async()=>{
+        const scrape=async(env,url,options)=>{
           globalThis.SCRAPE_CALLS.push({url:${JSON.stringify(articleUrl)}});
           while(globalThis.HOLD_SCRAPE)await new Promise(resolve=>setTimeout(resolve,10));
+          const uploadCapture=globalThis.UPLOAD_CAPTURE===true;
+          if(uploadCapture){
+            const match=options.actions[0].script.match(/"bridgeURL":"([^"]+)"/);
+            const token=new URL(match[1]).searchParams.get('grant');
+            const response=await bridgeRoute(new Request('https://feed.test/internal/upload',{
+              method:'POST',headers:{Origin:'https://feed.test','X-Grant':token,
+                'X-Filename':'attachment-2.zip','Content-Length':String(uploadedBytes.length)},body:uploadedBytes,
+            }),env);
+            if(!response.ok)throw new Error(await response.text());
+          }
+          const uploadPage=uploadCapture?{
+            ...page,
+            attachmentCandidates:[...page.attachmentCandidates,{url:uploadUrl,name:'大型附件.zip',role:'attachment'}],
+            downloads:[...page.downloads,{url:uploadUrl,originalFile:true,kind:'zip',
+              saved:{name:'attachment-2.zip',uploaded:true,bytes:uploadedBytes.length}}],
+          }:page;
           await new Promise(resolve=>setTimeout(resolve,30));
           return {
             markdown:'中文归档正文',
             rawHtml:snapshot,
-            metadata:{statusCode:200,creditsUsed:1,proxyUsed:true},
-            actions:{javascriptReturns:[{value:JSON.stringify(page)}]},
+            screenshot:{contentType:'image/png',base64:'iVBORw0KGgo='},
+            metadata:{statusCode:200,provider:'browser-container'},
+            actions:{javascriptReturns:[{value:JSON.stringify(uploadPage)}]},
           };
         };
 
         export default {
           async fetch(request,env){
             const url=new URL(request.url);
-            if(url.pathname==='/capture'){
+            if(['/capture','/capture-uploaded'].includes(url.pathname)){
+              globalThis.UPLOAD_CAPTURE=url.pathname==='/capture-uploaded';
               const archive=createArchive(env,{collector:createCollector({scrape})});
               const article={id:${JSON.stringify(articleId)},url:${JSON.stringify(articleUrl)},title:'并发采集通知'};
-              const source={id:'jwc',name:'教务处',url:'https://jwc.cqu.edu.cn/'};
+              const source={id:'jwc',siteId:'7fd03676e5751e9b6dd95ecb',name:'教务处',url:'https://jwc.cqu.edu.cn/'};
+              if(url.pathname==='/capture-uploaded')return Response.json(await archive.capture(source,article));
               return Response.json(await Promise.all([
                 archive.capture(source,article),
                 archive.capture(source,article),
@@ -144,6 +167,36 @@ test('concurrent Archive captures use one external scrape and feed the reading A
     const snapshot=await mf.dispatchFetch(`https://feed.test/api/snapshots/${articleId}`);
     assert.equal(snapshot.status,200);
     assert.match(await snapshot.text(),/中文归档正文/);
+  }finally{
+    await mf.dispose();
+  }
+});
+
+test('a signed upload is adopted by Archive and served as the exact original bytes',async()=>{
+  const {mf,db,bucket}=await fixture();
+  try{
+    const capture=await mf.dispatchFetch('https://feed.test/capture-uploaded');
+    const result=await capture.json();
+    if(!capture.ok)assert.fail(JSON.stringify(result));
+    assert.deepEqual(result,{id:articleId,status:'complete',attachments:2,downloaded:2});
+
+    const rows=await db.prepare('SELECT filename,object_key,bytes,content_type,sha256,status FROM attachments WHERE article_id=? ORDER BY id')
+      .bind(articleId).all();
+    assert.deepEqual(rows.results.map(row=>({filename:row.filename,bytes:row.bytes,status:row.status})),[
+      {filename:'attachment-1.pdf',bytes:Buffer.from('%PDF-1.7\n测试附件').length,status:'complete'},
+      {filename:'attachment-2.zip',bytes:2*1024*1024+17,status:'complete'},
+    ]);
+    assert.equal(rows.results[1].content_type,'application/octet-stream');
+    assert.equal(rows.results[1].sha256,createHash('sha256').update(Buffer.concat([Buffer.from([0x50,0x4b,0x03,0x04]),Buffer.alloc(2*1024*1024+13,42)])).digest('hex'));
+    const immutable=await bucket.get(rows.results[1].object_key);
+    assert.equal(immutable.size,2*1024*1024+17);
+    assert.equal(immutable.httpMetadata?.contentType,'application/octet-stream');
+    assert.equal((await immutable.arrayBuffer()).byteLength,2*1024*1024+17);
+    const original=await mf.dispatchFetch(`https://feed.test/api/files/${articleId}/attachment-2.zip`,{
+      headers:{Range:'bytes=0-3'},
+    });
+    assert.equal(original.status,206);
+    assert.equal(await original.text(),'PK\x03\x04');
   }finally{
     await mf.dispose();
   }

@@ -144,7 +144,7 @@ Queue 启动器读取 task 与 attempt，调用指定 instance ID 的 create。�
 | 故障 | 负责处理的层 | 行为 |
 | --- | --- | --- |
 | Queue→Workflow 交接短暂失败 | Queue | 有界重投，同实例 ID；超过上限去该 Queue 的 DLQ |
-| Firecrawl 429 | 抓取 Workflow | 尊重 Retry-After，否则指数退避＋抖动；持久 sleep / retry_wait；有尝试次数和总时长上限 |
+| 源站 429 | 抓取 Workflow | 尊重 Retry-After，否则指数退避＋抖动；持久 sleep / retry_wait；有尝试次数和总时长上限 |
 | 402、余额或业务预算耗尽 | 任务调度 | blocked + 原因 + 下次复核；禁止快速循环调用付费 API |
 | 网络超时 / 5xx | 对应 Workflow 步骤 | 有界重试，复用已保存产物；先辨明是否为结果不明的付费副作用 |
 | 正文解析错误、验证码伪文件、缺附件 | 采集/完整性模块 | 保存证据与缺项；失败源不影响其他通知，不发布部分版本 |
@@ -155,7 +155,7 @@ Queue 启动器读取 task 与 attempt，调用指定 instance ID 的 create。�
 
 每个外部调用仅由一个层负责自动重试：关闭 SDK 隐式重试或纳入同一预算，避免 Queue × Workflow × SDK 三层相乘。具体尝试次数、退避上限和费用上限由上线配置确定；每个策略必须是有界值，不能留无限重试。
 
-无需自建全局并发器、每源信号量或一个集中 Durable Object。Cloudflare 和 Firecrawl 自身并行；文章租约保护写入一致性，API 429 保护失败恢复。Queue 的 `max_concurrency` 只限制消费者调用，启动 Workflow 后不能代表实际抓取并发。[Queue 并发说明](https://developers.cloudflare.com/queues/configuration/consumer-concurrency/)；Firecrawl 的代理不会取消账号 API/并发上限。[Firecrawl 错误说明](https://github.com/firecrawl/firecrawl-docs/blob/main/api-reference/errors.mdx)
+每站对应一个按需 Container，同站任务共享串行准入，跨站按每日时间错峰。排队和长重试由 Worker 持久任务承担；结果传输完成且没有就绪后续任务时立即停止，1 秒休眠仅作兜底。Queue 消费并发不代表 Workflow 内的浏览器并发，必须在执行前完成站点准入。以 [按站采集设计](../container-collection-rollout.md) 的交接与停止约束为准。
 
 定时入口按 due_at 做小批工作：安排到期来源/文章复查、派发 outbox、唤醒 retry_wait、核对 starting/running 的异常任务、补做未完成事件匹配和邮件准备、推进20:00摘要。所有扫描用索引＋keyset 游标；优先级和历史预算在入队前执行，不假定队列替业务排序。
 

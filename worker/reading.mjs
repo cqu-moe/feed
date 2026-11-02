@@ -5,7 +5,7 @@ import { removeReadingNoise } from '../shared/reading-noise.mjs';
 export function readingText(value) {
   let text = String(value ?? '');
   const pdfAt = text.search(/^# attachment-\d+\.pdf\s*$/m);
-  // Firecrawl's fallback can include site navigation and PDF viewer controls.
+  // Legacy fallback text can include site navigation and PDF viewer controls.
   if (pdfAt >= 0 && text.startsWith('[![')) text = text.slice(pdfAt);
   const result = removeReadingNoise(text
     .replace(/^# attachment-\d+\.pdf\s*\n## Metadata\n[\s\S]*?^## Contents\s*$/gm, '')

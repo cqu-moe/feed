@@ -13,16 +13,16 @@ const workersPlugin={
     buildApi.onResolve({filter:/^cloudflare:workers$/},()=>({path:'cloudflare-workers',namespace:'task-runtime-workers-stub'}));
     buildApi.onLoad({filter:/.*/,namespace:'task-runtime-workers-stub'},()=>({
       loader:'js',
-      contents:'export class WorkflowEntrypoint{constructor(env={}){this.env=env;}}',
+      contents:'export class DurableObject{}; export class WorkerEntrypoint{}; export class WorkflowEntrypoint{constructor(env={}){this.env=env;}}',
     }));
   },
 };
 
-const firecrawlPlugin={
-  name:'task-runtime-firecrawl-stub',
+const browserPlugin={
+  name:'task-runtime-browser-stub',
   setup(buildApi){
-    buildApi.onResolve({filter:/\.\/firecrawl\.mjs$/},()=>({path:'firecrawl',namespace:'task-runtime-firecrawl-stub'}));
-    buildApi.onLoad({filter:/.*/,namespace:'task-runtime-firecrawl-stub'},()=>({
+    buildApi.onResolve({filter:/\.\/browser-scrape\.mjs$/},()=>({path:'browser-scrape',namespace:'task-runtime-browser-stub'}));
+    buildApi.onLoad({filter:/.*/,namespace:'task-runtime-browser-stub'},()=>({
       loader:'js',
       contents:`
         const calls=[];
@@ -35,7 +35,8 @@ const firecrawlPlugin={
           return {
             markdown:'中文正文',
             rawHtml:snapshot,
-            metadata:{statusCode:200,creditsUsed:1,proxyUsed:true},
+            metadata:{statusCode:200,provider:'browser-container'},
+            screenshot:{contentType:'image/png',base64:'iVBORw0KGgo='},
             actions:{javascriptReturns:[{value:JSON.stringify({
               bodyRecognized:true,
               page:{url:${JSON.stringify(articleUrl)}},
@@ -54,13 +55,15 @@ const firecrawlPlugin={
         export async function scrape(_env,url){
           calls.push(url);
           const mode=globalThis.TASK_RUNTIME_SCRAPE_MODE;
-          if(mode==='rate-limit')throw new Error('Firecrawl HTTP 429: rate limit exceeded');
+          if(mode==='rate-limit')throw new Error('Browser HTTP 429: rate limit exceeded');
           if(mode==='long-rate-limit'){
-            const error=new Error('Firecrawl HTTP 429: rate limit exceeded');
+            const error=new Error('Browser HTTP 429: rate limit exceeded');
             error.retryAfterMs=12*60*60*1000;
             throw error;
           }
-          if(mode==='quota')throw new Error('Firecrawl HTTP 402: quota exhausted');
+          if(mode==='quota')throw new Error('Archive upload quota exhausted');
+          if(mode==='network')throw Object.assign(new Error('Browser connection closed'),{code:'browser_transient',retryable:true});
+          if(mode==='capacity')throw Object.assign(new Error('Browser HTTP 503: There is no Container instance available'),{code:'container_capacity',retryable:true});
           if(mode==='hang'){
             while(globalThis.TASK_RUNTIME_SCRAPE_MODE==='hang')await new Promise(resolve=>setTimeout(resolve,10));
             return success();
@@ -88,6 +91,11 @@ async function fixture({
         import {createTaskRuntime,handleFeedJobs} from './worker/task-runtime.mjs';
         import {CaptureWorkflow} from './worker/capture-workflow.mjs';
         import {workflowStep as step} from './tests/helpers/workflow-step.mjs';
+        globalThis.TASK_RUNTIME_WORKFLOW_SLEEPS=step.sleeps;
+        step.sleep=async(name,duration)=>{
+          step.sleeps.push({name,duration});
+          while(globalThis.TASK_RUNTIME_SCRAPE_MODE==='capacity')await new Promise(resolve=>setTimeout(resolve,10));
+        };
 
         globalThis.TASK_RUNTIME_QUEUE_BODIES=[];
         globalThis.TASK_RUNTIME_WORKFLOW_CALLS=[];
@@ -244,6 +252,7 @@ async function fixture({
             if(url.pathname==='/fixture/workflows')return Response.json({
               calls:globalThis.TASK_RUNTIME_WORKFLOW_CALLS,
               instances:[...instances.entries()].map(([id,value])=>({id,status:value.status})),
+            sleeps:globalThis.TASK_RUNTIME_WORKFLOW_SLEEPS,
             });
             if(url.pathname.startsWith('/api/'))return apiRoute(request,env);
             return worker.fetch(request,env);
@@ -264,7 +273,7 @@ async function fixture({
     format:'esm',
     platform:'browser',
     external:['node:buffer','node:*'],
-    plugins:[workersPlugin,firecrawlPlugin],
+    plugins:[workersPlugin,browserPlugin],
   });
   const mf=new Miniflare(convertV4MiniflareOptions({
     modules:true,
@@ -286,12 +295,13 @@ async function fixture({
     queueConsumers:{'feed-jobs':{maxBatchSize:1,maxRetries:3,deadLetterQueue:'feed-jobs-dlq'}},
   }));
   const db=await mf.getD1Database('DB'),bucket=await mf.getR2Bucket('ARCHIVE');
-  for(const name of ['0001_feed.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql',
+  for(const name of ['0001_feed.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql',
     ...(recheckRuntime?['0007_archive_versions.sql','0008_content_events.sql','0017_archive_recheck.sql']:[]),
-    '0018_outbox_receipts.sql']){
+    '0018_outbox_receipts.sql','0019_site_execution_leases.sql']){
     await applyMigration(db,await readFile(`migrations/${name}`,'utf8'));
   }
-  await db.prepare("INSERT INTO sources(id,name,url) VALUES ('jwc','教务处','https://jwc.cqu.edu.cn/')").run();
+  await db.prepare("UPDATE sources SET site_id='7fd03676e5751e9b6dd95ecb',list_url='https://jwc.cqu.edu.cn/index/tzgg.htm' WHERE id='jwc'").run();
+  await db.prepare("INSERT INTO sources(id,site_id,name,url,list_url) VALUES ('jwc','7fd03676e5751e9b6dd95ecb','教务处','https://jwc.cqu.edu.cn/','https://jwc.cqu.edu.cn/index/tzgg.htm')").run();
   await db.prepare("INSERT INTO articles(id,source_id,url,title,published_at,discovered_at,status,attempts,lease_until) VALUES (?,'jwc',?,'队列采集通知','2026-10-10','2026-10-11',?,?,?)")
     .bind(articleId,articleUrl,articleStatus,articleAttempts,leaseUntil).run();
   return {mf,db,bucket};
@@ -354,6 +364,8 @@ test('admin capture task survives queue handoff and archives one article for rea
     const article=await db.prepare('SELECT prefix,snapshot_key FROM articles WHERE id=?').bind(articleId).first();
     const snapshot=await bucket.get(article.snapshot_key);
     assert.match(await snapshot.text(),/队列采集通知/);
+    const screenshot=await(await mf.dispatchFetch('https://feed.test/api/screenshots/'+articleId)).arrayBuffer();
+    assert.deepEqual([...new Uint8Array(screenshot).subarray(0,4)],[0x89,0x50,0x4e,0x47]);
     const manifest=await(await bucket.get(`${article.prefix}/manifest.json`)).json();
     assert.equal(manifest.status,'complete');
   }finally{
@@ -623,13 +635,13 @@ test('unknown Workflow create outcome is resolved by getting the same instance i
   }
 });
 
-test('429 captures a bounded deferred retry sequence and stops after three attempts',async()=>{
+for(const [mode,errorCode] of [['rate-limit','rate_limited'],['network','browser_transient']])test(`${mode} captures a bounded deferred retry sequence and stops after three attempts`,async()=>{
   const {mf,db}=await fixture();
   try{
     await mf.dispatchFetch('https://feed.test/fixture/scrape-mode',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({mode:'rate-limit'}),
+      body:JSON.stringify({mode}),
     });
     const create=await mf.dispatchFetch('https://feed.test/internal/capture-tasks',{
       method:'POST',
@@ -646,8 +658,8 @@ test('429 captures a bounded deferred retry sequence and stops after three attem
     let current=await task(db,created.task.id);
     assert.equal(current.attemptNo,1);
     assert.ok(current.dueAt>Date.now()+14*60*1000,current.dueAt);
-    assert.match(current.lastError,/429|rate limit/i);
-    assert.equal(await attemptCode(db,created.task.id,1),'rate_limited');
+    assert.match(current.lastError,/429|rate limit|connection closed/i);
+    assert.equal(await attemptCode(db,created.task.id,1),errorCode);
     assert.equal((await scrapes(mf)).calls.length,1);
 
     for(let expectedAttempts of [2,3]){
@@ -899,6 +911,64 @@ async function workflowStatus(mf,id){
   return workflows.instances.find(instance=>instance.id===id)?.status??null;
 }
 
+test('same-site launch admission preserves task identity and attempts without a container call',async()=>{
+  const {mf,db}=await fixture();
+  try{
+    await mf.dispatchFetch('https://feed.test/fixture/scrape-mode',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'hang'}),
+    });
+    const first=await createCaptureTask(mf,'same-site-busy-first');
+    await waitFor(async()=>assert.equal((await task(db,first)).state,'running'));
+    const second=await createCaptureTask(mf,'same-site-busy-second');
+    const rows=await db.prepare('SELECT id,state,attempt_no AS attemptNo FROM tasks ORDER BY created_at').all();
+    assert.deepEqual(rows.results.map(row=>[row.id,row.state,row.attemptNo]).at(-1),[second,'queued',1]);
+    const lease=await db.prepare('SELECT owner_task_id FROM site_execution_leases').first();
+    assert.equal(lease.owner_task_id,first);
+    await mf.dispatchFetch('https://feed.test/fixture/scrape-mode',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'success',release:true}),
+    });
+    await waitFor(async()=>assert.equal((await task(db,first)).state,'succeeded'));
+    await waitFor(async()=>assert.equal((await task(db,second)).state,'succeeded'));
+    assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM task_attempts WHERE task_id=?').bind(second).first()).n,1);
+    assert.equal((await db.prepare('SELECT attempts FROM articles WHERE id=?').bind(articleId).first()).attempts,2);
+  }finally{await mf.dispose();}
+});
+
+test('platform capacity keeps the exact task attempt alive and does not charge it twice',async()=>{
+  const {mf,db}=await fixture();
+  try{
+    await mf.dispatchFetch('https://feed.test/fixture/scrape-mode',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'capacity'}),
+    });
+    const created=await createCaptureTask(mf,'platform-capacity-wait');
+    await waitFor(async()=>{
+      const lease=await db.prepare('SELECT owner_task_id,lease_until FROM site_execution_leases').first();
+      assert.ok(lease);assert.equal(lease.owner_task_id,null);assert.equal(lease.lease_until,0);
+    });
+    assert.equal((await task(db,created)).attemptNo,1);
+    assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM task_attempts WHERE task_id=?').bind(created).first()).n,1);
+    assert.equal((await db.prepare('SELECT attempts FROM articles WHERE id=?').bind(articleId).first()).attempts,0);
+    const workflows=await(await mf.dispatchFetch('https://feed.test/fixture/workflows')).json();
+    assert.deepEqual(workflows.sleeps,[{name:'capture-capacity-wait-0',duration:30000}]);
+    assert.equal(workflows.instances.find(instance=>instance.id===`task-${created}-a1`)?.status,'running');
+    const scrapes=await(await mf.dispatchFetch('https://feed.test/fixture/scrapes')).json();
+    assert.equal(scrapes.calls.length,1);
+    await mf.dispatchFetch('https://feed.test/fixture/scrape-mode',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'success'}),
+    });
+  }finally{await mf.dispose();}
+});
+
+async function createCaptureTask(mf,requestId){
+  const response=await mf.dispatchFetch('https://feed.test/internal/capture-tasks',{
+    method:'POST',headers:{Authorization:'Bearer test-admin-token','Content-Type':'application/json'},
+    body:JSON.stringify({articleId,requestId}),
+  });
+  const body=await response.json();
+  assert.equal(response.status,202,JSON.stringify(body));
+  return body.task.id;
+}
+
 async function waitFor(check){
   let lastError;
   for(let i=0;i<80;i++){
@@ -914,7 +984,7 @@ async function waitFor(check){
 }
 
 async function applyMigration(db,sql){
-  const statements=sql.split(/;\s*\n(?=CREATE|ALTER|PRAGMA|$)/)
+  const statements=sql.split(/;\s*\n(?=CREATE|ALTER|WITH|PRAGMA|$)/)
     .map(statement=>statement.trim())
     .filter(statement=>statement&&!/^PRAGMA\b/i.test(statement));
   for(const statement of statements)await db.prepare(statement).run();

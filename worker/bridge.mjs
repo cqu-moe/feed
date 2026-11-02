@@ -8,7 +8,7 @@ async function mac(env,payload) {
   return Buffer.from(await crypto.subtle.sign('HMAC',key,encoder.encode(payload))).toString('hex');
 }
 export async function issueGrant(env,source,runId,articleId) {
-  const grant={runId,articleId,channel:crypto.randomUUID(),origin:new URL(source.url).origin,expires:Date.now()+300000};
+  const grant={runId,articleId,channel:crypto.randomUUID(),origin:new URL(source.url).origin,expires:Date.now()+600000};
   const payload=Buffer.from(JSON.stringify(grant)).toString('base64url');
   const token=payload+'.'+await mac(env,payload);
   return {...grant,token};
@@ -20,7 +20,7 @@ async function readGrant(request,env) {
   const parts=token.split('.'); if(parts.length!==2||!await equal(parts[1],await mac(env,parts[0])))return null;
   try{
     const grant=JSON.parse(Buffer.from(parts[0],'base64url').toString());
-    if(!await trustedOrigin(env,grant.origin)||!Number.isFinite(grant.expires)||grant.expires<Date.now()||grant.expires>Date.now()+310000||!/^[-a-f0-9]{36}$/.test(grant.runId)||!/^[-a-f0-9]{36}$/.test(grant.channel))return null;
+    if(!await trustedOrigin(env,grant.origin)||!Number.isFinite(grant.expires)||grant.expires<Date.now()||grant.expires>Date.now()+610000||!/^[-a-f0-9]{36}$/.test(grant.runId)||!/^[-a-f0-9]{36}$/.test(grant.channel))return null;
     if(grant.articleId!==undefined&&!/^[a-f0-9]{24}$/.test(grant.articleId))return null;
     return {...grant,token};
   }catch{return null;}

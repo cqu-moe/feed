@@ -16,6 +16,8 @@ test('default dry run reads the catalog without credentials or network', async (
   assert.equal(summary.mode, 'dry-run');
   assert.equal(summary.safety.network, false);
   assert.equal(summary.safety.credentials, false);
+  assert.equal(summary.sites.flatMap(site => site.columns).length, 51);
+  assert.ok(summary.sites.flatMap(site => site.columns).every(column => column.refreshIntervalSec === 86400));
   assert.equal(stderr, '');
   assert.equal(stdout.includes(secret), false);
 });

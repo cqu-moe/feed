@@ -1,0 +1,118 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFile,readdir} from 'node:fs/promises';
+import {setTimeout as delay} from 'node:timers/promises';
+import {openBrowser} from './browser.mjs';
+import {createServer} from 'node:http';
+
+async function processes(){
+  const rows=[];
+  for(const pid of (await readdir('/proc')).filter(name=>/^\d+$/.test(name))){
+    try{
+      const stat=await readFile(`/proc/${pid}/stat`,'utf8');
+      const fields=stat.slice(stat.lastIndexOf(')')+2).split(' ');
+      const command=await readFile(`/proc/${pid}/cmdline`,'utf8');
+      rows.push({pid:Number(pid),state:fields[0],group:Number(fields[2]),command});
+    }catch(error){if(error.code!=='ENOENT'&&error.code!=='ESRCH')throw error;}
+  }
+  return rows;
+}
+
+test('cancelling a stalled capture rejects pending work and removes the Chrome process tree and profile',{timeout:30000},async()=>{
+  const before=new Set((await readdir('/tmp')).filter(name=>name.startsWith('feed-capture-')));
+  const controller=new AbortController();
+  const browser=await openBrowser({signal:controller.signal});
+  let group;
+  try{
+    await browser.navigate('data:text/html,<h1>Cancellation contract</h1>');
+    await browser.evaluate('document.readyState');
+    const root=(await processes()).find(row=>row.command.includes('--user-data-dir=/tmp/feed-capture-'));
+    assert.ok(root,'the actual Chrome browser started in an isolated profile');
+    group=root.group;
+    assert.ok((await processes()).filter(row=>row.group===group&&row.state!=='Z').length>1,'Chrome has real subprocesses');
+    const pending=browser.evaluate('new Promise(()=>{})',{timeoutMs:null}).then(()=>null,error=>error.message);
+    await delay(50);
+    // A stopped process cannot finish a graceful shutdown. This exercises the
+    // same forced cleanup used for a hung browser or an aborted capture.
+    process.kill(-group,'SIGSTOP');
+    controller.abort(new Error('Caller disconnected'));
+    await browser.close();
+    assert.equal(await pending,'Browser closed');
+    await delay(50);
+    assert.deepEqual((await processes()).filter(row=>row.group===group&&row.state!=='Z').map(row=>row.pid),[]);
+    assert.deepEqual((await readdir('/tmp')).filter(name=>name.startsWith('feed-capture-')&&!before.has(name)),[]);
+  }finally{
+    if(group){try{process.kill(-group,'SIGKILL');}catch(error){if(error.code!=='ESRCH')throw error;}}
+    await browser.close();
+  }
+});
+
+
+test('stalled VSB counters cannot block article parsing while content scripts still run',async()=>{
+  const requested=[];
+  const server=createServer((request,response)=>{
+    requested.push(request.url);
+    if(request.url.startsWith('/system/resource/js/'))return;
+    if(request.url==='/content.js'){
+      response.setHeader('content-type','text/javascript');
+      return response.end('window.articleValue="loaded"');
+    }
+    response.setHeader('content-type','text/html');
+    response.end('<script src="/system/resource/js/counter.js"></script><script src="/system/resource/js/dynclicks.js"></script><script src="/content.js"></script><article>Public notice</article>');
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  const browser=await openBrowser({signal:AbortSignal.timeout(15000)});
+  try{
+    await browser.navigate(`http://127.0.0.1:${server.address().port}/`);
+    let page;
+    for(let i=0;i<40;i++){
+      page=await browser.evaluate('({body:document.querySelector("article")?.textContent,value:window.articleValue})');
+      if(page?.body)break;
+      await delay(100);
+    }
+    assert.deepEqual(page,{body:'Public notice',value:'loaded'});
+    assert.equal(requested.some(url=>url.startsWith('/system/resource/js/')),false);
+  }finally{
+    await browser.close();server.closeAllConnections();
+    await new Promise(resolve=>server.close(resolve));
+  }
+});
+
+test('the signed CAPTCHA bridge can open without transient user activation',async()=>{
+  const browser=await openBrowser({signal:AbortSignal.timeout(15000)});
+  try{
+    await browser.navigate('data:text/html,<title>Notice</title><article>Public notice</article>');
+    const result=await browser.evaluate(`(() => {
+      const popup=window.open('about:blank','captcha-bridge','popup,width=360,height=240');
+      const result={opened:!!popup,hasOpener:popup?.opener===window};
+      popup?.close();return result;
+    })()`);
+    assert.deepEqual(result,{opened:true,hasOpener:true});
+  }finally{await browser.close();}
+});
+
+test('list probes skip the stalled CS carousel while captures retain it',async()=>{
+  let carouselRequests=0;
+  const server=createServer((request,response)=>{
+    if(request.url==='/2024/lib/js/swiper.min.js'){carouselRequests++;return;}
+    response.setHeader('content-type','text/html');
+    response.end('<main><a href="/info/1549/12202.htm">Notice</a></main><script src="/2024/lib/js/swiper.min.js"></script>');
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  try{
+    for(const list of [true,false]){
+      const browser=await openBrowser({signal:AbortSignal.timeout(15000),skipCarousel:list});
+      try{
+        await browser.navigate(`http://127.0.0.1:${server.address().port}/`);
+        let state;
+        for(let i=0;i<20;i++){
+          state=await browser.evaluate('({parsed:document.readyState!=="loading",title:document.querySelector("main a")?.textContent})');
+          if(state.title&&(list?state.parsed:carouselRequests>0))break;
+          await delay(100);
+        }
+        assert.deepEqual(state,{parsed:list,title:'Notice'});
+        assert.equal(carouselRequests,list?0:1);
+      }finally{await browser.close();}
+    }
+  }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
+});

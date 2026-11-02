@@ -573,7 +573,7 @@ async function fixture({pageCount=1,model='mistral-ocr-4-1',ocrRole='body-pdf',c
           }});
           const collector=createCollector({scrape:async()=>{
             globalThis.CAPTURE_SCRAPE_CALLS++;
-            return {markdown:page.bodyText,metadata:{statusCode:200,creditsUsed:1},
+            return {markdown:page.bodyText,metadata:{statusCode:200,provider:'browser-container'},
               actions:{javascriptReturns:[{value:JSON.stringify(page)}]}};
           }});
           const captureDb=failBatch?new Proxy(raw.DB,{get(target,key){
@@ -646,7 +646,7 @@ async function fixture({pageCount=1,model='mistral-ocr-4-1',ocrRole='body-pdf',c
       TASK_RUNTIME_ENABLED:'true',ARCHIVE_VERSIONS_ENABLED:'true',PDF_OCR_ENABLED:'false',PDF_OCR_MODEL:'mistral-ocr-4-1'}}));
   const db=await mf.getD1Database('DB'),bucket=await mf.getR2Bucket('ARCHIVE');
   try{
-    for(const name of ['0001_feed.sql','0002_auth.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql','0007_archive_versions.sql','0008_content_events.sql','0009_subscriptions.sql','0010_subscription_editing.sql','0011_archive_migration.sql','0013_notification_matching.sql']){
+    for(const name of ['0001_feed.sql','0002_auth.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql','0007_archive_versions.sql','0008_content_events.sql','0009_subscriptions.sql','0010_subscription_editing.sql','0011_archive_migration.sql','0013_notification_matching.sql','0019_site_execution_leases.sql']){
       await applyMigration(db,await readFile('migrations/'+name,'utf8'));
     }
     const legacy=await seedLegacyArchive({db,bucket,pageCount,model,ocrRole,caption,native,mixed,baselineNative});

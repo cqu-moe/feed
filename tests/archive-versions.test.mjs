@@ -1,7 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
 import { build } from 'esbuild';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 
@@ -17,7 +16,6 @@ const articleUrl = 'https://jwc.cqu.edu.cn/info/1082/1.htm';
 const retryArticleUrl = 'https://jwc.cqu.edu.cn/info/1082/2.htm';
 const pdfOnlyArticleUrl = 'https://jwc.cqu.edu.cn/info/1082/3.htm';
 const bodyPdfUrl = 'https://jwc.cqu.edu.cn/system/_content/download.jsp?urltype=1501&body.pdf';
-const utilsModulePath = resolve('worker/utils.mjs');
 
 const workersStub = {
   name: 'archive-version-workers-stub',
@@ -32,25 +30,23 @@ const workersStub = {
         loader: 'js',
         resolveDir: process.cwd(),
         contents: `
+          export class DurableObject{}
           export class WorkflowEntrypoint{constructor(env={}){this.env=env;}}
           export class WorkerEntrypoint{constructor(_ctx,env={}){this.env=env;}}
         `,
       };
     });
-    buildApi.onResolve({ filter: /\.\/firecrawl\.mjs$/ }, () => ({
-      path: 'archive-version-firecrawl',
+    buildApi.onResolve({ filter: /\.\/browser-scrape\.mjs$/ }, () => ({
+      path: 'archive-version-browser',
       namespace: 'archive-version-workers-stub',
     }));
     buildApi.onLoad({ filter: /.*/, namespace: 'archive-version-workers-stub' }, (args) => {
-      if (args.path !== 'archive-version-firecrawl') return undefined;
+      if (args.path !== 'archive-version-browser') return undefined;
       return {
         loader: 'js',
         resolveDir: process.cwd(),
         contents: `
-          import { reserveBudget } from ${JSON.stringify(utilsModulePath)};
-
           export async function scrape(env,url,options){
-            await reserveBudget(env,'firecrawl',Number(env.MAX_FIRECRAWL_PER_DAY||120));
             return globalThis.__archiveScrape(url,options);
           }
         `,
@@ -72,6 +68,7 @@ before(async () => {
 
         const providerState = {
           variant: 'a',
+          calls: 0,
           hold: false,
           failAfterCapture: false,
           failNextD1: false,
@@ -133,6 +130,7 @@ before(async () => {
         }
 
         globalThis.__archiveScrape = async (url) => {
+          providerState.calls++;
           while (providerState.hold) await new Promise(resolve => setTimeout(resolve, 20));
           if (providerState.failAfterCapture) providerState.failNextD1 = true;
           const incomplete = providerState.variant === 'incomplete';
@@ -140,7 +138,7 @@ before(async () => {
           return {
             markdown: capturedPage.bodyText,
             rawHtml: '<html><body><main>provider raw html</main></body></html>',
-            metadata: { statusCode: 200, creditsUsed: 1, proxyUsed: true },
+            metadata: { statusCode: 200, provider: 'browser-container' },
             actions: { javascriptReturns: [{ value: JSON.stringify(capturedPage) }] },
           };
         };
@@ -220,6 +218,7 @@ before(async () => {
             patchDatabase(env);
             installRuntimeAdapter(env);
             const url = new URL(request.url);
+            if (url.pathname === '/__test/provider' && request.method === 'GET')return Response.json({calls:providerState.calls});
             if (url.pathname === '/__test/provider' && request.method === 'POST') {
               Object.assign(providerState, await request.json());
               return Response.json({ ok: true });
@@ -477,11 +476,12 @@ before(async () => {
     '0009_subscriptions.sql',
     '0010_subscription_editing.sql',
     '0013_notification_matching.sql',
+    '0019_site_execution_leases.sql',
   ]) {
     await applyMigration(db, await readFile(`migrations/${name}`, 'utf8'));
   }
 
-  await db.prepare("INSERT OR IGNORE INTO sources(id,name,url) VALUES ('jwc','教务处','https://jwc.cqu.edu.cn/')").run();
+  await db.prepare("INSERT OR IGNORE INTO sources(id,site_id,name,url,list_url) VALUES ('jwc','7fd03676e5751e9b6dd95ecb','教务处','https://jwc.cqu.edu.cn/','https://jwc.cqu.edu.cn/index/tzgg.htm')").run();
   await db.prepare(`INSERT INTO articles(id,source_id,url,title,published_at,discovered_at,status,attempts,lease_until)
     VALUES (?,'jwc',?,'不可变版本通知','2026-01-03','2026-01-01','pending',0,0),
       (?,'jwc',?,'提交失败重试通知','2026-01-04','2026-01-01','pending',0,0),
@@ -582,7 +582,7 @@ test('immutable revisions preserve A-B-A bytes, reject incomplete defaults, and 
     assert.match(snapshot.headers.get('content-security-policy'), /script-src 'none'/);
   }
 
-  assert.equal(await firecrawlUsage(), 4);
+  assert.equal(await browserCalls(), 4);
 });
 
 test('a PDF-only observation with an unavailable required original remains blocked', { concurrency: false }, async () => {
@@ -624,12 +624,12 @@ test('a stale fence cannot add an observation after the current capture moves on
   const before = await detail(articleId, undefined, cookie);
   const revisionCountBefore = (await revisions(articleId, cookie)).revisions.length;
   await provider({ hold: true });
-  const usageBefore = await firecrawlUsage();
+  const usageBefore = await browserCalls();
   const created = await submit('request-stale-fence');
   await handleJobs();
   const held = await waitWorkflows(0);
   assert.equal(held.instances.at(-1)?.status, 'running');
-  await waitFor(async () => assert.equal(await firecrawlUsage(), usageBefore + 1));
+  await waitFor(async () => assert.equal(await browserCalls(), usageBefore + 1));
   await db.prepare('UPDATE articles SET capture_fence=capture_fence+1 WHERE id=?').bind(articleId).run();
   await provider({ hold: false });
   const outcome = await waitWorkflows(5000);
@@ -646,7 +646,7 @@ test('a stale fence cannot add an observation after the current capture moves on
 test('R2 success followed by D1 failure reuses the captured observation on retry', { concurrency: false }, async () => {
   const cookie = await login();
   await provider({ variant: 'a', failAfterCapture: true });
-  const usageBefore = await firecrawlUsage();
+  const usageBefore = await browserCalls();
   const created = await submit('request-r2-d1-retry', retryArticleId);
   await handleJobs();
   const firstAttempt = await waitWorkflows();
@@ -654,7 +654,7 @@ test('R2 success followed by D1 failure reuses the captured observation on retry
   const deferred = await taskStatus(created.task.id);
   assert.equal(deferred.task.state, 'deferred');
   assert.match(deferred.task.lastError ?? '', /injected D1 unavailable after R2 writes/);
-  assert.equal(await firecrawlUsage(), usageBefore + 1);
+  assert.equal(await browserCalls(), usageBefore + 1);
 
   await provider({ variant: 'a', failAfterCapture: false });
   const recovery = await recover(25 * 60 * 1000);
@@ -667,7 +667,7 @@ test('R2 success followed by D1 failure reuses the captured observation on retry
     retryWorkflow?.status === 'complete' && !retryWorkflow.result?.error,
     `Captured observation should be reusable on retry, got ${JSON.stringify(retryWorkflow)}`,
   );
-  assert.equal(await firecrawlUsage(), usageBefore + 1);
+  assert.equal(await browserCalls(), usageBefore + 1);
   const retryRevisions = await revisions(retryArticleId, cookie);
   assert.deepEqual(retryRevisions.revisions.map(({ revisionNo, state }) => ({ revisionNo, state })), [
     { revisionNo: 1, state: 'ready' },
@@ -707,11 +707,11 @@ async function capture(requestId, variant, id = articleId) {
 }
 
 async function replaySameTask(taskId) {
-  const usageBefore = await firecrawlUsage();
+  const usageBefore = await browserCalls();
   const response = await miniflare.dispatchFetch(`${feedOrigin}/__test/replay-job?index=0`, { method: 'POST' });
   if (!response.ok) assert.fail(await response.text());
   await waitWorkflows();
-  assert.equal(await firecrawlUsage(), usageBefore);
+  assert.equal(await browserCalls(), usageBefore);
 }
 
 async function handleJobs() {
@@ -742,16 +742,10 @@ async function taskStatus(taskId) {
   return response.json();
 }
 
-async function firecrawlUsage() {
-  const response = await miniflare.dispatchFetch(`${feedOrigin}/internal/status`, {
-    headers: { Authorization: 'Bearer test-admin-token' },
-  });
+async function browserCalls() {
+  const response = await miniflare.dispatchFetch(`${feedOrigin}/__test/provider`);
   if (!response.ok) assert.fail(await response.text());
-  const status = await response.json();
-  assert.ok(Array.isArray(status.usage));
-  return status.usage
-    .filter(({ kind }) => kind === 'firecrawl')
-    .reduce((total, { used }) => total + Number(used), 0);
+  return (await response.json()).calls;
 }
 
 async function login() {

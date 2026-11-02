@@ -12,7 +12,7 @@ test('external ingestion dates follow the Shanghai source calendar across UTC mi
     try {
       const fixture = createIngestionFixture();
       const list = async path => {
-        const response = await fixture.outbound(new Request('https://api.firecrawl.dev/v2/scrape', {
+        const response = await fixture.browserWorker.serviceBindings.EXTERNAL_BROWSER(new Request('https://browser.internal/scrape', {
           method: 'POST', body: JSON.stringify({ url: `https://school.example.test${path}`, formats: ['links'] }),
         }));
         assert.equal(response.status, 200);

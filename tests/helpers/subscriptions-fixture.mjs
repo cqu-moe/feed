@@ -37,16 +37,16 @@ const recheckWorkersPlugin = {
     buildApi.onResolve({ filter: /^cloudflare:workers$/ }, () => ({ path: 'cloudflare-workers', namespace: 'recheck-workers-stub' }));
     buildApi.onLoad({ filter: /.*/, namespace: 'recheck-workers-stub' }, () => ({
       loader: 'js',
-      contents: 'export class WorkflowEntrypoint{constructor(env={}){this.env=env;}}',
+      contents: 'export class DurableObject{}; export class WorkerEntrypoint{}; export class WorkflowEntrypoint{constructor(env={}){this.env=env;}}',
     }));
   },
 };
 
-const recheckFirecrawlPlugin = {
-  name: 'recheck-firecrawl-stub',
+const recheckBrowserPlugin = {
+  name: 'recheck-browser-stub',
   setup(buildApi) {
-    buildApi.onResolve({ filter: /firecrawl\.mjs$/ }, () => ({ path: 'recheck-firecrawl', namespace: 'recheck-firecrawl-stub' }));
-    buildApi.onLoad({ filter: /.*/, namespace: 'recheck-firecrawl-stub' }, () => ({
+    buildApi.onResolve({ filter: /browser-scrape\.mjs$/ }, () => ({ path: 'recheck-browser', namespace: 'recheck-browser-stub' }));
+    buildApi.onLoad({ filter: /.*/, namespace: 'recheck-browser-stub' }, () => ({
       loader: 'js',
       contents: `
         const calls=[];
@@ -60,7 +60,7 @@ const recheckFirecrawlPlugin = {
           const attachment=changed?'%PDF-1.7\\nchanged':'%PDF-1.7\\noriginal';
           const snapshot='<html><body><main><h1>复查通知</h1><p>'+body+'</p></main></body></html>';
           const attachmentUrl='https://jwc.cqu.edu.cn/system/_content/download.jsp?urltype=1501&recheck.pdf';
-          return {markdown:body,rawHtml:snapshot,metadata:{statusCode:200,creditsUsed:1},actions:{javascriptReturns:[{value:JSON.stringify({
+          return {markdown:body,rawHtml:snapshot,metadata:{statusCode:200,provider:'browser-container'},actions:{javascriptReturns:[{value:JSON.stringify({
             bodyRecognized:true,page:{url:${JSON.stringify(sharedArticleUrl)}},heading:'复查通知',bodyText:body,bodyCapturedAt:new Date().toISOString(),errors:[],
             artifacts:[
               {name:'attachment-1.pdf',base64:base64(attachment),contentType:'application/pdf'},
@@ -101,7 +101,7 @@ export async function subscriptionsFixture({
       import {createArchive} from './worker/archive.mjs';
       import {createCollector} from './worker/collect.mjs';
       import {finishCaptureTask} from './worker/task-runtime.mjs';
-      import {scrape} from './worker/firecrawl.mjs';
+      import {scrape} from './worker/browser-scrape.mjs';
       import {replayMatchOutbox} from './tests/helpers/notification-replay.mjs';
       import {reconcileRevision} from './worker/archive-reconcile.mjs';
       let mailClock=${clock ?? 'Date.now()'};
@@ -202,7 +202,7 @@ export async function subscriptionsFixture({
     external: ['node:buffer', 'node:*', 'cloudflare:workers'],
     plugins: [
       ...(telemetryHarness ? [telemetryStubPlugin] : []),
-      ...(recheckHarness ? [recheckWorkersPlugin, recheckFirecrawlPlugin] : []),
+      ...(recheckHarness ? [recheckWorkersPlugin, recheckBrowserPlugin] : []),
     ],
   });
   const policy = await build({
@@ -292,6 +292,7 @@ export async function subscriptionsFixture({
   const migrationNames = ['0001_feed.sql', '0002_auth.sql', '0003_collection_lease.sql', '0004_pdf_ocr.sql', '0005_task_runtime.sql', '0006_sources.sql', '0007_archive_versions.sql', '0008_content_events.sql', '0009_subscriptions.sql'];
   if (editingMigration) migrationNames.push('0010_subscription_editing.sql');
   migrationNames.push('0018_outbox_receipts.sql');
+  if (recheckMigration) migrationNames.push('0019_site_execution_leases.sql');
   migrationNames.push('0013_notification_matching.sql');
   if(mailHarness)migrationNames.push('0014_mail_delivery.sql','0016_mail_digests.sql');
   if(recheckMigration)migrationNames.push('0015_history_backfill.sql','0017_archive_recheck.sql');

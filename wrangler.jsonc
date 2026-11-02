@@ -16,7 +16,6 @@
     "AUTH_BASE_URL":"https://auth.cqu.moe",
     "POSTHOG_HOST":"https://p.cqu.moe",
     "ENVIRONMENT":"production",
-    "MAX_FIRECRAWL_PER_DAY":"0",
     "MAX_OCR_PER_DAY":"0",
     "MAX_ARTICLES_PER_RUN":"5",
     "CRAWL_ENABLED":"true",
@@ -51,6 +50,9 @@
   "d1_databases":[{"binding":"DB","database_name":"cqu-feed-mvp","database_id":"ba632f5c-c3b4-4f3c-ad57-1ac89895b02a","migrations_dir":"migrations"}],
   "r2_buckets":[{"binding":"ARCHIVE","bucket_name":"cqu-feed-archive"}],
   "ai":{"binding":"AI"},
+  "durable_objects":{"bindings":[{"name":"BROWSER","class_name":"FeedBrowser"}]},
+  "migrations":[{"tag":"feed-browser-v1","new_sqlite_classes":["FeedBrowser"]}],
+  "containers":[{"class_name":"FeedBrowser","image":"./crawler/Dockerfile","max_instances":10,"instance_type":"basic","constraints":{"regions":["APAC"]}}],
   "services":[
     {"binding":"AUTH","service":"cqu-moe-auth"},
     {"binding":"AUTH_FEED_RPC","service":"cqu-moe-auth","entrypoint":"AuthService"}

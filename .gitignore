@@ -13,3 +13,6 @@ playwright-report/
 
 # Task-local portable private inputs (never copy values into Git)
 private/
+
+# Local validation outputs
+work/

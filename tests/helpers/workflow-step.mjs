@@ -1,6 +1,7 @@
 // Preserve the platform's required retry-delay contract even when retries are
 // disabled. Cloudflare WorkflowStepConfig requires delay alongside limit.
 export const workflowStep={
+  sleeps:[],
   async do(_name,config,callback){
     if(typeof config==='function')return config();
     if(config?.retries&&!['string','number','function'].includes(typeof config.retries.delay)){
@@ -8,5 +9,5 @@ export const workflowStep={
     }
     return callback();
   },
-  async sleep(){},
+  async sleep(name,seconds){this.sleeps.push({name,seconds});},
 };
