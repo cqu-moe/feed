@@ -20,6 +20,41 @@ test('default dry run reads the catalog without credentials or network', async (
   assert.equal(stdout.includes(secret), false);
 });
 
+test('transport failures retry bounded reads without replaying a possibly committed write', async t => {
+  for (const mode of ['transient-read', 'persistent-read', 'committed-write']) await t.test(mode, async () => {
+    const api = apiFixture();
+    let failures = 0;
+    const attempt = run(['--apply', '--catalog', 'tests/fixtures/one-column.json'], {
+      baseUrl: 'https://feed.test', token: secret, sleep: async () => {},
+      fetch: async (url, options) => {
+        if (new URL(url).pathname === '/internal/sites') {
+          if (options.method === 'GET' && mode !== 'committed-write' && (mode === 'persistent-read' || failures === 0)) {
+            failures++;
+            throw new TypeError('fetch failed');
+          }
+          if (options.method === 'POST' && mode === 'committed-write') {
+            failures++;
+            await api.fetch(url, options);
+            throw new TypeError('fetch failed');
+          }
+        }
+        return api.fetch(url, options);
+      },
+    });
+    if (mode === 'persistent-read') {
+      await assert.rejects(attempt, /fetch failed/);
+      assert.equal(failures, 3);
+      assert.equal(api.sites.length, 0);
+    } else {
+      const result = await attempt;
+      assert.equal(result.ok, mode === 'transient-read');
+      assert.equal(failures, 1);
+      assert.equal(api.sites.length, 1);
+      assert.equal(api.calls.filter(call => call.method === 'POST' && call.path === '/internal/sites').length, 1);
+    }
+  });
+});
+
 test('repeat apply reuses enabled verified sources without recreating or reverifying', async () => {
   const api = apiFixture();
   api.sources.created = {
