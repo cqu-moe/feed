@@ -5,7 +5,7 @@ import {join} from 'node:path';
 import {createServer} from 'node:net';
 import {setTimeout as delay} from 'node:timers/promises';
 
-export async function openBrowser({signal}={}){
+export async function openBrowser({signal,skipCarousel=false}={}){
   const executablePath=process.env.CHROME_EXECUTABLE;
   if(!executablePath)throw new Error('CHROME_EXECUTABLE required');
   const documents=[];
@@ -105,7 +105,8 @@ export async function openBrowser({signal}={}){
     mainFrameId=(await call('Page.getFrameTree')).frameTree.frame.id;
     await call('Network.enable');
     // VSB visit counters can stall the HTML parser before the notice body.
-    await call('Network.setBlockedURLs',{urls:['*/system/resource/js/counter.js*','*/system/resource/js/dynclicks.js*']});
+    await call('Network.setBlockedURLs',{urls:['*/system/resource/js/counter.js*','*/system/resource/js/dynclicks.js*',
+      ...(skipCarousel?['*/2024/lib/js/swiper.min.js']:[])]});
     await call('Emulation.setLocaleOverride',{locale:'zh-CN'});
     await call('Emulation.setTimezoneOverride',{timezoneId:'Asia/Shanghai'});
     const {product}=await call('Browser.getVersion');

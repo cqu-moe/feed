@@ -90,3 +90,29 @@ test('the signed CAPTCHA bridge can open without transient user activation',asyn
     assert.deepEqual(result,{opened:true,hasOpener:true});
   }finally{await browser.close();}
 });
+
+test('list probes skip the stalled CS carousel while captures retain it',async()=>{
+  let carouselRequests=0;
+  const server=createServer((request,response)=>{
+    if(request.url==='/2024/lib/js/swiper.min.js'){carouselRequests++;return;}
+    response.setHeader('content-type','text/html');
+    response.end('<main><a href="/info/1549/12202.htm">Notice</a></main><script src="/2024/lib/js/swiper.min.js"></script>');
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  try{
+    for(const list of [true,false]){
+      const browser=await openBrowser({signal:AbortSignal.timeout(15000),skipCarousel:list});
+      try{
+        await browser.navigate(`http://127.0.0.1:${server.address().port}/`);
+        let state;
+        for(let i=0;i<20;i++){
+          state=await browser.evaluate('({parsed:document.readyState!=="loading",title:document.querySelector("main a")?.textContent})');
+          if(state.title&&(list?state.parsed:carouselRequests>0))break;
+          await delay(100);
+        }
+        assert.deepEqual(state,{parsed:list,title:'Notice'});
+        assert.equal(carouselRequests,list?0:1);
+      }finally{await browser.close();}
+    }
+  }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
+});

@@ -17,7 +17,9 @@ export function validateJob(input){
 }
 
 export async function scrapePage(job,signal){
-  const start=Date.now(),browser=await openBrowser({signal});
+  // CS's list carousel can stall parsing after all notice cards are present.
+  const skipCarousel=Boolean(job.readiness?.articlePattern)&&new URL(job.url).hostname==='cs.cqu.edu.cn';
+  const start=Date.now(),browser=await openBrowser({signal,skipCarousel});
   try{
     await browser.navigate(job.url);
     const readyDeadline=Date.now()+120000;
