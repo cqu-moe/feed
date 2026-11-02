@@ -1,5 +1,7 @@
 # MVP 验收记录
 
+当前自有采集的隔离云端证据见 [按站 Container 验收](acceptance-container.md)。下文保留历史 MVP 记录。
+
 日期：2026-10-11（Asia/Shanghai）。入口：https://cqu-feed.user-unauthorized.workers.dev/
 
 ## 云端业务

@@ -59,7 +59,7 @@ Workers secrets：
 
 | Secret | 用途 |
 | --- | --- |
-| `BRIDGE_SECRET` | 给 Container 源站页面签发 5 分钟源站 origin 绑定 HMAC capability |
+| `BRIDGE_SECRET` | 给 Container 源站页面签发 10 分钟源站 origin 绑定 HMAC capability，与既有采集租约对齐 |
 | `TEXTIN_APP_ID` / `TEXTIN_SECRET_CODE` | 默认 TextIn xParse PDF OCR 凭据 |
 | `MISTRAL_API_KEY` | 可选，仅显式历史对比；默认采集不调用 |
 | `ADMIN_TOKEN` | `/internal/*` 管理 Bearer token |
@@ -331,9 +331,9 @@ Cron 每天采集的 5 个来源来自 `worker/sources.json`：
 - 识别常见正文容器，提取 `bodyText`。
 - 扫描附件链接、iframe、embed、object。
 - 附件下载保持在源站 origin，并使用原浏览器会话。
-- 每篇最多处理 8 个附件，总下载动作时间约 165 秒。
+- 每篇最多处理 8 个附件；不再设置附件集合或页面动作的固定总限时，单次请求超时及既有 Workflow/业务租约仍保留。
 - 单附件最大 64 MiB；小于等于 2 MiB 的文件随页面动作返回，大于 2 MiB 的文件经临时 Worker 桥接流式上传 R2。
-- 四位数字 CAPTCHA 最多尝试 2 次。验证码图片和识别结果经 5 分钟 HMAC capability 关联到具体 run、文章和源站 origin。
+- 四位数字 CAPTCHA 最多尝试 2 次。验证码图片和识别结果经 10 分钟 HMAC capability 关联到具体 run、文章和源站 origin。
 - Worker 校验文件名、长度、magic bytes、Origin 和每日上传字节，R2 写入后用 SHA-256 manifest 读回验证。
 
 ### 存档产物
