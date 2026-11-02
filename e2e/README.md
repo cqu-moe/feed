@@ -98,7 +98,7 @@ Miniflare consumers start the unmodified `DiscoveryWorkflow`, `CaptureWorkflow`
 and `ArchiveOcrWorkflow`; no direct handler/step calls or ready-state inserts.
 Auth signup, verification, OAuth, RPC and the reader remain real.
 
-Only Firecrawl's school/article response and TextIn's OCR response are synthetic.
+Only the browser school/article response and TextIn's OCR response are synthetic.
 The provider ledger records requests independently from product accounting.
 Synthetic PDFs reuse the existing mixed-PDF fixture. This suite owns ingestion
 completeness, source/pagination deduplication, task/receipt reuse, failure recovery,
@@ -258,7 +258,7 @@ there is no separate MailWorkflow in the product architecture. Administrator
 HTTP recovery dispatches committed outbox work. The fixture never inserts ready,
 message, delivery, receipt, acceptance or completion facts into product storage.
 
-Only the external school/Firecrawl responses and Resend boundary are synthetic.
+Only the external school/browser responses and Resend boundary are synthetic.
 The mail provider ledger accepts only synthetic credentials, sender and
 `example.test` recipients, and enforces stable key/payload identity. Auth's
 verification email is separate from Feed's delivery ledger. Callbacks use HMAC

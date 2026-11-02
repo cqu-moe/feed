@@ -26,7 +26,6 @@
 | `BASE_URL` | `https://feed.cqu.moe` | OAuth 回调、桥接 URL 和安全 Origin 判断 |
 | `BRIDGE_BASE_URL` | `https://cqu-feed.user-unauthorized.workers.dev` | 机器采集的验证码/附件辅助窗口；缺省时沿用 `BASE_URL`，使用现有 Worker 入口避免业务域名的浏览器挑战阻断弹窗 |
 | `AUTH_BASE_URL` | `https://auth.cqu.moe` | OAuth/JWKS/userinfo/introspection 基础地址 |
-| `MAX_FIRECRAWL_PER_DAY` | `0` | 不设应用调用上限；每次尝试仍按 UTC 日记账 |
 | `MAX_OCR_PER_DAY` | `0` | 不设验证码调用上限；Workers AI 按实际神经元计量 |
 | `MAX_ARTICLES_PER_RUN` | `5` | 每个来源 Workflow 每次运行最多处理的通知数 |
 | `CRAWL_ENABLED` | `true` | 设为非 `true` 禁止每日和手动启动采集 |
@@ -44,25 +43,23 @@
 | `MAX_PDF_OCR_PAGES_PER_DAY` | `0` | 不设应用日页数上限，保留预留页数账本 |
 | `MAX_PDF_OCR_PAGES_PER_MONTH` | `0` | 不设应用月页数上限，保留预留页数账本 |
 
-2026-10-14 用户授权充分使用免费/已有套餐额度，进入按量收费后通知。上表四个 `0` 仅表示取消对应应用上限，仍原子累计尝试/预留页数；正整数继续执行硬限制，负数或非法数值拒绝运行。旧账本不清零。生产人民币100元/月预算保留，它是跨供应商运维预算，当前不是供应商账号自动封顶；不自动充值、买套餐或开启供应商额外付费选项。
+2026-10-14 用户授权充分使用免费/已有套餐额度，进入按量收费后通知。上表 OCR 的 `0` 仅表示取消对应应用上限，仍原子累计尝试/预留页数；正整数继续执行硬限制，负数或非法数值拒绝运行。旧账本不清零。生产人民币100元/月预算保留，它是跨供应商运维预算，当前不是供应商账号自动封顶；不自动充值、买套餐或开启供应商额外付费选项。
 
-用量核对：管理员 `GET /internal/operations/provider-usage` 只读返回 Firecrawl credit 及 TextIn 有效套餐、余额；部分不可读显示未知，不伪装成零费用。`node scripts/read-ai-usage.mjs` 使用已有 Wrangler 登录或环境变量中的 Cloudflare token，读取账号今日/昨日实际神经元；包含昨日是为了北京时间08:10能看到08:00 UTC日切前的用量。脚本不提交识别请求，不输出凭据。它是整个 Cloudflare 账号口径，不能直接当作 Feed 的人民币账单。
+用量核对：管理员 `GET /internal/operations/provider-usage` 只读返回 TextIn 有效套餐、余额；部分不可读显示未知，不伪装成零费用。`node scripts/read-ai-usage.mjs` 使用已有 Wrangler 登录或环境变量中的 Cloudflare token，读取账号今日/昨日实际神经元；包含昨日是为了北京时间08:10能看到08:00 UTC日切前的用量。脚本不提交识别请求，不输出凭据。它是整个 Cloudflare 账号口径，不能直接当作 Feed 的人民币账单。
 
 - Workers AI 免费额度为10,000神经元/UTC日，超出部分官方价0.011美元/千神经元；当前验证码模型按输入/输出token计量，不是固定每次1神经元。
-- Firecrawl Free 方案为每月1,000 credits；免费方案耗尽会拒绝请求，不自动进入 PAYG。读取实际账号账期，不按UTC月推算其重置时间。credit减少本身不等于现金收费。
 - TextIn 使用其独立有效套餐/赠送余额；包有效期与服务范围必须匹配。额度包消耗不等于按量现金支出，T币不能未经核实就当成人民币；跟踪余额、`unpaid` 与 `pay_type` 的变化。
 - 08:10/20:10的既有监控比较保存的供应商快照，首次看到实际进入按量费用时通知；这是定时核对，会有通知延迟。接近100元预算暂停新增付费采集/OCR并报告；读不到账单时报告不可核实，不声称已被自动硬封顶。供应商402、未知受理、OCR已有请求回执仍禁止盲目自动重试。
 
-依据：[Workers AI pricing](https://developers.cloudflare.com/workers-ai/platform/pricing/)、[Firecrawl billing](https://github.com/firecrawl/firecrawl-docs/blob/main/billing.mdx)、[TextIn套餐查询](https://www.textin.com/document/open_api_package)、[TextIn余额查询](https://www.textin.com/document/open_api_balance)。
+依据：[Workers AI pricing](https://developers.cloudflare.com/workers-ai/platform/pricing/)、[TextIn套餐查询](https://www.textin.com/document/open_api_package)、[TextIn余额查询](https://www.textin.com/document/open_api_balance)。
 
-`MAX_UPLOAD_BYTES_PER_DAY` 未写入 `wrangler.jsonc` 时使用代码默认值 268,435,456 字节，即 256 MiB。它只限制 Firecrawl 页面通过 `/internal/upload` 桥接上传的附件字节，不限制 Worker 直接 `put` 的正文、快照、截图、manifest 等对象。
+`MAX_UPLOAD_BYTES_PER_DAY` 未写入 `wrangler.jsonc` 时使用代码默认值 268,435,456 字节，即 256 MiB。它只限制 Container 源站页面通过 `/internal/upload` 桥接上传的附件字节，不限制 Worker 直接 `put` 的正文、快照、截图、manifest 等对象。
 
 Workers secrets：
 
 | Secret | 用途 |
 | --- | --- |
-| `FIRECRAWL_API_KEY` | 已确认生产 Worker 存在同名 Secret；未读取值，真实付费调用有效性待隔离验收。未配置时回退 keyless 入口 |
-| `BRIDGE_SECRET` | 给 Firecrawl 页面签发 5 分钟源站 origin 绑定 HMAC capability |
+| `BRIDGE_SECRET` | 给 Container 源站页面签发 5 分钟源站 origin 绑定 HMAC capability |
 | `TEXTIN_APP_ID` / `TEXTIN_SECRET_CODE` | 默认 TextIn xParse PDF OCR 凭据 |
 | `MISTRAL_API_KEY` | 可选，仅显式历史对比；默认采集不调用 |
 | `ADMIN_TOKEN` | `/internal/*` 管理 Bearer token |
@@ -75,7 +72,6 @@ Workers secrets：
 ```sh
 pnpm exec wrangler secret put TEXTIN_APP_ID --name cqu-feed
 pnpm exec wrangler secret put TEXTIN_SECRET_CODE --name cqu-feed
-pnpm exec wrangler secret put FIRECRAWL_API_KEY --name cqu-feed
 pnpm exec wrangler secret put BRIDGE_SECRET --name cqu-feed
 pnpm exec wrangler secret put ADMIN_TOKEN --name cqu-feed
 pnpm exec wrangler secret put FEED_AUTH_CLIENT_ID --name cqu-feed
@@ -85,24 +81,9 @@ pnpm exec wrangler secret put FEED_SESSION_ENCRYPTION_KEY --name cqu-feed
 
 不要把 `.private/production-secrets.json` 提交到仓库，也不要在文档、日志或终端回显中复制其内容。
 
-### Firecrawl 付费密钥配置
+### 已退出的采集供应商
 
-当前生产 Worker 的密钥名固定为 `FIRECRAWL_API_KEY`。在已安装项目依赖的检出中执行：
-
-```sh
-pnpm exec wrangler secret put FIRECRAWL_API_KEY --name cqu-feed
-```
-
-仅在 Wrangler 的交互提示中粘贴密钥；不要放进命令参数、聊天、`wrangler.jsonc` 或 Git。也可在 Cloudflare 的 `cqu-feed` → Settings → Variables and Secrets 中添加同名 **Secret**。该密钥用于运行时，不是 Workers Builds 的构建变量。
-
-验证时只列名称：
-
-```sh
-pnpm exec wrangler secret list --name cqu-feed
-```
-
-看到名称只能证明配置存在，真实抓取与付费额度需要在验收时单独验证。正式版隔离验收 Worker 的 secrets 不会自动继承生产配置；待隔离资源确定后，对该 Worker 单独执行同一配置步骤。不要为配置密钥运行 `pnpm deploy`，它还会执行远程数据库迁移。
-
+Firecrawl 的客户端、余额查询、专用配置和自动/手动回退均已移除；旧 `usage` 账本仅用于历史统计。生产切换完成后删除旧 `FIRECRAWL_API_KEY` Secret，不读取其值。浏览器 Container 由现有 `cqu-feed` Worker 及原 Builds 流程管理，绑定为 `BROWSER`，不另建浏览器 Worker。
 
 ## 2. Auth 与访问控制
 
@@ -194,9 +175,9 @@ T03 使用 `tasks`、`task_attempts` 和 `outbox` 保存单篇采集意图、每
 
 恢复规则由每 5 分钟 cron 和手动 recover 共用：数据库已提交但 Queue 暂不可用时，outbox 保留并在到期后重发；Queue 已接收但 sent 收据未提交时允许重复发送，消费者按持久任务身份幂等。create 结果未知或记账失败时使用同一 `task-<taskId>-a<attempt>` 实例 ID 查询，不创建随机新实例。只有确认旧实例 terminal 后，到期 deferred 才递增 attempt 并原子写入新 outbox。
 
-Firecrawl 429 保存为 `rate_limited` deferred，默认最多 3 次 attempt；402、预算或额度耗尽保存为 `quota_exhausted` blocked，不按分钟级自动重试。`Archive.capture` 抢占失败返回 skipped 时任务只能延期，不能记成功；这可能表示其他有效采集持有 lease。R2 临时产物允许留下，attachment、article 更新和 task attempt receipt 必须由同一 fence、attempt 和提交时间守卫下的 D1 原子批发布；旧 attempt 或过期 fence 不能污染权威数据。
+网络断开、超时和暂态服务错误进入有限退避；确认的 404、解析和文件错误明确失败。源站 429 保存为 `rate_limited` deferred，默认最多 3 次 attempt；402、预算或额度耗尽保存为 `quota_exhausted` blocked，不按分钟级自动重试。`Archive.capture` 抢占失败返回 skipped 时任务只能延期，不能记成功；这可能表示其他有效采集持有 lease。R2 临时产物允许留下，attachment、article 更新和 task attempt receipt 必须由同一 fence、attempt 和提交时间守卫下的 D1 原子批发布；旧 attempt 或过期 fence 不能污染权威数据。
 
-本地测试使用真实 Miniflare D1/R2/Queue、真实业务采集代码、Firecrawl 外部替身和可控 Workflow 执行适配器。Miniflare Queue broker 是内存态，本地投递和恢复通过不能证明 Cloudflare 队列留存、DLQ、实际 Workflow 持久步骤或生产账号额度行为；这些属于后续隔离云验收。
+本地测试使用真实 Miniflare D1/R2/Queue、真实业务采集代码、浏览器外部边界替身和可控 Workflow 执行适配器。Miniflare Queue broker 是内存态，本地投递和恢复通过不能证明 Cloudflare 队列留存、DLQ、实际 Workflow 持久步骤或生产账号额度行为；这些属于后续隔离云验收。
 
 ## 4A. T15 运行诊断与恢复
 
@@ -212,7 +193,7 @@ Worker 内没有列出 Cloudflare DLQ 原消息的 API。运营诊断以持久 o
 
 人工重放先在 D1 原子占用新的等待窗口；并发或窗口内再次点击返回 409。诊断暂时隐藏窗口内候选。Queue 响应丢失或发送前进程退出也保留该窗口，到期后才可再次按原身份重放。消费者写入的 processed 回执和首次 processed 时间不会被迟到的 replay 或失败回执覆盖。
 
-指标包含最老 queued outbox/active task/immediate delivery、live 发现到 ready 的最小/最大延迟、必要缺项、Firecrawl/OCR 用量与页数、Auth unavailable、邮件 unknown，以及仍被版本或派生结果引用的不可变原件数量。诊断只覆盖 T03–T11 的 live 采集、版本、匹配和及时邮件链路；每日摘要、复查、补抓和迁移由各自任务接入恢复行为。
+指标包含最老 queued outbox/active task/immediate delivery、live 发现到 ready 的最小/最大延迟、必要缺项、历史采集/OCR 用量与页数、Auth unavailable、邮件 unknown，以及仍被版本或派生结果引用的不可变原件数量。诊断只覆盖 T03–T11 的 live 采集、版本、匹配和及时邮件链路；每日摘要、复查、补抓和迁移由各自任务接入恢复行为。
 
 指定任务恢复只从任务账本推进。对已有实例的 active、failed 和到期 deferred 均查询同一 `task-<taskId>-a<attempt>` 的真实平台状态；平台仍 active/waiting 时返回未恢复，未知状态或查询失败不启动下一次尝试。只有确认该 attempt 的平台实例 terminal 后，failed 或到期 deferred 才原子递增 attempt 并写入新 start-job outbox。恢复及 start-job 人工重放要求 `TASK_RUNTIME_ENABLED`、`CRAWL_ENABLED` 同时开启；诊断读取、事件和邮件操作不受采集开关影响。402/预算耗尽保持 blocked，不自动进入付费重试。邮件 `submission_unknown` 只显示人工处理状态；未确认受理前不提供重发按钮，避免同一邮件重复投递。
 
@@ -335,20 +316,15 @@ Cron 每天采集的 5 个来源来自 `worker/sources.json`：
 
 这些路径均相对于各自站点 origin；正文链接必须匹配对应 `articlePattern` 且保持同源。
 
-Cron 每天为 5 个来源各创建一个 `FeedIngest` 实例：
+当前 `*/5 * * * *` Cron 只为启用、验证通过且到期的栏目写入任务和 outbox；DiscoveryWorkflow 与 CaptureWorkflow 执行浏览器工作。站点对应一个稳定 Container 身份，同站任务串行，排队和长退避留在 Worker。详见 [按站采集设计](container-collection-rollout.md)。
 
-1. `start`：upsert 来源、创建 run，并把过期 `collecting` 状态恢复为 failed/partial。
-2. `discover-*`：Firecrawl 抓列表，最多 12 页；解析同源、匹配 article pattern 且日期在 30 天窗口内的链接。
-3. `pending`：选出 `pending`、`partial`、`failed` 且 `attempts<3` 的通知，每来源最多 40 篇。
-4. `article-*`：用 D1 lease 抢占通知，调用 Firecrawl 抓正文和附件，写 R2/D1。
-5. 每篇间隔 2 秒；额度、429、402、quota、credit 类错误会停止当前来源后续文章。
-6. `finish`：写 run 状态、来源最近运行时间和错误摘要，并清理超过 1 天的 OCR slot。
+旧 `FeedIngest` 保留平台类供历史实例结束，但调用只返回 retired，不再读取来源或抓取通知。管理入口 `/internal/run` 只调度当前到期栏目并派发既有任务，不补跑历史失败任务、不启动旧 Workflow。
 
-初始 30 天窗口按每个 Workflow 创建时的 `cutoff` 计算。日期缺失的列表条目不会入队；这是为了防止把旧通知误收进 30 天窗口，代价是站点结构变化时会记录“无可靠日期”而不是补齐。
+日期缺失的列表条目不猜测发布时间，历史补抓需要单独授权。
 
-### Firecrawl 页面动作
+### Container 源站页面动作
 
-正文采集发生在 Firecrawl 的源站云页面中：
+正文采集发生在 Container 的源站浏览器页面中：
 
 - 识别常见正文容器，提取 `bodyText`。
 - 扫描附件链接、iframe、embed、object。
@@ -396,7 +372,7 @@ CREATE VIRTUAL TABLE article_search USING fts5(
 
 - 通知标题；
 - 页面正文文本；
-- Firecrawl Markdown 正文；
+- 页面动作提取的正文；
 - 正文 PDF 的 unpdf 文字层和成功发布的 TextIn OCR；已迁移 MVP 普通 PDF 附件结果也继续可读、可搜索。
 
 不索引：
@@ -440,23 +416,21 @@ node scripts/manage.mjs auth-check
 
 | 边界 | 当前值 | 失效行为 |
 | --- | --- | --- |
-| Firecrawl 全局每日请求 | 不限（配置0） | 继续记账；供应商402仍阻塞，不自动充值 |
 | 验证码 OCR 全局每日次数 | 不限（配置0） | 继续记账，按账号实际神经元检查费用 |
-| legacy每来源每次运行处理通知 | 5 | 仅旧工作流；正式Queue任务无这个批次数上限 |
 | 每次发现列表页数 | 2 | 正式发现保存游标、分段继续；不是每天只能发现两篇 |
-| 文章内容错误尝试次数 | 3 | 之后人工排查；全局额度/限流延期不消耗次数 |
+| 文章内容错误尝试次数 | 3 | 之后人工排查；容量等待不消耗真实采集次数，源站失败仍计次 |
 | 附件数量 | 每篇 8 个 | 超出的候选附件不下载，记为 attachment limit reached |
 | 附件大小 | 64 MiB | 拒绝下载/上传 |
 | 桥接附件上传 | 默认每日 256 MiB | 返回 429，相关附件失败 |
 | 页面动作内嵌产物 | 8 MiB | 超 2 MiB 的附件改走桥接；其他 artifact 超限失败 |
 | Worker 直接写 R2 artifact | 12 MiB | 对应产物失败，文章可能 partial |
-| Firecrawl HTTP 响应 | 40 MiB | 请求失败 |
+| Container HTTP 响应 | 40 MiB | 请求失败 |
 
-额度在 D1 `usage(day, kind, used)` 中按自然日保留。Firecrawl 和 OCR 在发起外部调用前先占用额度，因此外部调用失败通常也会消耗一次。桥接上传额度在验证请求后、R2 完成前增加，流式上传中途失败也可能消耗字节额度。
+额度在 D1 `usage(day, kind, used)` 中按自然日保留。OCR 在发起外部调用前先占用额度，因此外部调用失败通常也会消耗一次。桥接上传额度在验证请求后、R2 完成前增加，流式上传中途失败也可能消耗字节额度。
 
 早期 MVP 的120次/天与30天补抓示例已不代表当前生产配置。正式版补抓按来源配置、Queue任务和供应商容量推进；不能把 `partial` 直接当作站点不可用，应同时检查 task error、required artifacts 和供应商余额。
 
-Workers AI、R2 PUT、R2 存储、D1 行数和 Workers CPU 都会产生费用或免费额度消耗。D1 的 Firecrawl/OCR/上传额度不约束快照、正文、截图、manifest 和小附件写入，也不约束用户读取流量。扩大站点、历史窗口或放开附件前必须重新估算并调整这些上限。
+Workers AI、R2 PUT、R2 存储、D1 行数和 Workers CPU 都会产生费用或免费额度消耗。D1 的 OCR/上传额度不约束快照、正文、截图、manifest 和小附件写入，也不约束用户读取流量。扩大站点、历史窗口或放开附件前必须重新估算并调整这些上限。
 
 ## 10. 安全模型
 
@@ -475,7 +449,7 @@ Workers AI、R2 PUT、R2 存储、D1 行数和 Workers CPU 都会产生费用或
 
 验收记录见 [acceptance.md](acceptance.md)，区分本地测试、真实账号业务验证和云端对象完整性。
 
-清理已保存正文中的阅读器提示、PDF 元数据和网页导航，不重新调用 Firecrawl：
+清理已保存正文中的阅读器提示、PDF 元数据和网页导航，不重新访问源站：
 
 ```sh
 node scripts/clean-reading.mjs --remote
@@ -531,7 +505,7 @@ node scripts/compare-ocr.mjs publish textin-xparse-auto
 
 禁用来源后修改适配配置会在同一事务中取消旧配置的未完成 backfill task，清空当前 run/cursor 并回到 `idle`；原件、已完成任务和历史关联保留。新配置重新验证并启用后可启动独立新 run，即便重用先前 requestId 也不会重用旧配置任务。
 
-本地验收：真实 Worker 管理及 BFF 阅读入口、Miniflare D1/R2/Queue、外部 Auth 与 Firecrawl Adapter；覆盖异步验证、重复请求、旧配置结果、分页原子恢复、多栏目身份、限流隔离、暂停阅读和日期精度。真实站点样本、云 Queue/Workflow 交接与生产开关验收属于 T17/T18，不能用这些本地结果替代。
+本地验收：真实 Worker 管理及 BFF 阅读入口、Miniflare D1/R2/Queue、外部 Auth 与浏览器 Adapter；覆盖异步验证、重复请求、旧配置结果、分页原子恢复、多栏目身份、限流隔离、暂停阅读和日期精度。真实站点样本、云 Queue/Workflow 交接与生产开关验收属于 T17/T18，不能用这些本地结果替代。
 
 ## 正式版邮件（T11）
 

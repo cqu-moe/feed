@@ -6,8 +6,8 @@
 
 ## 功能
 
-- 每五分钟检查到期栏目，按各自刷新间隔发现通知；新栏目通过样本验证后启用，本次五站栏目目录设为每周检查一次。
-- 使用 Firecrawl 云页面抓取列表和正文，并在原始源站会话中下载附件。
+- 每五分钟检查到期栏目；全部栏目按日检查、按站错峰，新栏目通过样本验证后启用。
+- 复用现有 Feed Worker，为每个站点按需启动浏览器 Container；同站串行抓取列表、正文和附件，结果传完且无后续任务时立即停止。
 - 遇到四位数字附件验证码时，通过带时限 HMAC 授权的 Worker 桥接调用 Workers AI OCR，再用源站会话重试下载。
 - 将正文、正文型 PDF 文本、原貌 HTML、截图和附件保存到 R2；通知元数据和索引进 D1。
 - 扫描正文 PDF 自动进入 TextIn Workflow，仅无文字层且有图像的页调用 OCR；正式版与 MVP 共享已付费缓存，保留原 PDF 对照；[实现与计费保护](docs/pdf-ocr-design.md)。
@@ -19,7 +19,7 @@
 ```text
 Cloudflare Cron
   -> 到期栏目 -> DiscoveryWorkflow -> 单篇 CaptureWorkflow
-  -> Firecrawl scrape（列表解析 / 正文抓取 / 源站内附件下载）
+  -> 按站 Container（列表解析 / 正文抓取 / 原会话附件下载）
   -> Worker 桥接（CAPTCHA OCR、超大附件流式上传）
   -> Workers AI（CAPTCHA 识别） / unpdf（PDF 文字层）
   -> R2（正文、原貌、截图、附件、manifest）
@@ -71,12 +71,12 @@ pnpm check:design
 1. D1 迁移必须先于 Worker 依赖新表上线。
 2. 日常部署 push 到 main，由 Cloudflare Git Connector 检查、构建、应用 D1 迁移并部署；GitHub Actions 负责检查。配置见 [docs/ci-cd.md](docs/ci-cd.md)。
 3. `BASE_URL` 必须与 OAuth 回调 origin 一致；更换域名时要同步更新 Auth client 的 redirect URI。
-4. Firecrawl、Auth、桥接和管理入口的敏感配置都通过 Workers secrets 注入。
+4. Auth、桥接和管理入口的敏感配置都通过 Workers secrets 注入。
 5. R2 桶和 D1 不是公共读；所有文件出口经 Worker 鉴权。
 
 ## MVP 阶段历史边界
 
-以下记录初期 MVP 的约束，不代表动态栏目调度和当前生产额度。当前来源接入见 [来源维护](docs/source-maintenance.md)，运行时额度与限制以 [运维说明](docs/operations.md) 为准。
+以下记录初期 MVP 的约束，不代表当前实现；Firecrawl 客户端、余额查询和回退入口已退出，历史账本只读保留。当前来源接入见 [来源维护](docs/source-maintenance.md)，运行时额度与限制以 [运维说明](docs/operations.md) 为准。
 
 - 只覆盖 `worker/sources.json` 中的 5 个站点和已配置的 URL pattern。
 - 每个来源每次运行最多采集 40 篇待处理通知；每来源最多跟随 12 页列表。
@@ -87,6 +87,6 @@ pnpm check:design
 - 原貌存档依赖 SingleFile 生成的 `offline.html`；截图或快照失败会把通知标为 partial。
 - 通知日期无法可靠解析时不会入队，避免把无法确定日期的条目误认为 30 天窗口内。
 
-已知限制：扫描 PDF 已接 OCR，但自动识别会有姓名等错字，应对照原 PDF。只处理正文型 PDF，普通附件尚未全文索引。完成的 URL 不会每天重复采集，暂不自动追踪原文后续修改。当前使用 Firecrawl 无密钥入口，曾出现一次 IP 限制 403；后续可配置已有 API key 提高稳定性，未购买服务。
+MVP 当时的限制：扫描 PDF 已接 OCR，但自动识别会有姓名等错字，应对照原 PDF。只处理正文型 PDF，普通附件尚未全文索引。完成的 URL 不会每天重复采集，暂不自动追踪原文后续修改。当前使用 Firecrawl 无密钥入口，曾出现一次 IP 限制 403；后续可配置已有 API key 提高稳定性，未购买服务。
 
 这些边界用于控制外部请求和存储成本：快照、正文、截图、manifest 等小对象写入没有纳入 `archive_bytes` 日额度，R2 总存储和 D1 增长仍需要运维监控。

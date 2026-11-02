@@ -5,6 +5,7 @@ import {createSources} from './sources.mjs';
 import {reconcileRevision} from './archive-reconcile.mjs';
 import {launchDedupeKey,launchOutboxId,launchOutboxStatement} from './task-statements.mjs';
 import {createNotifications} from './notifications.mjs';
+import {captureFailure} from './capture-error.mjs';
 
 const activeStates=['queued','starting','running'];
 const platformStates=new Set(['queued','running','paused','waiting','waitingForPause','rollingBack']);
@@ -423,7 +424,7 @@ async function finishTask(env,kind,taskId,attemptNo,result,now=()=>Date.now()){
   if(kind==='ocr'&&result.reviewRequired){
     state='blocked';errorCode='ocr_review_required';
   }else if(result.skipped||result.deferred){
-    errorCode=result.ocrBusy?'ocr_busy':result.skipped?'capture_busy':classifyLimit(result.error);
+    errorCode=result.ocrBusy?'ocr_busy':result.skipped?'capture_busy':result.code??classifyLimit(result.error);
     state=errorCode==='quota_exhausted'||attemptNo>=1000||attemptNo-retryFrom+1>=maxAttempts?'blocked':'deferred';
     const retryAfter=Number.isFinite(result.retryAfterMs)?Math.max(0,result.retryAfterMs):0;
     if(retryAfter>24*60*60*1000)state='blocked';
@@ -467,11 +468,11 @@ async function failTask(env,kind,taskId,attemptNo,error,now=()=>Date.now()){
   const receipt=await env.DB.prepare('SELECT result_json FROM task_attempts WHERE task_id=? AND attempt_no=?')
     .bind(taskId,attemptNo).first();
   if(receipt?.result_json)return finishTask(env,kind,taskId,attemptNo,JSON.parse(receipt.result_json),now);
-  const message=cleanError(error),classification=classifyLimit(message);
+  const failure=captureFailure(error),message=failure.error;
   const reviewRequired=kind==='ocr'&&/review required/i.test(message);
   const ocrBusy=kind==='ocr'&&/Identical PDF OCR is busy/.test(message);
-  return finishTask(env,kind,taskId,attemptNo,{error:message,...(reviewRequired?{reviewRequired:true}:{}),
-    ...(ocrBusy?{ocrBusy:true,deferred:true,retryAfterMs:60_000}:classification!=='provider_error'?{deferred:true}:{})},now);
+  return finishTask(env,kind,taskId,attemptNo,{...failure,...(reviewRequired?{reviewRequired:true}:{}),
+    ...(ocrBusy?{ocrBusy:true,deferred:true,retryAfterMs:60_000}:{})},now);
 }
 
 async function persistWorkflowStatus(env,{taskId,attemptNo,status,now}){

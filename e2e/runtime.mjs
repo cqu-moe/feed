@@ -257,7 +257,6 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir, ingestion 
           SOURCE_MANAGEMENT_ENABLED: 'true',
           ARCHIVE_VERSIONS_ENABLED: 'true',
           ARCHIVE_READS_ENABLED: 'true',
-          MAX_FIRECRAWL_PER_DAY: '0',
           MAX_OCR_PER_DAY: '0',
           MAX_PDF_OCR_PAGES_PER_DAY: '0',
           MAX_PDF_OCR_PAGES_PER_MONTH: '0',

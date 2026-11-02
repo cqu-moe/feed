@@ -1,6 +1,5 @@
 import { bounded } from './utils.mjs';
 
-const FIRECRAWL_CREDITS_URL = 'https://api.firecrawl.dev/v2/team/credit-usage';
 const TEXTIN_BALANCE_URL = 'https://api.textin.com/user/finance/balance';
 // Finance uses the PDF product's catalog identifier; the xParse invocation URL returns code 404 here.
 // https://www.textin.com/document/open_api_package
@@ -10,36 +9,7 @@ const REQUEST_TIMEOUT_MS = 8000;
 const MAX_RESPONSE_BYTES = 256 * 1024;
 
 export async function readProviderUsage(env) {
-  const [firecrawl, textin] = await Promise.all([
-    readFirecrawl(env),
-    readTextIn(env),
-  ]);
-  return { providers: { firecrawl, textin } };
-}
-
-async function readFirecrawl(env) {
-  if (!env.FIRECRAWL_API_KEY) return unavailableProvider('not_configured');
-  try {
-    const payload = await getJson(FIRECRAWL_CREDITS_URL, {
-      Authorization: `Bearer ${env.FIRECRAWL_API_KEY}`,
-    });
-    if (payload?.success !== true || !isRecord(payload.data)) return unavailableProvider('invalid_response');
-
-    const data = payload.data;
-    const usage = {};
-    const missingFields = [];
-    copyNumber(usage, data, 'remainingCredits', missingFields);
-    copyNumber(usage, data, 'planCredits', missingFields);
-    copyString(usage, data, 'billingPeriodStart', missingFields);
-    copyString(usage, data, 'billingPeriodEnd', missingFields);
-    return {
-      status: missingFields.length ? 'partial' : 'ok',
-      usage: Object.keys(usage).length ? usage : null,
-      missingFields,
-    };
-  } catch (error) {
-    return {...unavailableProvider('unavailable'),error:failureDetails(error)};
-  }
+  return { providers: { textin: await readTextIn(env) } };
 }
 
 async function readTextIn(env) {
@@ -160,10 +130,6 @@ function copyCount(target, source, field, missingFields, outputField = field, mi
 
 function textInResult(value, missingFields, unavailable, error) {
   return { value, missingFields, unavailable, error };
-}
-
-function unavailableProvider(status) {
-  return { status, usage: null, missingFields: [] };
 }
 
 function isRecord(value) {

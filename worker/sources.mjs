@@ -286,22 +286,6 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
         .bind(JSON.stringify({error:cleanError(error)}),timestamp(),id,configVersion,taskId,taskId,attemptNo).run();
     },
 
-    async scheduleDaily(nonce='daily'){
-      if(env.CRAWL_ENABLED!=='true')return [];
-      const time=timestamp(),day=new Date(time).toISOString().slice(0,10),ids=[];
-      for(const source of staticSources){
-        const id=`${day}-${source.id}-${nonce}`;
-        try{
-          await env.INGEST.create({id,params:{sourceId:source.id,cutoff:cutoffDate(time)}});
-          ids.push(id);
-        }catch(error){
-          if(!/already exists/i.test(String(error)))throw error;
-          ids.push(id);
-        }
-      }
-      return ids;
-    },
-
     async scheduleDue({limit=20}={}){
       if(env.CRAWL_ENABLED!=='true'||env.TASK_RUNTIME_ENABLED!=='true'||env.SOURCE_MANAGEMENT_ENABLED!=='true')return {scheduled:[]};
       const at=timestamp(),size=boundedInteger(limit,20,1,100);

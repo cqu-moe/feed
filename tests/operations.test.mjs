@@ -275,7 +275,7 @@ test('operations diagnostics links bounded business identities and redacts unsaf
     assert.deepEqual(body.configuration,{
       maxTaskAttempts:3,maxLaunchAttempts:5,queueDeadLetterAfterMs:900_000,
       taskRetryBaseDelayMs:900_000,taskRetryMaxDelayMs:21_600_000,
-      maxMailAttempts:20,maxFirecrawlPerDay:120,
+      maxMailAttempts:20,
       maxPdfOcrPagesPerDay:50,maxPdfOcrPagesPerMonth:1000,
     });
     const serialized=JSON.stringify(body);

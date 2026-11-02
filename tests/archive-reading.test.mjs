@@ -88,7 +88,7 @@ async function fixture({failAfterOcrStore=false}={}){
           downloads:[{url:'https://jwc.cqu.edu.cn/archive.pdf',originalFile:true,fetchedAt:new Date().toISOString(),saved:{name:'attachment-1.pdf'}}],
           artifacts:[{name:'snapshot.html',base64:encoded(html),contentType:'text/html'},{name:'offline.html',base64:encoded(html),contentType:'text/html'},
             {name:'attachment-1.pdf',base64:encoded(${JSON.stringify(pdf)}),contentType:'application/pdf'}]};
-        return {markdown:'',rawHtml:html,metadata:{statusCode:200,creditsUsed:1},actions:{javascriptReturns:[{value:JSON.stringify(page)}]}};
+        return {markdown:'',rawHtml:html,metadata:{statusCode:200,provider:'browser-container'},actions:{javascriptReturns:[{value:JSON.stringify(page)}]}};
       }
     `}));
   }};

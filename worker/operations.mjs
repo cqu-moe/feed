@@ -307,7 +307,6 @@ export function createOperations(env,{now=()=>Date.now()}={}){
       taskRetryBaseDelayMs:boundedDuration(env.TASK_RETRY_BASE_DELAY_MS,15*60*1000,60*1000,24*60*60*1000),
       taskRetryMaxDelayMs:boundedDuration(env.TASK_RETRY_MAX_DELAY_MS,6*60*60*1000,60*1000,7*24*60*60*1000),
       maxMailAttempts:boundedInteger(env.MAX_MAIL_ATTEMPTS,20,1,100),
-      maxFirecrawlPerDay:boundedInteger(env.MAX_FIRECRAWL_PER_DAY,120,0,100000),
       maxPdfOcrPagesPerDay:boundedInteger(env.MAX_PDF_OCR_PAGES_PER_DAY,50,0,100000),
       maxPdfOcrPagesPerMonth:boundedInteger(env.MAX_PDF_OCR_PAGES_PER_MONTH,1000,0,1000000),
     };

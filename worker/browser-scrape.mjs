@@ -33,13 +33,17 @@ export async function scrape(env,url,options={}){
     }
     const text=new TextDecoder().decode(bytes);
     let result;
-    try{result=JSON.parse(text);}
-    catch{throw Object.assign(new Error('Browser response interrupted'),{retryable:true});}
-    if(!response.ok||!result.success){
-      const error=new Error(`Browser ${result.error??`HTTP ${response.status}`}`);
-      error.code=result.code;
-      error.httpStatus=result.httpStatus??response.status;
-      error.retryable=result.retryable===true||response.status===429||response.status>=500;
+    try{result=JSON.parse(text);}catch{
+      if(response.ok)throw Object.assign(new Error('Browser response interrupted'),{code:'browser_transient',retryable:true});
+    }
+    if(!response.ok||!result?.success){
+      // The SDK's pre-execution capacity responses are plaintext. Origin failures
+      // arrive in the executor's HTTP 200 envelope with their own status/code.
+      const capacity=[429,503].includes(response.status)&&!acceptedJobId;
+      const error=new Error(`Browser ${result?.error??`HTTP ${response.status}`}`);
+      error.code=capacity?'container_capacity':result?.code??(response.status>=500?'browser_transient':'capture_failed');
+      error.httpStatus=result?.httpStatus??response.status;
+      error.retryable=result?.retryable===true||capacity||response.status>=500;
       const after=response.headers.get('retry-after');
       if(after){
         const ms=/^\d+(\.\d+)?$/.test(after)?Number(after)*1000:Date.parse(after)-Date.now();
@@ -47,11 +51,13 @@ export async function scrape(env,url,options={}){
       }
       throw error;
     }
-    if((result.data?.metadata?.statusCode??200)>=400)
-      throw new Error(`Origin HTTP ${result.data.metadata.statusCode}`);
+    if((result.data?.metadata?.statusCode??200)>=400){
+      const status=result.data.metadata.statusCode;
+      throw Object.assign(new Error(`Origin HTTP ${status}`),{code:'origin_http',httpStatus:status,retryable:status===429||status>=500});
+    }
     return result.data;
   }catch(error){
-    if(signal.aborted||error.name==='TypeError'||/network|connection|fetch failed|aborted|timed out/i.test(error.message)){
+    if(signal.aborted||error.name==='TypeError'||/network|connection|fetch failed|aborted|timed out|cold start/i.test(error.message)){
       error.retryable=true;error.code??='browser_transient';
     }
     throw error;

@@ -9,11 +9,7 @@ import {
 import {archiveOcrStatus,redoArchiveOcr} from './archive-ocr.mjs';
 import {reconcileRevision} from './archive-reconcile.mjs';
 import {createTaskRuntime} from './task-runtime.mjs';
-import {cleanError} from './utils.mjs';
-
-function isGlobalLimitError(message){
-  return /Firecrawl HTTP 403|\b(?:429|402)\b|daily budget reached|\b(?:budget|quota|credit)s?\b/i.test(message);
-}
+import {captureFailure} from './capture-error.mjs';
 
 export function createArchive(env,{
   collector=createCollector(),
@@ -54,16 +50,17 @@ export function createArchive(env,{
             .bind(taskId,attemptNo).first().catch(()=>null);
           if(receipt?.result_json)return JSON.parse(receipt.result_json);
         }
-        const message=cleanError(error);
+        const failure=captureFailure(error),message=failure.error;
         const savedResult=versioned&&!/fence|identity|checksum|inventory/i.test(message)
           ?await env.ARCHIVE.head(`captures/${taskId}/result.json`).catch(()=>null):null;
-        const deferred=isGlobalLimitError(message)||Boolean(savedResult);
+        const deferred=failure.deferred||Boolean(savedResult);
+        const unconsumed=failure.capacity||failure.code==='quota_exhausted'||Boolean(savedResult);
         await env.DB.prepare(`UPDATE articles
           SET status=CASE WHEN ? THEN status WHEN prefix IS NULL THEN ? ELSE 'partial' END,
               attempts=attempts-?,lease_until=0,error=CASE WHEN ? THEN error ELSE ? END
           WHERE id=? AND capture_fence=?`)
-          .bind(versioned?1:0,deferred?'pending':'failed',deferred?1:0,versioned?1:0,message,article.id,lease.capture_fence).run();
-        return {...(deferred?{deferred:true}:{}),...(Number.isFinite(error.retryAfterMs)?{retryAfterMs:error.retryAfterMs}:{}),error:message};
+          .bind(versioned?1:0,deferred?'pending':'failed',unconsumed?1:0,versioned?1:0,message,article.id,lease.capture_fence).run();
+        return {...failure,...(deferred?{deferred:true}:{})};
       }
     },
     extract(articleId,options){

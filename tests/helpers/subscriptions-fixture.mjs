@@ -42,11 +42,11 @@ const recheckWorkersPlugin = {
   },
 };
 
-const recheckFirecrawlPlugin = {
-  name: 'recheck-firecrawl-stub',
+const recheckBrowserPlugin = {
+  name: 'recheck-browser-stub',
   setup(buildApi) {
-    buildApi.onResolve({ filter: /firecrawl\.mjs$/ }, () => ({ path: 'recheck-firecrawl', namespace: 'recheck-firecrawl-stub' }));
-    buildApi.onLoad({ filter: /.*/, namespace: 'recheck-firecrawl-stub' }, () => ({
+    buildApi.onResolve({ filter: /browser-scrape\.mjs$/ }, () => ({ path: 'recheck-browser', namespace: 'recheck-browser-stub' }));
+    buildApi.onLoad({ filter: /.*/, namespace: 'recheck-browser-stub' }, () => ({
       loader: 'js',
       contents: `
         const calls=[];
@@ -60,7 +60,7 @@ const recheckFirecrawlPlugin = {
           const attachment=changed?'%PDF-1.7\\nchanged':'%PDF-1.7\\noriginal';
           const snapshot='<html><body><main><h1>复查通知</h1><p>'+body+'</p></main></body></html>';
           const attachmentUrl='https://jwc.cqu.edu.cn/system/_content/download.jsp?urltype=1501&recheck.pdf';
-          return {markdown:body,rawHtml:snapshot,metadata:{statusCode:200,creditsUsed:1},actions:{javascriptReturns:[{value:JSON.stringify({
+          return {markdown:body,rawHtml:snapshot,metadata:{statusCode:200,provider:'browser-container'},actions:{javascriptReturns:[{value:JSON.stringify({
             bodyRecognized:true,page:{url:${JSON.stringify(sharedArticleUrl)}},heading:'复查通知',bodyText:body,bodyCapturedAt:new Date().toISOString(),errors:[],
             artifacts:[
               {name:'attachment-1.pdf',base64:base64(attachment),contentType:'application/pdf'},
@@ -101,7 +101,7 @@ export async function subscriptionsFixture({
       import {createArchive} from './worker/archive.mjs';
       import {createCollector} from './worker/collect.mjs';
       import {finishCaptureTask} from './worker/task-runtime.mjs';
-      import {scrape} from './worker/firecrawl.mjs';
+      import {scrape} from './worker/browser-scrape.mjs';
       import {replayMatchOutbox} from './tests/helpers/notification-replay.mjs';
       import {reconcileRevision} from './worker/archive-reconcile.mjs';
       let mailClock=${clock ?? 'Date.now()'};
@@ -202,7 +202,7 @@ export async function subscriptionsFixture({
     external: ['node:buffer', 'node:*', 'cloudflare:workers'],
     plugins: [
       ...(telemetryHarness ? [telemetryStubPlugin] : []),
-      ...(recheckHarness ? [recheckWorkersPlugin, recheckFirecrawlPlugin] : []),
+      ...(recheckHarness ? [recheckWorkersPlugin, recheckBrowserPlugin] : []),
     ],
   });
   const policy = await build({

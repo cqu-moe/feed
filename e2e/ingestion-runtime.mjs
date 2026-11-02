@@ -85,7 +85,7 @@ export function createIngestionFixture({ dateOnly = false } = {}) {
       if (url.origin !== SCHOOL) throw new Error('Fixture refuses non-synthetic school');
       const list = input.formats?.includes('links');
       calls.push({ provider: 'browser-container', url: url.href, kind: list ? 'list' : 'article', mode });
-      if (mode === 'failure' && !list && url.pathname.endsWith('/1001.htm')) return Response.json({ success: false, error: 'Synthetic upstream outage' }, { status: 500 });
+      if (mode === 'failure' && !list && url.pathname.endsWith('/1001.htm')) return Response.json({ success: false, error: 'Synthetic article parse failure', code: 'capture_failed', retryable: false }, { headers: { 'x-feed-browser-job-id': input.jobId } });
       if (!list) return Response.json({ success: true, data: capture(url.href) }, { headers: { 'x-feed-browser-job-id': input.jobId } });
       const page2 = url.pathname.endsWith('page2');
       const articles = page2 ? [{ url: `${SCHOOL}/info/2026/1002.htm`, title: title(1002), publishedAt: day(0) + (dateOnly ? '' : ' 09:02') }]

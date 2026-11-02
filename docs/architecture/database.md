@@ -146,7 +146,7 @@ WHERE EXISTS (SELECT 1 FROM subscriptions WHERE id = :id AND owner_sub = :owner)
 
 D1 使用 `DB.batch()` 的原子提交能力；其中一个语句失败会回滚该批。批内 `UPDATE … WHERE …` 没匹配到记录并不等于语句失败，必须显式门控后续写入。不要把跨多个 await 的业务操作描述为一个事务。涉及租约、配额、占用和状态推进的读写走 primary；首版不依赖副本最终一致的读结果做授权或额度裁决。[D1 batch 官方说明](https://developers.cloudflare.com/d1/worker-api/d1-database/)
 
-外部 Queue / R2 / Firecrawl / 邮件 API 不参与 D1 事务。outbox 在发送成功后标记已分发，发送后标记前崩溃会重复发送，因此消费端必须按业务键幂等。禁止先标记已发送再调 Queue。
+外部 Queue / R2 / Container / 邮件 API 不参与 D1 事务。outbox 在发送成功后标记已分发，发送后标记前崩溃会重复发送，因此消费端必须按业务键幂等。禁止先标记已发送再调 Queue。
 
 ## 迁移与验收
 

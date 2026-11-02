@@ -20,20 +20,8 @@ const workerModulesStub = {
   },
 };
 
-test('admin provider usage reports allowlisted Firecrawl and TextIn balances', async () => {
+test('admin provider usage reports an allowlisted TextIn balance and ignores Firecrawl credentials', async () => {
   const { mf } = await fixture(async (url) => {
-    if (url === 'https://api.firecrawl.dev/v2/team/credit-usage') {
-      return Response.json({
-        success: true,
-        data: {
-          remainingCredits: 742,
-          planCredits: 1000,
-          billingPeriodStart: '2026-10-01T00:00:00.000Z',
-          billingPeriodEnd: '2026-11-01T00:00:00.000Z',
-          sensitiveExtra: 'firecrawl-secret',
-        },
-      });
-    }
     if (url === 'https://api.textin.com/user/finance/balance') {
       return Response.json({
         code: 200,
@@ -78,16 +66,6 @@ test('admin provider usage reports allowlisted Firecrawl and TextIn balances', a
     assert.equal(response.headers.get('cache-control'), 'no-store');
     assert.deepEqual(await response.json(), {
       providers: {
-        firecrawl: {
-          status: 'ok',
-          usage: {
-            remainingCredits: 742,
-            planCredits: 1000,
-            billingPeriodStart: '2026-10-01T00:00:00.000Z',
-            billingPeriodEnd: '2026-11-01T00:00:00.000Z',
-          },
-          missingFields: [],
-        },
         textin: {
           status: 'ok',
           balance: {
@@ -117,22 +95,20 @@ test('admin provider usage reports allowlisted Firecrawl and TextIn balances', a
 
     const calls = await fixtureCalls(mf);
     assert.deepEqual(calls.map(call => call.url), [
-      'https://api.firecrawl.dev/v2/team/credit-usage',
       'https://api.textin.com/user/finance/balance',
       'https://api.textin.com/user/finance/package?api_path=https%3A%2F%2Fapi.textin.com%2Fai%2Fservice%2Fv1%2Fpdf_to_markdown&include_all=0',
     ]);
-    assert.deepEqual(await fixtureTimeouts(mf), [8000, 8000, 8000]);
+    assert.deepEqual(await fixtureTimeouts(mf), [8000, 8000]);
     for (const call of calls) {
       assert.equal(call.init.method, 'GET');
       assert.equal(call.init.redirect, 'manual');
       assert.equal(call.init.body, undefined);
     }
-    assert.equal(calls[0].init.headers.Authorization, 'Bearer firecrawl-key');
-    assert.equal(calls[0].init.headers['x-ti-app-id'], undefined);
-    assert.equal(calls[1].init.headers.Authorization, undefined);
-    assert.equal(calls[1].init.headers['x-ti-app-id'], 'textin-app');
-    assert.equal(calls[1].init.headers['x-ti-secret-code'], 'textin-secret-code');
-    assert.deepEqual(calls[2].init.headers, calls[1].init.headers);
+    for (const call of calls) {
+      assert.equal(call.init.headers.Authorization, undefined);
+      assert.equal(call.init.headers['x-ti-app-id'], 'textin-app');
+      assert.equal(call.init.headers['x-ti-secret-code'], 'textin-secret-code');
+    }
   } finally {
     await mf.dispose();
   }
@@ -161,10 +137,8 @@ test('provider usage requires an administrator and read-only GET', async () => {
   }
 });
 
-test('provider usage preserves available providers through partial failures and missing fields', async () => {
+test('provider usage preserves available TextIn requests through partial failures and missing fields', async () => {
   const { mf } = await fixture(async url => {
-    if (url === 'https://api.firecrawl.dev/v2/team/credit-usage')
-      return new Response('firecrawl provider failure includes firecrawl-raw-secret', { status: 503 });
     if (url === 'https://api.textin.com/user/finance/balance') {
       return Response.json({
         code: 200,
@@ -189,12 +163,6 @@ test('provider usage preserves available providers through partial failures and 
     });
     assert.equal(response.status, 200);
     const body = await response.json();
-    assert.deepEqual(body.providers.firecrawl, {
-      status: 'unavailable',
-      usage: null,
-      missingFields: [],
-      error: { kind: 'http', status: 503 },
-    });
     assert.deepEqual(body.providers.textin, {
       status: 'partial',
       balance: {
@@ -220,39 +188,26 @@ test('provider usage preserves available providers through partial failures and 
 
 test('provider usage accepts the remaining_count alias and rejects oversized responses without leaking them', async () => {
   const { mf } = await fixture(async url => {
-    if (url === 'https://api.firecrawl.dev/v2/team/credit-usage')
+    if (url === 'https://api.textin.com/user/finance/balance')
       return new Response('x'.repeat(256 * 1024 + 1), { status: 200 });
-    if (url === 'https://api.textin.com/user/finance/balance') {
+    if (url === 'https://api.textin.com/user/finance/package?api_path=https%3A%2F%2Fapi.textin.com%2Fai%2Fservice%2Fv1%2Fpdf_to_markdown&include_all=0') {
       return Response.json({
         code: 200,
         data: {
-          balance: 20,
-          available_balance: 20,
-          unavailable_balance: 0,
-          pay_type: 1,
-          postpaid_amount: 0,
-          unpaid: 0,
-          t_coin_give_total: 10000,
-          t_coin_give_used: 0,
-          leaked: 'oversize-test-secret',
+          list: [{
+            id: 2002,
+            service_list: ['ocr'],
+            start_time: '2026-10-01 00:00:00',
+            end_time: '2026-11-01 00:00:00',
+            total_count: 10000,
+            remaining_count: 10000,
+            use_count: 0,
+            leaked: 'package-alias-secret',
+          }],
         },
       });
     }
-    return Response.json({
-      code: 200,
-      data: {
-        list: [{
-          id: 2002,
-          service_list: ['ocr'],
-          start_time: '2026-10-01 00:00:00',
-          end_time: '2026-11-01 00:00:00',
-          total_count: 10000,
-          remaining_count: 10000,
-          use_count: 0,
-          leaked: 'package-alias-secret',
-        }],
-      },
-    });
+    return new Response('unexpected provider request', { status: 500 });
   });
 
   try {
@@ -261,7 +216,7 @@ test('provider usage accepts the remaining_count alias and rejects oversized res
     });
     assert.equal(response.status, 200);
     const body = await response.json();
-    assert.equal(body.providers.firecrawl.status, 'unavailable');
+    assert.deepEqual(body.providers.textin.errors, { balance: { kind: 'response_too_large' } });
     assert.deepEqual(body.providers.textin.packages, [{
       id: 2002,
       service_list: ['ocr'],
@@ -277,11 +232,11 @@ test('provider usage accepts the remaining_count alias and rejects oversized res
   }
 });
 
-test('provider usage does not call providers when credentials are absent', async () => {
+test('provider usage does not call Firecrawl or TextIn without TextIn credentials', async () => {
   const { mf } = await fixture(async () => {
     throw new Error('provider must not be called');
   }, {
-    FIRECRAWL_API_KEY: '',
+    FIRECRAWL_API_KEY: 'firecrawl-key',
     TEXTIN_APP_ID: '',
     TEXTIN_SECRET_CODE: '',
   });
@@ -293,7 +248,6 @@ test('provider usage does not call providers when credentials are absent', async
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), {
       providers: {
-        firecrawl: { status: 'not_configured', usage: null, missingFields: [] },
         textin: { status: 'not_configured', balance: null, packages: null, missingFields: [], unavailableRequests: [] },
       },
     });
@@ -308,10 +262,9 @@ test('provider redirects fail closed without sending credentials to the redirect
   try{
     const response=await mf.dispatchFetch(`https://feed.test${endpoint}`,{headers:{Authorization:'Bearer test-admin-token'}});
     const body=await response.json();
-    assert.deepEqual(body.providers.firecrawl.error,{kind:'http',status:302});
     assert.deepEqual(body.providers.textin.errors,{balance:{kind:'http',status:302},packages:{kind:'http',status:302}});
     const calls=await fixtureCalls(mf);
-    assert.equal(calls.length,3);
+    assert.equal(calls.length,2);
     assert.ok(calls.every(call=>call.init.redirect==='manual'&&!call.url.includes('untrusted.example')));
   }finally{await mf.dispose()}
 });

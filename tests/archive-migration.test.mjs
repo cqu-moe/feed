@@ -573,7 +573,7 @@ async function fixture({pageCount=1,model='mistral-ocr-4-1',ocrRole='body-pdf',c
           }});
           const collector=createCollector({scrape:async()=>{
             globalThis.CAPTURE_SCRAPE_CALLS++;
-            return {markdown:page.bodyText,metadata:{statusCode:200,creditsUsed:1},
+            return {markdown:page.bodyText,metadata:{statusCode:200,provider:'browser-container'},
               actions:{javascriptReturns:[{value:JSON.stringify(page)}]}};
           }});
           const captureDb=failBatch?new Proxy(raw.DB,{get(target,key){

@@ -26,7 +26,6 @@ export default {
     const jobs=[];
     if(controller.cron==='0 0 * * *'){
       jobs.push(archive.resumeExtract());
-      if(env.TASK_RUNTIME_ENABLED!=='true')jobs.push(sources.scheduleDaily());
     }
     if(controller.cron==='*/5 * * * *'&&env.TASK_RUNTIME_ENABLED==='true'){
       jobs.push(sources.scheduleDue());

@@ -57,11 +57,12 @@ const browserPlugin={
           const mode=globalThis.TASK_RUNTIME_SCRAPE_MODE;
           if(mode==='rate-limit')throw new Error('Browser HTTP 429: rate limit exceeded');
           if(mode==='long-rate-limit'){
-            const error=new Error('Firecrawl HTTP 429: rate limit exceeded');
+            const error=new Error('Browser HTTP 429: rate limit exceeded');
             error.retryAfterMs=12*60*60*1000;
             throw error;
           }
-          if(mode==='quota')throw new Error('Firecrawl HTTP 402: quota exhausted');
+          if(mode==='quota')throw new Error('Archive upload quota exhausted');
+          if(mode==='network')throw Object.assign(new Error('Browser connection closed'),{code:'browser_transient',retryable:true});
           if(mode==='hang'){
             while(globalThis.TASK_RUNTIME_SCRAPE_MODE==='hang')await new Promise(resolve=>setTimeout(resolve,10));
             return success();
@@ -627,13 +628,13 @@ test('unknown Workflow create outcome is resolved by getting the same instance i
   }
 });
 
-test('429 captures a bounded deferred retry sequence and stops after three attempts',async()=>{
+for(const [mode,errorCode] of [['rate-limit','rate_limited'],['network','browser_transient']])test(`${mode} captures a bounded deferred retry sequence and stops after three attempts`,async()=>{
   const {mf,db}=await fixture();
   try{
     await mf.dispatchFetch('https://feed.test/fixture/scrape-mode',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({mode:'rate-limit'}),
+      body:JSON.stringify({mode}),
     });
     const create=await mf.dispatchFetch('https://feed.test/internal/capture-tasks',{
       method:'POST',
@@ -650,8 +651,8 @@ test('429 captures a bounded deferred retry sequence and stops after three attem
     let current=await task(db,created.task.id);
     assert.equal(current.attemptNo,1);
     assert.ok(current.dueAt>Date.now()+14*60*1000,current.dueAt);
-    assert.match(current.lastError,/429|rate limit/i);
-    assert.equal(await attemptCode(db,created.task.id,1),'rate_limited');
+    assert.match(current.lastError,/429|rate limit|connection closed/i);
+    assert.equal(await attemptCode(db,created.task.id,1),errorCode);
     assert.equal((await scrapes(mf)).calls.length,1);
 
     for(let expectedAttempts of [2,3]){

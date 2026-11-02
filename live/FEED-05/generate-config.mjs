@@ -54,7 +54,6 @@ export function buildIsolatedConfig({ accountId, d1DatabaseId, feedOrigin, authO
       BASE_URL: feedOrigin,
       AUTH_BASE_URL: authOrigin,
       ENVIRONMENT: "preview",
-      MAX_FIRECRAWL_PER_DAY: "1",
       MAX_OCR_PER_DAY: "1",
       MAX_ARTICLES_PER_RUN: "5",
       CRAWL_ENABLED: "false",
@@ -221,7 +220,7 @@ export function validateIsolation(config) {
     if (vars[key] !== "true") fail(`${key} must remain enabled for ordinary reading paths`);
   }
   for (const key of [
-    "MAX_FIRECRAWL_PER_DAY", "MAX_OCR_PER_DAY", "MAX_PDF_OCR_PAGES_PER_DAY", "MAX_PDF_OCR_PAGES_PER_MONTH",
+    "MAX_OCR_PER_DAY", "MAX_PDF_OCR_PAGES_PER_DAY", "MAX_PDF_OCR_PAGES_PER_MONTH",
   ]) {
     if (vars[key] === "0") fail(`${key} must not be "0"; this code treats zero as uncapped accounting`);
     if (!/^[1-9][0-9]*$/.test(vars[key] ?? "")) fail(`${key} must be a positive bounded integer`);
@@ -272,7 +271,7 @@ export function buildDeploymentInput({ browserClientId, rpcClientId, d1DatabaseI
         "https://jwc.cqu.edu.cn", "https://intex.cqu.edu.cn", "https://civil.cqu.edu.cn",
         "https://xgb.cqu.edu.cn", "https://news.cqu.edu.cn",
       ],
-      sourceReadProvider: "https://api.firecrawl.dev/v2/scrape",
+      sourceReadProvider: "BROWSER site Container binding",
     },
   };
 }

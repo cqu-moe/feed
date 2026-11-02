@@ -1,4 +1,4 @@
-// A separate top-level page under our origin; no school cookies leave Firecrawl.
+// A separate top-level page under our origin; source-site cookies stay in the temporary browser session.
 export function bridgeHTML(grant) {
   const input = JSON.stringify(grant).replace(/</g, '\\u003c');
   return `<!doctype html><meta charset="utf-8"><title>Temporary OCR bridge</title><p>Temporary cloud OCR bridge.</p><script>

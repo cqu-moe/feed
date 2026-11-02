@@ -125,3 +125,20 @@ test('the private container boundary rejects unsupported routes, targets and ide
   assert.equal((await instance.fetch(requestFor({...job,siteId:'jwc.cqu.edu.cn'}))).status,400);
   assert.equal(instance.proxyEvents.length,0);
 });
+
+test('container transport distinguishes capacity from executed source failures and keeps Retry-After',async()=>{
+  for(const [response,expected] of [
+    [()=>new Response('There is no Container instance available at this time.',{status:503,headers:{'retry-after':'60'}}),{code:'container_capacity',retryable:true,httpStatus:503,retryAfterMs:60000}],
+    [()=>new Response('Container start rate limited',{status:429}),{code:'container_capacity',retryable:true,httpStatus:429}],
+    [()=>new Response('Failed to start container: timeout',{status:500}),{code:'browser_transient',retryable:true,httpStatus:500}],
+    [()=>Response.json({success:false,error:'Origin did not become ready (HTTP 503)',code:'origin_unavailable',httpStatus:503,retryable:true}),{code:'origin_unavailable',retryable:true,httpStatus:503}],
+    [()=>Response.json({success:false,error:'Origin HTTP 404',code:'origin_http',httpStatus:404,retryable:false}),{code:'origin_http',retryable:false,httpStatus:404}],
+    [()=>new Response('{"success":'),{code:'browser_transient',retryable:true}],
+  ]){
+    const env={BROWSER:{getByName:()=>({fetch:async()=>response()})}};
+    await assert.rejects(scrape(env,job.url,{source:{siteId:'test'},formats:[],actions:job.actions}),error=>{
+      for(const [key,value] of Object.entries(expected))assert.equal(error[key],value,error.message);
+      return true;
+    });
+  }
+});

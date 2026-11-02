@@ -77,7 +77,7 @@ async function fixture(){
             markdown:'中文归档正文',
             rawHtml:snapshot,
             screenshot:{contentType:'image/png',base64:'iVBORw0KGgo='},
-            metadata:{statusCode:200,creditsUsed:1,proxyUsed:true},
+            metadata:{statusCode:200,provider:'browser-container'},
             actions:{javascriptReturns:[{value:JSON.stringify(uploadPage)}]},
           };
         };

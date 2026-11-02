@@ -38,7 +38,7 @@ test('only Archive reconcile publishes a complete no-OCR revision and one stable
           attachmentCandidates:[{url:attachmentUrl,name:'普通附件.pdf',role:'attachment'}],
           downloads:[{url:attachmentUrl,originalFile:true,saved:{name:'attachment-1.pdf'},fetchedAt:new Date().toISOString()}],
         };
-        const scrape=async()=>({markdown:'完整正文',rawHtml:snapshot,metadata:{statusCode:200,creditsUsed:1},
+        const scrape=async()=>({markdown:'完整正文',rawHtml:snapshot,metadata:{statusCode:200,provider:'browser-container'},
           actions:{javascriptReturns:[{value:JSON.stringify(page)}]}});
         let reconcileAt=null;
         async function inspect(env,revisionId){

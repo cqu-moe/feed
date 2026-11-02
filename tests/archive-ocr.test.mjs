@@ -71,7 +71,7 @@ test('mixed PDF OCR is cached, adopted per revision, and reconciles out of order
           {url:'https://jwc.cqu.edu.cn/second.pdf',originalFile:true,saved:{name:'attachment-2.pdf'},fetchedAt:new Date().toISOString()},
         ],
       });
-      const scrape=async()=>{const page=globalThis.TWO_PDFS?twoPdfPage():makePage();return {markdown:'',rawHtml:snapshot,metadata:{statusCode:200,creditsUsed:1},
+      const scrape=async()=>{const page=globalThis.TWO_PDFS?twoPdfPage():makePage();return {markdown:'',rawHtml:snapshot,metadata:{statusCode:200,provider:'browser-container'},
         actions:{javascriptReturns:[{value:JSON.stringify(page)}]}};};
       const step={async do(name,config,fn){return (typeof config==='function'?config:fn)();},async sleep(){}};
       async function inspect(env,revisionId){

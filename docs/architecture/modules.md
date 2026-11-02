@@ -66,7 +66,7 @@ Cloudflare Queue/Workflow Adapter 只解析已约定消息、装配运行依赖�
 | 纯计算 | 日期资格、diff 分类、运行集合；直接函数，不制造 I/O port | 固定输入检查输出，覆盖业务分支 |
 | 本地可替代 | D1/R2 留在 Module 内部存储 Seam | 使用 Miniflare 的实际 D1/R2 语义，通过 Module Interface 检查结果；不以宽泛 FakeRepository 代替事务验证 |
 | 自有远端 | Auth 内部 port，生产 Service Binding Adapter；测试内存 Adapter | 返回授权、缺配额、不可用、未验证邮箱，检查调用方可观察行为 |
-| 外部依赖 | Firecrawl、OCR、邮件各一个窄内部 port；生产 Adapter 与可控测试 Adapter | 覆盖 429、额度耗尽、伪附件、OCR 失败、受理后断线；不假装 mock 证明真实服务可用 |
+| 外部依赖 | Container 浏览器、OCR、邮件各一个窄内部 port；生产 Adapter 与可控测试 Adapter | 覆盖 429、额度耗尽、伪附件、OCR 失败、受理后断线；不假装 mock 证明真实服务可用 |
 | 平台执行 | 持久步骤/实例启动 Seam，Cloudflare Adapter 与可控重放 Adapter | 重复交接、步骤恢复、过期 attempt、写入后中断；另做平台集成验证 |
 
 依赖在 Module 组装时注入，不由业务方法临时创建 SDK 客户端。测试 Adapter 是第二个确有用途的 Adapter；不为尚未计划采用的抓取供应商、邮件供应商或数据库另建一层泛化抽象。
