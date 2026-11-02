@@ -1,4 +1,5 @@
 import {captureFailure} from './capture-error.mjs';
+import {backfillTaskSql} from './backfill-control.mjs';
 
 export function browserTaskKind(kind){
   return ['capture','recheck','discover','backfill'].includes(kind);
@@ -61,7 +62,8 @@ export async function releaseSiteExecution(env,{siteId,taskId,attemptNo,generati
   if(released)await env.DB.prepare(`UPDATE outbox SET available_at=?,last_error=NULL
     WHERE topic='feed-jobs' AND state='queued' AND last_error='site_busy'
       AND json_extract(payload_json,'$.taskId') IN (SELECT t.id FROM tasks t JOIN sources s ON s.id=t.source_id
-        WHERE s.site_id=? AND t.state='queued')`).bind(Number(now),siteId).run();
+        WHERE COALESCE(json_extract(t.payload_json,'$.source.siteId'),s.site_id)=? AND t.state='queued')`)
+    .bind(Number(now),siteId).run();
   return released;
 }
 
@@ -79,10 +81,19 @@ export async function handoffOrReleaseSiteExecution(env,admission,now=Date.now()
   const released=await releaseSiteExecution(env,admission,now);
   if(!released)return {released:false};
   const next=await env.DB.prepare(`SELECT o.id FROM outbox o JOIN tasks t ON t.id=json_extract(o.payload_json,'$.taskId')
-    JOIN sources s ON s.id=t.source_id
     WHERE o.topic='feed-jobs' AND o.state='queued' AND o.available_at<=? AND t.due_at<=?
       AND t.state='queued' AND t.attempt_no=json_extract(o.payload_json,'$.attempt')
-      AND t.kind IN ('capture','recheck','discover','backfill') AND s.site_id=?
+      AND (
+        t.kind IN ('capture','recheck')
+        OR t.kind='discover' AND (
+          json_extract(t.payload_json,'$.mode')='validate'
+          OR EXISTS(SELECT 1 FROM discovery_admissions a
+            WHERE a.task_id=t.id AND a.attempt_no=t.attempt_no AND a.lane=t.kind))
+        OR t.kind='backfill' AND EXISTS(SELECT 1 FROM discovery_admissions a
+          WHERE a.task_id=t.id AND a.attempt_no=t.attempt_no AND a.lane=t.kind)
+          AND ${backfillTaskSql()}
+      )
+      AND COALESCE(json_extract(t.payload_json,'$.source.siteId'),(SELECT s.site_id FROM sources s WHERE s.id=t.source_id))=?
     ORDER BY t.priority,t.due_at,t.id LIMIT 1`).bind(now,now,admission.siteId).first();
   return {released:true,outboxId:next?.id};
 }
