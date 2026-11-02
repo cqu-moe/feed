@@ -177,11 +177,6 @@
           "refreshIntervalSec": 604800
         },
         {
-          "name": "电气工程学院 · 科学研究 · 公示信息",
-          "listUrl": "https://see.cqu.edu.cn/kxyj/gsx.htm",
-          "refreshIntervalSec": 604800
-        },
-        {
           "name": "电气工程学院 · 学生工作 · 通知公告",
           "listUrl": "https://see.cqu.edu.cn/xsgz/tzgg.htm",
           "refreshIntervalSec": 604800
@@ -204,16 +199,6 @@
         {
           "name": "电气工程学院 · 公示栏",
           "listUrl": "https://see.cqu.edu.cn/index/gsl.htm",
-          "refreshIntervalSec": 604800
-        },
-        {
-          "name": "电气工程学院 · 党群工作 · 公示信息",
-          "listUrl": "https://see.cqu.edu.cn/2022b/wzlb.jsp?urltype=tree.TreeTempUrl&wbtreeid=3530",
-          "refreshIntervalSec": 604800
-        },
-        {
-          "name": "电气工程学院 · 国际交流 · 公示信息",
-          "listUrl": "https://see.cqu.edu.cn/2022b/wzlb.jsp?urltype=tree.TreeTempUrl&wbtreeid=3902",
           "refreshIntervalSec": 604800
         },
         {
@@ -314,7 +299,7 @@
   ],
   "restore": {
     "xgb": {
-      "sampleArticleUrl": "https://xgb.cqu.edu.cn/info/1024/5808.htm"
+      "sampleArticleUrl": "https://xgb.cqu.edu.cn/info/1024/5803.htm"
     }
   }
 }

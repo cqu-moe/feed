@@ -87,17 +87,27 @@ async function readToken(options, token) {
   return process.env.FEED_ADMIN_TOKEN;
 }
 
-function makeApi(baseUrl, token, fetchImpl) {
+function makeApi(baseUrl, token, fetchImpl, sleep) {
   const base = new URL(baseUrl);
   return async function api(path, method = 'GET', body) {
-    const response = await fetchImpl(new URL(path, base), {
-      method,
-      headers: {Authorization: `Bearer ${token}`, ...(body && {'Content-Type': 'application/json'})},
-      body: body && JSON.stringify(body),
-      redirect: 'error',
-      signal: AbortSignal.timeout(30_000),
-    });
-    const data = response.headers.get('content-type')?.includes('json') ? await response.json() : null;
+    let response, data;
+    for (let attempt = 0;; attempt++) {
+      try {
+        response = await fetchImpl(new URL(path, base), {
+          method,
+          headers: {Authorization: `Bearer ${token}`, ...(body && {'Content-Type': 'application/json'})},
+          body: body && JSON.stringify(body),
+          redirect: 'error',
+          signal: AbortSignal.timeout(30_000),
+        });
+        data = response.headers.get('content-type')?.includes('json') ? await response.json() : null;
+        break;
+      } catch (error) {
+        // A lost write response may already have committed on the server.
+        if (method !== 'GET' || attempt >= 2 || !['TypeError', 'TimeoutError', 'AbortError'].includes(error.name)) throw error;
+        await sleep(1000 * 2 ** attempt);
+      }
+    }
     if (!response.ok) {
       const error = new Error(`HTTP ${response.status}: ${path}`);
       error.status = response.status;
@@ -165,7 +175,7 @@ async function verifyAndEnable(api, source, listUrl, options, sleep, force = fal
 }
 
 async function provisionCatalog(catalog, options, token, fetchImpl, sleep) {
-  const api = makeApi(options.baseUrl, token, fetchImpl);
+  const api = makeApi(options.baseUrl, token, fetchImpl, sleep);
   const deadline = options.deadline;
   const existingSites = (await api('/internal/sites')).sites;
   const existingSources = (await api('/internal/sources')).sources;
