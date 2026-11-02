@@ -53,7 +53,7 @@ export async function scrapePage(job,signal){
     if(!(status>=200&&status<300)||!ready)
       throw Object.assign(new Error(`Origin did not become ready${status?` (HTTP ${status})`:''}`),
         {code:'origin_unavailable',httpStatus:status,retryable:true});
-    const value=await browser.evaluate(job.actions[0].script,{timeoutMs:220000,userGesture:true});
+    const value=await browser.evaluate(job.actions[0].script,{timeoutMs:null,userGesture:true});
     const data={actions:{javascriptReturns:[{value}]},metadata:{provider:'browser-container',statusCode:status}};
     if(job.formats.includes('rawHtml'))data.rawHtml=await browser.evaluate('document.documentElement.outerHTML');
     // The page action owns body extraction; navigation text is not a substitute.

@@ -18,9 +18,10 @@ async function processes(){
   return rows;
 }
 
-test('closing a stalled capture terminates the Chrome process tree before deleting its temporary profile',async()=>{
+test('cancelling a stalled capture rejects pending work and removes the Chrome process tree and profile',{timeout:30000},async()=>{
   const before=new Set((await readdir('/tmp')).filter(name=>name.startsWith('feed-capture-')));
-  const browser=await openBrowser({signal:AbortSignal.timeout(30000)});
+  const controller=new AbortController();
+  const browser=await openBrowser({signal:controller.signal});
   let group;
   try{
     await browser.navigate('data:text/html,<h1>Cancellation contract</h1>');
@@ -29,10 +30,14 @@ test('closing a stalled capture terminates the Chrome process tree before deleti
     assert.ok(root,'the actual Chrome browser started in an isolated profile');
     group=root.group;
     assert.ok((await processes()).filter(row=>row.group===group&&row.state!=='Z').length>1,'Chrome has real subprocesses');
+    const pending=browser.evaluate('new Promise(()=>{})',{timeoutMs:null}).then(()=>null,error=>error.message);
+    await delay(50);
     // A stopped process cannot finish a graceful shutdown. This exercises the
     // same forced cleanup used for a hung browser or an aborted capture.
     process.kill(-group,'SIGSTOP');
+    controller.abort(new Error('Caller disconnected'));
     await browser.close();
+    assert.equal(await pending,'Browser closed');
     await delay(50);
     assert.deepEqual((await processes()).filter(row=>row.group===group&&row.state!=='Z').map(row=>row.pid),[]);
     assert.deepEqual((await readdir('/tmp')).filter(name=>name.startsWith('feed-capture-')&&!before.has(name)),[]);

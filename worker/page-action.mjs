@@ -80,7 +80,6 @@ export async function captchaPage(input) {
       return {name,bytes:answer.saved.bytes,uploaded:true};
     }
     for(let index=0;index<Math.min(candidates.length,8);index++){
-      if(Date.now()-start>165000){report.errors.push('Download action time budget reached');break;}
       const item=candidates[index],row={...item,attempts:[]};report.downloads.push(row);
       try{
         let response=await read(item.url);row.initialStatus=response.status;row.initialKind=response.kind;

@@ -11,7 +11,6 @@ function siteIdentity(source){
 
 export async function scrape(env,url,options={}){
   if(!env.BROWSER?.getByName)throw new Error('Browser container binding unavailable');
-  const signal=AbortSignal.timeout(285000);
   const {source,siteAdmission,executionHandoff=true,...request}=options;
   const jobId=crypto.randomUUID();
   const siteId=siteIdentity(source);
@@ -21,7 +20,6 @@ export async function scrape(env,url,options={}){
       method:'POST',
       headers:{'content-type':'application/json','x-feed-browser-job-id':jobId},
       body:JSON.stringify({url,siteId,jobId,...request,...(siteAdmission?{generation:siteAdmission.generation}:{})}),
-      signal,
     }));
     const bytes=await bounded(response,40*1024*1024);
     const acceptedJobId=response.headers.get('x-feed-browser-job-id');
@@ -64,7 +62,7 @@ export async function scrape(env,url,options={}){
     }
     return result.data;
   }catch(error){
-    if(signal.aborted||error.name==='TypeError'||/network|connection|fetch failed|aborted|timed out|cold start/i.test(error.message)){
+    if(error.name==='TypeError'||/network|connection|fetch failed|aborted|timed out|cold start/i.test(error.message)){
       error.retryable=true;error.code??='browser_transient';
     }
     throw error;

@@ -26,14 +26,11 @@ const server=createServer(async(request,response)=>{
     return reply(429,{error:'Browser capacity busy',code:'capacity_busy',retryable:true},{'retry-after':'60'});
   busy=true;
   const controller=new AbortController();
-  const timer=setTimeout(()=>controller.abort(new Error('Browser job timeout')),270000);
   const disconnected=()=>{if(!response.writableEnded)controller.abort(new Error('Caller disconnected'));};
   response.once('close',disconnected);
   response.writeHead(200,{'content-type':'application/json','cache-control':'no-store'});
   response.flushHeaders();
   const heartbeat=setInterval(()=>{if(!response.destroyed)response.write('\n');},10000);
-  // A stuck subprocess or cleanup path must not leave a billable container alive.
-  const watchdog=setTimeout(()=>process.exit(1),285000);
   try{
     const data=await scrapePage(job,controller.signal);
     const body=JSON.stringify({success:true,data});
@@ -46,7 +43,7 @@ const server=createServer(async(request,response)=>{
       error:String(error.message).replace(/https?:\/\/\S+/g,'[URL omitted]').slice(0,200),
       code:error.code??(retryable?'browser_transient':'capture_failed'),retryable,httpStatus:error.httpStatus}));
   }finally{
-    clearTimeout(timer);clearInterval(heartbeat);clearTimeout(watchdog);
+    clearInterval(heartbeat);
     response.removeListener('close',disconnected);
     busy=false;
   }

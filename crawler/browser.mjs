@@ -78,7 +78,7 @@ export async function openBrowser({signal}={}){
     const call=(method,params={},timeoutMs=45000)=>new Promise((resolve,reject)=>{
       signal?.throwIfAborted();
       const requestId=++id;
-      const timer=setTimeout(()=>{pending.delete(requestId);reject(new Error(`CDP timeout: ${method}`));},timeoutMs);
+      const timer=timeoutMs===null?null:setTimeout(()=>{pending.delete(requestId);reject(new Error(`CDP timeout: ${method}`));},timeoutMs);
       pending.set(requestId,{resolve,reject,timer});
       socket.send(JSON.stringify({id:requestId,method,params}));
     });
