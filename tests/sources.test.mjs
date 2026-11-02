@@ -13,7 +13,7 @@ const workersPlugin={
   setup(buildApi){
     buildApi.onResolve({filter:/^cloudflare:workers$/},()=>({path:'cloudflare-workers',namespace:'sources-workers-stub'}));
     buildApi.onLoad({filter:/.*/,namespace:'sources-workers-stub'},()=>({
-      loader:'js',contents:'export class WorkflowEntrypoint{constructor(env={}){this.env=env;}}',
+      loader:'js',contents:'export class DurableObject{}; export class WorkerEntrypoint{}; export class WorkflowEntrypoint{constructor(env={}){this.env=env;}}',
     }));
   },
 };

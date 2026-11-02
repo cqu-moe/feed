@@ -32,6 +32,7 @@ const workersStub = {
         loader: 'js',
         resolveDir: process.cwd(),
         contents: `
+          export class DurableObject{}
           export class WorkflowEntrypoint{constructor(env={}){this.env=env;}}
           export class WorkerEntrypoint{constructor(_ctx,env={}){this.env=env;}}
         `,

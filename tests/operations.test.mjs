@@ -38,7 +38,7 @@ const workflowStub={
     buildApi.onResolve({filter:/^cloudflare:workers$/},()=>({path:'cloudflare-workers',namespace:'operations-workflow-stub'}));
     buildApi.onLoad({filter:/.*/,namespace:'operations-workflow-stub'},()=>({
       loader:'js',
-      contents:'export class WorkflowEntrypoint{constructor(env={}){this.env=env;}}',
+      contents:'export class DurableObject{}; export class WorkerEntrypoint{}; export class WorkflowEntrypoint{constructor(env={}){this.env=env;}}',
     }));
   },
 };

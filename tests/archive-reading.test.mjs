@@ -75,7 +75,7 @@ async function fixture({failAfterOcrStore=false}={}){
   const pdf=scannedPdf();
   const cloudflarePlugin={name:'reading-workflow-platform',setup(api){
     api.onResolve({filter:/^cloudflare:workers$/},()=>({path:'workers',namespace:'reading-platform'}));
-    api.onLoad({filter:/.*/,namespace:'reading-platform'},()=>({loader:'js',contents:'export class WorkflowEntrypoint{constructor(env){this.env=env;}}'}));
+    api.onLoad({filter:/.*/,namespace:'reading-platform'},()=>({loader:'js',contents:'export class DurableObject{}; export class WorkerEntrypoint{}; export class WorkflowEntrypoint{constructor(env){this.env=env;}}'}));
   }};
   const providerPlugin={name:'reading-browser-provider',setup(api){
     api.onResolve({filter:/\.\/browser-scrape\.mjs$/},()=>({path:'provider',namespace:'reading-provider'}));

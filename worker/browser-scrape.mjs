@@ -8,27 +8,28 @@ function siteIdentity(source){
 }
 
 export async function scrape(env,url,options={}){
-  if(!env.BROWSER?.fetch)throw new Error('Browser service binding unavailable');
+  if(!env.BROWSER?.getByName)throw new Error('Browser container binding unavailable');
   const signal=AbortSignal.timeout(285000);
   const {source,...request}=options;
   const jobId=crypto.randomUUID();
   const siteId=siteIdentity(source);
+  const browser=env.BROWSER.getByName(siteId);
   try{
-    const response=await env.BROWSER.fetch('https://browser.internal/scrape',{
+    const response=await browser.fetch(new Request('https://browser.internal/scrape',{
       method:'POST',
       headers:{'content-type':'application/json','x-feed-browser-job-id':jobId},
       body:JSON.stringify({url,siteId,jobId,...request}),
       signal,
-    });
+    }));
     const bytes=await bounded(response,40*1024*1024);
     const acceptedJobId=response.headers.get('x-feed-browser-job-id');
     if(acceptedJobId===jobId){
-      await env.BROWSER.fetch('https://browser.internal/scrape-complete',{
+      await browser.fetch(new Request('https://browser.internal/scrape-complete',{
         method:'POST',
         body:JSON.stringify({jobId}),
         signal:AbortSignal.timeout(10000),
         headers:{'content-type':'application/json','x-feed-browser-site-id':siteId},
-      }).catch(()=>{});
+      })).catch(()=>{});
     }
     const text=new TextDecoder().decode(bytes);
     let result;

@@ -18,6 +18,7 @@ export {PdfOcrWorkflow} from './pdf-ocr.mjs';
 export {CaptureWorkflow} from './capture-workflow.mjs';
 export {DiscoveryWorkflow} from './discovery-workflow.mjs';
 export {ArchiveOcrWorkflow} from './archive-ocr.mjs';
+export {FeedBrowser} from '../crawler/worker.mjs';
 
 export default {
   async scheduled(controller,env,ctx){

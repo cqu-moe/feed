@@ -31,12 +31,21 @@ export class FeedBrowser extends Container{
       return Response.json({stopped});
     }
 
-    const jobId=request.headers.get('x-feed-browser-job-id');
-    if(path==='/scrape'&&jobId)this.startingJobs.add(jobId);
+    if(path!=='/scrape')return new Response('Not found',{status:404});
+    if(request.method!=='POST')return new Response('Method not allowed',{status:405});
+    let job;
+    try{job=await request.json();validate(job);}
+    catch{return new Response('Invalid scrape request',{status:400});}
+    const jobId=job.jobId;
+    request=new Request(request.url,{
+      method:'POST',headers:{'content-type':'application/json','x-feed-browser-job-id':jobId},
+      body:JSON.stringify(job),signal:request.signal,
+    });
+    this.startingJobs.add(jobId);
     let response;
     try{response=await super.fetch(request);}
     catch(error){this.startingJobs.delete(jobId);throw error;}
-    if(path!=='/scrape'||request.method!=='POST'||response.status!==200||!jobId){
+    if(response.status!==200){
       this.startingJobs.delete(jobId);
       return response;
     }
@@ -60,28 +69,3 @@ export class FeedBrowser extends Container{
     return true;
   }
 }
-
-// No public route or workers.dev endpoint. Access is service-binding-only.
-export default{
-  async fetch(request,env){
-    const path=new URL(request.url).pathname;
-    if(path==='/scrape-complete'){
-      const siteId=request.headers.get('x-feed-browser-site-id');
-      if(!/^[A-Za-z0-9_-]{1,80}$/.test(siteId??''))return new Response('Invalid site identity',{status:400});
-      return env.BROWSER.getByName(siteId).fetch(request);
-    }
-    if(path!=='/scrape')return new Response('Not found',{status:404});
-    if(request.method!=='POST')return new Response('Method not allowed',{status:405});
-    let job;
-    try{job=await request.json();}
-    catch{return new Response('Invalid scrape request',{status:400});}
-    try{validate(job);}catch{return new Response('Invalid scrape request',{status:400});}
-    const body=JSON.stringify(job);
-    return env.BROWSER.getByName(job.siteId).fetch(new Request(request.url,{
-      method:'POST',
-      headers:{'content-type':'application/json','x-feed-browser-job-id':job.jobId},
-      body,
-      signal:request.signal,
-    }));
-  },
-};

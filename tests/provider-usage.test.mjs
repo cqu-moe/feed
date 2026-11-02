@@ -10,7 +10,7 @@ const workerModulesStub = {
     buildApi.onResolve({ filter: /^cloudflare:workers$/ }, () => ({ path: 'cloudflare-workers', namespace: 'provider-usage-worker-modules-stub' }));
     buildApi.onLoad({ filter: /^cloudflare-workers$/, namespace: 'provider-usage-worker-modules-stub' }, () => ({
       loader: 'js',
-      contents: 'export class WorkflowEntrypoint{constructor(env={}){this.env=env;}}',
+      contents: 'export class DurableObject{}; export class WorkerEntrypoint{}; export class WorkflowEntrypoint{constructor(env={}){this.env=env;}}',
     }));
     buildApi.onResolve({ filter: /^posthog-node\/edge$/ }, () => ({ path: 'posthog-edge', namespace: 'provider-usage-worker-modules-stub' }));
     buildApi.onLoad({ filter: /^posthog-edge$/, namespace: 'provider-usage-worker-modules-stub' }, () => ({

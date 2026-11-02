@@ -37,7 +37,7 @@ const recheckWorkersPlugin = {
     buildApi.onResolve({ filter: /^cloudflare:workers$/ }, () => ({ path: 'cloudflare-workers', namespace: 'recheck-workers-stub' }));
     buildApi.onLoad({ filter: /.*/, namespace: 'recheck-workers-stub' }, () => ({
       loader: 'js',
-      contents: 'export class WorkflowEntrypoint{constructor(env={}){this.env=env;}}',
+      contents: 'export class DurableObject{}; export class WorkerEntrypoint{}; export class WorkflowEntrypoint{constructor(env={}){this.env=env;}}',
     }));
   },
 };
