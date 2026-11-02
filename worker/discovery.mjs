@@ -1,4 +1,4 @@
-import {scrape} from './firecrawl.mjs';
+import {scrape} from './browser-scrape.mjs';
 import {articleId,normalizedDate} from './utils.mjs';
 import {canonicalUrl} from './sources.mjs';
 
@@ -80,7 +80,7 @@ export async function discoverList(env,source,url,{scrape:scrapeDependency=scrap
   const pattern=source.config?.articlePattern??source.articlePattern;
   const actionSource={articlePattern:pattern};
   const data=await scrapeDependency(env,target.href,{
-    formats:['links'],
+    source,formats:['links'],readiness:{articlePattern:pattern,allowExternalOnly},
     actions:[{type:'executeJavascript',script:`var __name=value=>value; (${listPage.toString()})(${JSON.stringify(actionSource)})`}],
   });
   let page=data.actions?.javascriptReturns?.[0]?.value;

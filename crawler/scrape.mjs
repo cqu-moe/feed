@@ -21,20 +21,36 @@ export async function scrapePage(job,signal){
   try{
     await browser.navigate(job.url);
     const readyDeadline=Date.now()+45000;
-    let state;
+    let state,ready=false;
+    const readiness=JSON.stringify(job.readiness??{});
     while(Date.now()<readyDeadline){
       signal.throwIfAborted();
-      try{state=await browser.evaluate(`({url:location.href,ready:document.readyState,text:document.body?.innerText??'',links:document.querySelectorAll('a[href]').length})`);}
+      try{state=await browser.evaluate(`(() => {
+        const input=${readiness};
+        const pattern=input.articlePattern?new RegExp(input.articlePattern):null;
+        const content=pattern?[...document.querySelectorAll('a[href]')].some(anchor=>{
+          if(anchor.closest('nav,header,footer'))return false;
+          let url;try{url=new URL(anchor.getAttribute('href'),location.href);}catch{return false;}
+          if(url.origin===location.origin&&pattern.test(url.pathname))return true;
+          if(url.origin===location.origin&&['/detail.jsp','/2022b/wznr.jsp'].includes(url.pathname)
+            &&url.searchParams.get('urltype')==='news.NewsContentUrl'
+            &&/^\\d+$/.test(url.searchParams.get('wbtreeid')??'')
+            &&/^\\d+$/.test(url.searchParams.get('wbnewsid')??''))return true;
+          return input.allowExternalOnly&&url.origin==='https://mp.weixin.qq.com'
+            &&/^\\/s(?:\\/|$)/.test(url.pathname)&&/20\\d{2}[年.\\/-]\\s*\\d{1,2}/.test(anchor.closest('li')?.textContent??'');
+        }):(document.body?.innerText?.length??0)>100||!!document.querySelector('iframe[src],embed[src],object[data]');
+        return {url:location.href,parsed:document.readyState!=='loading',content};
+      })()`);}
       catch(error){if(signal.aborted)throw error;}
       const status=browser.documents.at(-1)?.status;
       if(state?.url&&new URL(state.url).origin!==new URL(job.url).origin&&state.url!=='about:blank')
         throw Object.assign(new Error('Unexpected navigation origin'),{code:'origin_redirect'});
       if(status===404)throw Object.assign(new Error('Origin HTTP 404'),{code:'origin_http',httpStatus:404});
-      if(status>=200&&status<300&&state?.ready==='complete'&&(state.links>0||state.text.length>100))break;
+      if(status>=200&&status<300&&state?.parsed&&state.content){ready=true;break;}
       await delay(500,undefined,{signal});
     }
     const status=browser.documents.at(-1)?.status;
-    if(!(status>=200&&status<300)||state?.ready!=='complete')
+    if(!(status>=200&&status<300)||!ready)
       throw Object.assign(new Error(`Origin did not become ready${status?` (HTTP ${status})`:''}`),
         {code:'origin_unavailable',httpStatus:status,retryable:true});
     const value=await browser.evaluate(job.actions[0].script,{timeoutMs:220000,userGesture:true});

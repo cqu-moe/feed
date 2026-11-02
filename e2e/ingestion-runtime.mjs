@@ -8,7 +8,7 @@ const body = mode => ['ocr', 'ocr-invalid'].includes(mode) ? '采集验收第二
 const pdf = mode => Buffer.from(mixedPdf({ firstPageText: mode === 'ocr-invalid' ? 'Independent OCR failure document' : 'Independent second revision document' }));
 const ordinaryPdf = Buffer.from('%PDF-1.7\nFEED03 ordinary attachment original bytes\n%%EOF\n');
 
-// Only the external Firecrawl/school and TextIn boundaries are replaced. Their
+// Only the external browser/school and TextIn boundaries are replaced. Their
 // responses are evidence inputs, never ready revisions, task receipts or tokens.
 export function createIngestionFixture({ dateOnly = false } = {}) {
   let mode = 'baseline';
@@ -24,7 +24,6 @@ export function createIngestionFixture({ dateOnly = false } = {}) {
   const bindings = {
     ADMIN_TOKEN: randomBytes(32).toString('hex'),
     BRIDGE_SECRET: 'synthetic-ingestion-bridge-secret',
-    FIRECRAWL_API_KEY: 'synthetic-firecrawl',
     TEXTIN_APP_ID: 'synthetic-textin', TEXTIN_SECRET_CODE: 'synthetic-textin',
     CRAWL_ENABLED: 'true', TASK_RUNTIME_ENABLED: 'true',
     ARCHIVE_VERSIONS_ENABLED: 'true', ARCHIVE_READS_ENABLED: 'true',
@@ -60,7 +59,7 @@ export function createIngestionFixture({ dateOnly = false } = {}) {
     const fileUrl = `${SCHOOL}/files/${n}.pdf`;
     const attached = primary;
     return {
-      markdown: text, rawHtml: html, metadata: { statusCode: 200, creditsUsed: 1 },
+      markdown: text, rawHtml: html, metadata: { statusCode: 200, provider: 'browser-container' },
       actions: { javascriptReturns: [{ value: JSON.stringify({
         bodyRecognized: true, page: { url, title: title(n) }, heading: title(n),
         bodyText: text, bodyHtml: `<p class="${activeMode}">${text}</p>`, bodyCapturedAt: new Date().toISOString(), errors: [],
@@ -75,6 +74,27 @@ export function createIngestionFixture({ dateOnly = false } = {}) {
         }] : [],
       }) }] },
     };
+  }
+
+  async function browserResponse(request) {
+    const target = new URL(request.url);
+    if (target.pathname === '/scrape-complete' && request.method === 'POST') return Response.json({stopped: true});
+    if (target.pathname === '/scrape' && request.method === 'POST') {
+      const input = await request.json();
+      const url = new URL(input.url);
+      if (url.origin !== SCHOOL) throw new Error('Fixture refuses non-synthetic school');
+      const list = input.formats?.includes('links');
+      calls.push({ provider: 'browser-container', url: url.href, kind: list ? 'list' : 'article', mode });
+      if (mode === 'failure' && !list && url.pathname.endsWith('/1001.htm')) return Response.json({ success: false, error: 'Synthetic upstream outage' }, { status: 500 });
+      if (!list) return Response.json({ success: true, data: capture(url.href) }, { headers: { 'x-feed-browser-job-id': input.jobId } });
+      const page2 = url.pathname.endsWith('page2');
+      const articles = page2 ? [{ url: `${SCHOOL}/info/2026/1002.htm`, title: title(1002), publishedAt: day(0) + (dateOnly ? '' : ' 09:02') }]
+        : [{ url: `${SCHOOL}/info/2026/1001.htm?utm_source=duplicate`, title: title(1001), publishedAt: day(0) + (dateOnly ? '' : ' 09:01') },
+          { url: `${SCHOOL}/info/2026/1003.htm`, title: title(1003), publishedAt: day(-10) + ' 09:03' }];
+      return Response.json({ success: true, data: { metadata: { statusCode: 200, provider: 'browser-container' },
+        actions: { javascriptReturns: [{ value: JSON.stringify({ articles, next: page2 ? [] : [new URL('page2', url.href + '/').href] }) }] } } }, { headers: { 'x-feed-browser-job-id': input.jobId } });
+    }
+    return new Response('Unknown browser operation', { status: 404 });
   }
 
   return {
@@ -92,23 +112,23 @@ export function createIngestionFixture({ dateOnly = false } = {}) {
       }
       if ((await bucket.list()).objects.length) throw new Error('Ingestion requires empty R2');
     },
+    // This DO fixture is the external browser boundary. Task admission, Queue,
+    // Workflow, journal writes, archive completeness and reads remain native.
+    browserWorker: {
+      name: 'browser-fixture',
+      modules: [{ type: 'ESModule', path: 'browser-fixture.mjs', contents: `
+        import {DurableObject} from 'cloudflare:workers';
+        export class SyntheticBrowser extends DurableObject {
+          async fetch(request) { return this.env.EXTERNAL_BROWSER.fetch(request); }
+        }
+      ` }],
+      compatibilityDate: '2026-10-11',
+      durableObjects: { BROWSER: { className: 'SyntheticBrowser', useSQLite: true } },
+      serviceBindings: { EXTERNAL_BROWSER: request => browserResponse(request) },
+      outboundService: () => new Response('Browser fixture egress denied', { status: 502 }),
+    },
     async outbound(request) {
       const target = new URL(request.url);
-      if (target.href === 'https://api.firecrawl.dev/v2/scrape' && request.method === 'POST') {
-        const input = await request.json();
-        const url = new URL(input.url);
-        if (url.origin !== SCHOOL) throw new Error('Fixture refuses non-synthetic school');
-        const list = input.formats?.includes('links');
-        calls.push({ provider: 'firecrawl', url: url.href, kind: list ? 'list' : 'article', mode });
-        if (mode === 'failure' && !list && url.pathname.endsWith('/1001.htm')) return Response.json({ success: false, error: 'Synthetic upstream outage' }, { status: 500 });
-        if (!list) return Response.json({ success: true, data: capture(url.href) });
-        const page2 = url.pathname.endsWith('page2');
-        const articles = page2 ? [{ url: `${SCHOOL}/info/2026/1002.htm`, title: title(1002), publishedAt: day(0) + (dateOnly ? '' : ' 09:02') }]
-          : [{ url: `${SCHOOL}/info/2026/1001.htm?utm_source=duplicate`, title: title(1001), publishedAt: day(0) + (dateOnly ? '' : ' 09:01') },
-            { url: `${SCHOOL}/info/2026/1003.htm`, title: title(1003), publishedAt: day(-10) + ' 09:03' }];
-        return Response.json({ success: true, data: { metadata: { statusCode: 200, creditsUsed: 1 },
-          actions: { javascriptReturns: [{ value: JSON.stringify({ articles, next: page2 ? [] : [new URL('page2', url.href + '/').href] }) }] } } });
-      }
       if (target.href === 'https://api.textin.com/api/v1/xparse/parse/sync' && request.method === 'POST') {
         const form = await request.formData();
         const file = Buffer.from(await form.get('file').arrayBuffer());

@@ -19,34 +19,10 @@ const workersPlugin={
 };
 
 const browserPlugin={
-  name:'sources-capture-browser-stub',
+  name:'sources-browser-stub',
   setup(buildApi){
     buildApi.onResolve({filter:/\.\/browser-scrape\.mjs$/},()=>({path:'browser',namespace:'sources-browser-stub'}));
     buildApi.onLoad({filter:/.*/,namespace:'sources-browser-stub'},()=>({
-      loader:'js',
-      contents:`
-        const encoded=value=>btoa(String.fromCharCode(...new TextEncoder().encode(value)));
-        export async function scrape(){
-          const html='<html><body><main><h1>共享通知</h1><p>多来源样本正文</p></main></body></html>';
-          const page={bodyRecognized:true,page:{url:${JSON.stringify(sharedArticleUrl)}},bodyText:'多来源样本正文'.repeat(20),errors:[],
-            attachmentCandidates:[],downloads:[],artifacts:[
-              {name:'snapshot.html',base64:encoded(html),contentType:'text/html; charset=utf-8'},
-              {name:'offline.html',base64:encoded(html),contentType:'text/html; charset=utf-8'},
-            ]};
-          return {markdown:'多来源样本正文',rawHtml:html,screenshot:{contentType:'image/png',base64:'iVBORw0KGgo='},
-            metadata:{statusCode:200,provider:'browser-container'},
-            actions:{javascriptReturns:[{value:JSON.stringify(page)}]}};
-        }
-      `.replace(/sharedArticleUrl/g,JSON.stringify(sharedArticleUrl)),
-    }));
-  },
-};
-
-const firecrawlPlugin={
-  name:'sources-firecrawl-stub',
-  setup(buildApi){
-    buildApi.onResolve({filter:/\.\/firecrawl\.mjs$/},()=>({path:'firecrawl',namespace:'sources-firecrawl-stub'}));
-    buildApi.onLoad({filter:/.*/,namespace:'sources-firecrawl-stub'},()=>({
       loader:'js',
       contents:`
         const calls=[];
@@ -108,7 +84,7 @@ const firecrawlPlugin={
           }
           return {
             markdown:'多来源样本正文',rawHtml:'<html></html>',
-            metadata:{statusCode:200,creditsUsed:1,proxyUsed:true},
+            metadata:{statusCode:200,provider:'browser-container'},
             actions:{javascriptReturns:[{value:JSON.stringify(value)}]},
           };
         }
@@ -265,7 +241,7 @@ async function fixture({versioned=false,notifications=false,discoveryPages=2,env
       sourcefile:'sources-fixture.mjs',
     },
     bundle:true,write:false,format:'esm',platform:'browser',external:['node:buffer','node:*'],
-    plugins:[workersPlugin,browserPlugin,firecrawlPlugin],
+    plugins:[workersPlugin,browserPlugin],
   });
   const provider=oauthProvider();
   const gate={url:null,held:false,release:null};
