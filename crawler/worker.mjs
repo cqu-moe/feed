@@ -27,13 +27,21 @@ export class FeedBrowser extends Container{
       let completion;
       try{completion=await request.json();}
       catch{return new Response('Invalid completion',{status:400});}
+      await super.fetch(new Request(request.url,{
+        method:'POST',
+        headers:Object.fromEntries(request.headers),
+        body:JSON.stringify(completion),
+        signal:request.signal,
+      }));
       const stopped=await this.completeScrape(completion);
       return Response.json({stopped});
     }
 
     const jobId=request.headers.get('x-feed-browser-job-id');
     if(path==='/scrape'&&jobId)this.startingJobs.add(jobId);
-    const response=await super.fetch(request);
+    let response;
+    try{response=await super.fetch(request);}
+    catch(error){this.startingJobs.delete(jobId);throw error;}
     if(path!=='/scrape'||request.method!=='POST'||response.status!==200||!jobId){
       this.startingJobs.delete(jobId);
       return response;
@@ -79,6 +87,7 @@ export default{
       method:'POST',
       headers:{'content-type':'application/json','x-feed-browser-job-id':job.jobId},
       body,
+      signal:request.signal,
     }));
   },
 };

@@ -5,6 +5,7 @@ import {scrape} from '../worker/browser-scrape.mjs';
 
 const job={url:'https://jwc.cqu.edu.cn/info/1080/6203.htm',siteId:'site-7fd03676e5751e9b6dd95ecb',jobId:'11111111-2222-3333-4444-555555555555',
   formats:['rawHtml'],actions:[{type:'executeJavascript',script:'1'}]};
+const successBody=JSON.stringify({success:true,data:{metadata:{statusCode:200}}});
 
 async function loadWorker(){
   const bundle=await build({
@@ -29,8 +30,9 @@ async function loadWorker(){
               async fetch(request){
                 this.proxyEvents.push({request,body:await request.text()});
                 if(new URL(request.url).pathname==='/scrape-complete')return Response.json({ok:true});
+                if(this.failNextScrape){this.failNextScrape=false;throw new Error('cold start failed');}
                 await new Promise(resolve=>setTimeout(resolve,20));
-                const bytes=new TextEncoder().encode('{\"success\":true}');
+                const bytes=new TextEncoder().encode(JSON.stringify({success:true,data:{metadata:{statusCode:200}}}));
                 const stream=new ReadableStream({
                   start(controller){
                     setTimeout(()=>{
@@ -60,7 +62,7 @@ test('browser service routes one CQU scrape by explicit site identity and stops 
     method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(job),
   }),{BROWSER:namespace});
   assert.equal(response.status,200);
-  assert.deepEqual([...new Uint8Array(await response.arrayBuffer())],[...new TextEncoder().encode('{"success":true}')]);
+  assert.deepEqual(JSON.parse(await response.text()),JSON.parse(successBody));
   assert.deepEqual(instance.proxyEvents.map(event=>event.selected).filter(Boolean),[job.siteId]);
   const scrapeEvent=instance.proxyEvents.find(event=>event.request);
   assert.equal(scrapeEvent.request.method,'POST');
@@ -99,7 +101,7 @@ test('browser service keeps an accepted stream active when another request is bu
   }),{BROWSER:namespace});
   assert.deepEqual(await wrongJobCompletion.json(),{stopped:false});
   assert.equal(instance.proxyEvents.some(event=>event.stoppedAt),false);
-  assert.deepEqual([...new Uint8Array(await response.arrayBuffer())],[...new TextEncoder().encode('{"success":true}')]);
+  assert.deepEqual(JSON.parse(await response.text()),JSON.parse(successBody));
   assert.equal(instance.proxyEvents.some(event=>event.stoppedAt),false);
   const completion=await worker.fetch(new Request('https://browser.internal/scrape-complete',{
     method:'POST',headers:{'content-type':'application/json','x-feed-browser-site-id':firstJob.siteId},
@@ -120,9 +122,58 @@ test('capture adapter sends only the private scrape contract with the configured
   });
   assert.equal(response.markdown,'正文');
   assert.equal(serviceRequest.input,'https://browser.internal/scrape');
-  assert.deepEqual(JSON.parse(serviceRequest.init.body),{
-    url:job.url,siteId:'site-7fd03676e5751e9b6dd95ecb',formats:['markdown'],
+  const request=JSON.parse(serviceRequest.init.body);
+  assert.deepEqual({...request,jobId:null},{
+    url:job.url,siteId:'site-7fd03676e5751e9b6dd95ecb',jobId:null,formats:['markdown'],
   });
+  assert.match(request.jobId,/^[0-9a-f-]{36}$/i);
+});
+
+test('capture adapter and browser worker complete one accepted scrape over the service-binding wire',async()=>{
+  const {worker,FeedBrowser}=await loadWorker();
+  const instance=new FeedBrowser();
+  const browserService={getByName:()=>instance};
+  const binding={fetch:(input,init)=>worker.fetch(new Request(input,init),{BROWSER:browserService})};
+  const response=await scrape({BROWSER:binding},job.url,{
+    source:{id:'jwc',siteId:'7fd03676e5751e9b6dd95ecb',name:'教务处'},
+    formats:['rawHtml'],
+    actions:job.actions,
+  });
+  assert.equal(response.metadata.statusCode,200);
+  const requests=instance.proxyEvents.filter(event=>event.request);
+  assert.equal(requests.length,2,'scrape and explicit completion should each reach the container proxy');
+  const scrapeRequest=JSON.parse(requests[0].body);
+  assert.deepEqual(scrapeRequest,{
+    url:job.url,siteId:job.siteId,jobId:scrapeRequest.jobId,formats:['rawHtml'],actions:job.actions,
+  });
+  assert.match(scrapeRequest.jobId,/^[0-9a-f-]{36}$/i);
+  assert.equal(requests[1].request.method,'POST');
+  assert.equal(new URL(requests[1].request.url).pathname,'/scrape-complete');
+  assert.deepEqual(JSON.parse(requests[1].body),{jobId:scrapeRequest.jobId});
+  assert.equal(instance.proxyEvents.filter(event=>event.stoppedAt).length,1);
+});
+
+test('a cold-start failure does not strand a later accepted job completion',async()=>{
+  const {worker,FeedBrowser}=await loadWorker();
+  const instance=new FeedBrowser();
+  instance.failNextScrape=true;
+  const namespace={getByName:()=>instance};
+  await assert.rejects(worker.fetch(new Request('https://browser.internal/scrape',{
+    method:'POST',headers:{'content-type':'application/json','x-feed-browser-job-id':'11111111-2222-3333-4444-555555555555'},
+    body:JSON.stringify(job),
+  }),{BROWSER:namespace}),/cold start failed/);
+  assert.equal(instance.startingJobs.size,0);
+  const response=await worker.fetch(new Request('https://browser.internal/scrape',{
+    method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(job),
+  }),{BROWSER:namespace});
+  assert.equal(response.status,200);
+  await response.arrayBuffer();
+  const completion=await worker.fetch(new Request('https://browser.internal/scrape-complete',{
+    method:'POST',headers:{'content-type':'application/json','x-feed-browser-site-id':job.siteId},
+    body:JSON.stringify({jobId:job.jobId}),
+  }),{BROWSER:namespace});
+  assert.deepEqual(await completion.json(),{stopped:true});
+  assert.equal(instance.proxyEvents.filter(event=>event.stoppedAt).length,1);
 });
 
 test('browser service exposes no other scrape route and rejects unsafe targets or identities',async()=>{
