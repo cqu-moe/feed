@@ -56,6 +56,7 @@ async function fixture(){
           return {
             markdown:'中文归档正文',
             rawHtml:snapshot,
+            screenshot:{contentType:'image/png',base64:'iVBORw0KGgo='},
             metadata:{statusCode:200,creditsUsed:1,proxyUsed:true},
             actions:{javascriptReturns:[{value:JSON.stringify(page)}]},
           };
@@ -67,7 +68,7 @@ async function fixture(){
             if(url.pathname==='/capture'){
               const archive=createArchive(env,{collector:createCollector({scrape})});
               const article={id:${JSON.stringify(articleId)},url:${JSON.stringify(articleUrl)},title:'并发采集通知'};
-              const source={id:'jwc',name:'教务处',url:'https://jwc.cqu.edu.cn/'};
+              const source={id:'jwc',siteId:'7fd03676e5751e9b6dd95ecb',name:'教务处',url:'https://jwc.cqu.edu.cn/'};
               return Response.json(await Promise.all([
                 archive.capture(source,article),
                 archive.capture(source,article),

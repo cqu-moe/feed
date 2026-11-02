@@ -37,12 +37,12 @@ const workersStub = {
         `,
       };
     });
-    buildApi.onResolve({ filter: /\.\/firecrawl\.mjs$/ }, () => ({
-      path: 'archive-version-firecrawl',
+    buildApi.onResolve({ filter: /\.\/browser-scrape\.mjs$/ }, () => ({
+      path: 'archive-version-browser',
       namespace: 'archive-version-workers-stub',
     }));
     buildApi.onLoad({ filter: /.*/, namespace: 'archive-version-workers-stub' }, (args) => {
-      if (args.path !== 'archive-version-firecrawl') return undefined;
+      if (args.path !== 'archive-version-browser') return undefined;
       return {
         loader: 'js',
         resolveDir: process.cwd(),

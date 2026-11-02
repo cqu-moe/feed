@@ -6,25 +6,23 @@ import {script as bundle} from 'single-file-cli/lib/single-file-bundle.js';
 import options from './singlefile-options.json';
 import {captchaPage} from './page-action.mjs';
 import {issueGrant} from './bridge.mjs';
-import {scrape} from './firecrawl.mjs';
+import {scrape} from './browser-scrape.mjs';
 import {put,bounded,fileKind,sha,cleanError} from './utils.mjs';
 import {resumeSavedCapture,saveCaptureRevision} from './archive-capture.mjs';
 
 export function createCollector(dependencies={}){
   const {
     scrape: scrapeDependency=scrape,
-    fetch: fetchDependency=fetch,
     enqueueOcr: enqueueOcrDependency=enqueuePdfOcr,
   }=dependencies;
   return (env,source,article,captureContext)=>collectArticle(env,source,article,{
     scrape:scrapeDependency,
-    fetch:fetchDependency,
     enqueueOcr:enqueueOcrDependency,
   },captureContext);
 }
 
 async function collectArticle(env,source,article,dependencies,captureContext){
-  const {scrape:scrapeDependency,fetch:fetchDependency,enqueueOcr:enqueueOcrDependency}=dependencies;
+  const {scrape:scrapeDependency,enqueueOcr:enqueueOcrDependency}=dependencies;
   const {fence,taskId=null,attemptNo=null}=captureContext??{};
   if(!Number.isSafeInteger(fence))throw new Error('Capture lease is required');
   const versioned=taskId&&env.ARCHIVE_VERSIONS_ENABLED==='true';
@@ -38,10 +36,16 @@ async function collectArticle(env,source,article,dependencies,captureContext){
   const grant=await issueGrant(env,source,runId,article.id);
   const bridgeURL=new URL('/internal/bridge',env.BRIDGE_BASE_URL??env.BASE_URL);bridgeURL.searchParams.set('grant',grant.token);
   const input={id:article.id,url:article.url,title:article.title.replace(/^[●•·\s]+|[…]+$/g,'').slice(0,18),bridgeURL:bridgeURL.href,bridgeOrigin:bridgeURL.origin,channel:grant.channel,bundle,options:{...options,selfExtractingArchive:false,maxResourceSize:3,maxResourceSizeEnabled:true,networkTimeout:8000,insertMetaCSP:false}};
-  const data=await scrapeDependency(env,article.url,{formats:['markdown','rawHtml',{type:'screenshot',fullPage:true}],onlyMainContent:true,actions:[{type:'executeJavascript',script:`var __name=value=>value; (${captchaPage.toString()})(${JSON.stringify(input)})`}]});
+  if(!source.siteId){
+    // Legacy source rows predate sites.site_id. Recover the configured identity
+    // from a unique site origin; hostname itself never becomes container identity.
+    const sites=await env.DB.prepare('SELECT id FROM sites WHERE origin=?').bind(new URL(source.url).origin).all();
+    if(sites.results.length===1)source={...source,siteId:sites.results[0].id};
+  }
+  const data=await scrapeDependency(env,article.url,{source,formats:['markdown','rawHtml',{type:'screenshot',fullPage:true}],onlyMainContent:true,actions:[{type:'executeJavascript',script:`var __name=value=>value; (${captchaPage.toString()})(${JSON.stringify(input)})`}]});
   let page=data.actions?.javascriptReturns?.[0]?.value;if(typeof page==='string')page=JSON.parse(page);
   if(!page?.bodyRecognized||new URL(page.page.url).origin!==new URL(source.url).origin)throw new Error('Article body not recognized');
-  const report={id:article.id,runId,url:article.url,captureFence:fence,capturedAt:new Date().toISOString(),bodyCapturedAt:page.bodyCapturedAt??null,provider:{statusCode:data.metadata?.statusCode,creditsUsed:data.metadata?.creditsUsed,proxyUsed:data.metadata?.proxyUsed},artifacts:[],errors:[...(page.errors??[])]};
+  const report={id:article.id,runId,url:article.url,captureFence:fence,capturedAt:new Date().toISOString(),bodyCapturedAt:page.bodyCapturedAt??null,provider:{name:'browser-container',siteId:source.siteId,statusCode:data.metadata?.statusCode,elapsedMs:data.metadata?.elapsedMs},artifacts:[],errors:[...(page.errors??[])]};
   const stored=new Map();
   for(const item of page.artifacts??[]){
     if(!/^(attachment-\d+\.(pdf|docx?|xlsx?|pptx?|zip|rar|7z|bin)|snapshot\.html|offline\.html)$/.test(item.name))throw new Error('Unexpected artifact');
@@ -95,11 +99,12 @@ async function collectArticle(env,source,article,dependencies,captureContext){
   let screenshotKey=null;
   if(data.screenshot){
     try{
-      const target=new URL(data.screenshot);
-      if(target.protocol!=='https:')throw new Error('Invalid screenshot URL');
-      const response=await fetchDependency(target,{signal:AbortSignal.timeout(20000)});
-      if(!response.ok||!response.headers.get('content-type')?.startsWith('image/'))throw new Error('Screenshot unavailable');
-      const shot=await put(env,prefix,'original.png',await bounded(response),response.headers.get('content-type'));
+      if(data.screenshot.contentType!=='image/png'||typeof data.screenshot.base64!=='string'||data.screenshot.base64.length>12*1024*1024)
+        throw new Error('Invalid screenshot');
+      const bytes=Buffer.from(data.screenshot.base64,'base64');
+      if(bytes.length<8||Buffer.from(bytes.subarray(0,8)).toString('hex')!=='89504e470d0a1a0a')
+        throw new Error('Invalid screenshot signature');
+      const shot=await put(env,prefix,'original.png',bytes,'image/png');
       report.artifacts.push(shot);screenshotKey=shot.key;
     }catch(error){report.errors.push(cleanError(error));}
   }
@@ -119,7 +124,7 @@ async function collectArticle(env,source,article,dependencies,captureContext){
   report.downloads=(page.downloads??[]).map(({attempts,...row})=>({...row,attemptCount:attempts?.length??0}));
   report.artifacts.push(await put(env,prefix,'manifest.json',JSON.stringify(report,null,2),'application/json'));
   if(versioned)return saveCaptureRevision(env,source,article,captureContext,{report,stored,candidates,downloaded,body,rawBody,migrationBody,sourceMarkup:page.bodyHtml??null,nativePdfs,sourceTitle:page.heading||page.page.title});
-  const result={id:article.id,status,attachments:candidates.length,downloaded:completeFiles,creditsUsed:report.provider.creditsUsed};
+  const result={id:article.id,status,attachments:candidates.length,downloaded:completeFiles};
   // One eligibility cutoff for the entire atomic batch, after all R2 writes. A later
   // claimant changes the fence; the clock cannot expire between individual writes.
   const guardArgs=[article.id,fence,Date.now(),taskId,taskId,attemptNo];

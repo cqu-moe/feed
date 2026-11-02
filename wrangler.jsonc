@@ -52,6 +52,7 @@
   "r2_buckets":[{"binding":"ARCHIVE","bucket_name":"cqu-feed-archive"}],
   "ai":{"binding":"AI"},
   "services":[
+    {"binding":"BROWSER","service":"cqu-feed-browser"},
     {"binding":"AUTH","service":"cqu-moe-auth"},
     {"binding":"AUTH_FEED_RPC","service":"cqu-moe-auth","entrypoint":"AuthService"}
   ],

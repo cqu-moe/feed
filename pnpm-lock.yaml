@@ -11,6 +11,9 @@ importers:
 
   .:
     dependencies:
+      '@cloudflare/containers':
+        specifier: 0.3.7
+        version: 0.3.7
       '@cqu-moe/theme':
         specifier: file:.design/cqu-moe-theme-1.1.0.tgz
         version: file:.design/cqu-moe-theme-1.1.0.tgz
@@ -104,6 +107,8 @@ importers:
         version: 4.149.0(@cloudflare/workers-types@5.20261010.1)(@types/node@22.20.5)
 
 packages:
+  '@cloudflare/containers@0.3.7':
+    resolution: {integrity: sha512-DM9dm3FnIBSyiSJ1FLavKwl/lk3oAmTaynCzZQ9pZR0ncRPquSxkxd8Nu2MFILxmDDsPkxKsSNEh9mHHMty4Fw==}
 
   '@ai-sdk/provider@4.0.26':
     resolution: {integrity: sha512-BZ443uBEq6HuMA+Z4b7Hpm65GpZSo7pWqnYqpf/7tAO3C48JbtvAhOE2JnODFj+jodsZzfRHkAyQb64xuD2tZQ==}
@@ -3166,6 +3171,7 @@ packages:
     resolution: {integrity: sha512-bXE4cR/kVZhKZX/RjPEflHaKVhUVl85noU3v6b8apfQEc1x4A+zBxjZ4lN8LqGd6WZ3dl98pY4o717VFmoPp+A==}
 
 snapshots:
+  '@cloudflare/containers@0.3.7': {}
 
   '@ai-sdk/provider@4.0.26':
     dependencies:

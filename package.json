@@ -19,6 +19,7 @@
     "test:e2e:ingestion": "FEED_E2E_SUITE=ingestion node e2e/run.mjs"
   },
   "dependencies": {
+    "@cloudflare/containers": "0.3.7",
     "@cqu-moe/theme": "file:./.design/cqu-moe-theme-1.1.0.tgz",
     "@cqu-moe/ui": "file:./.design/cqu-moe-ui-1.1.0.tgz",
     "jose": "6.1.3",

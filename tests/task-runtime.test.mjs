@@ -18,11 +18,11 @@ const workersPlugin={
   },
 };
 
-const firecrawlPlugin={
-  name:'task-runtime-firecrawl-stub',
+const browserPlugin={
+  name:'task-runtime-browser-stub',
   setup(buildApi){
-    buildApi.onResolve({filter:/\.\/firecrawl\.mjs$/},()=>({path:'firecrawl',namespace:'task-runtime-firecrawl-stub'}));
-    buildApi.onLoad({filter:/.*/,namespace:'task-runtime-firecrawl-stub'},()=>({
+    buildApi.onResolve({filter:/\.\/browser-scrape\.mjs$/},()=>({path:'browser-scrape',namespace:'task-runtime-browser-stub'}));
+    buildApi.onLoad({filter:/.*/,namespace:'task-runtime-browser-stub'},()=>({
       loader:'js',
       contents:`
         const calls=[];
@@ -35,7 +35,8 @@ const firecrawlPlugin={
           return {
             markdown:'中文正文',
             rawHtml:snapshot,
-            metadata:{statusCode:200,creditsUsed:1,proxyUsed:true},
+            metadata:{statusCode:200,provider:'browser-container'},
+            screenshot:{contentType:'image/png',base64:'iVBORw0KGgo='},
             actions:{javascriptReturns:[{value:JSON.stringify({
               bodyRecognized:true,
               page:{url:${JSON.stringify(articleUrl)}},
@@ -54,7 +55,7 @@ const firecrawlPlugin={
         export async function scrape(_env,url){
           calls.push(url);
           const mode=globalThis.TASK_RUNTIME_SCRAPE_MODE;
-          if(mode==='rate-limit')throw new Error('Firecrawl HTTP 429: rate limit exceeded');
+          if(mode==='rate-limit')throw new Error('Browser HTTP 429: rate limit exceeded');
           if(mode==='long-rate-limit'){
             const error=new Error('Firecrawl HTTP 429: rate limit exceeded');
             error.retryAfterMs=12*60*60*1000;
@@ -264,7 +265,7 @@ async function fixture({
     format:'esm',
     platform:'browser',
     external:['node:buffer','node:*'],
-    plugins:[workersPlugin,firecrawlPlugin],
+    plugins:[workersPlugin,browserPlugin],
   });
   const mf=new Miniflare(convertV4MiniflareOptions({
     modules:true,
@@ -286,12 +287,13 @@ async function fixture({
     queueConsumers:{'feed-jobs':{maxBatchSize:1,maxRetries:3,deadLetterQueue:'feed-jobs-dlq'}},
   }));
   const db=await mf.getD1Database('DB'),bucket=await mf.getR2Bucket('ARCHIVE');
-  for(const name of ['0001_feed.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql',
+  for(const name of ['0001_feed.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql',
     ...(recheckRuntime?['0007_archive_versions.sql','0008_content_events.sql','0017_archive_recheck.sql']:[]),
     '0018_outbox_receipts.sql']){
     await applyMigration(db,await readFile(`migrations/${name}`,'utf8'));
   }
-  await db.prepare("INSERT INTO sources(id,name,url) VALUES ('jwc','教务处','https://jwc.cqu.edu.cn/')").run();
+  await db.prepare("UPDATE sources SET site_id='7fd03676e5751e9b6dd95ecb',list_url='https://jwc.cqu.edu.cn/index/tzgg.htm' WHERE id='jwc'").run();
+  await db.prepare("INSERT INTO sources(id,site_id,name,url,list_url) VALUES ('jwc','7fd03676e5751e9b6dd95ecb','教务处','https://jwc.cqu.edu.cn/','https://jwc.cqu.edu.cn/index/tzgg.htm')").run();
   await db.prepare("INSERT INTO articles(id,source_id,url,title,published_at,discovered_at,status,attempts,lease_until) VALUES (?,'jwc',?,'队列采集通知','2026-10-10','2026-10-11',?,?,?)")
     .bind(articleId,articleUrl,articleStatus,articleAttempts,leaseUntil).run();
   return {mf,db,bucket};
@@ -354,6 +356,8 @@ test('admin capture task survives queue handoff and archives one article for rea
     const article=await db.prepare('SELECT prefix,snapshot_key FROM articles WHERE id=?').bind(articleId).first();
     const snapshot=await bucket.get(article.snapshot_key);
     assert.match(await snapshot.text(),/队列采集通知/);
+    const screenshot=await(await mf.dispatchFetch('https://feed.test/api/screenshots/'+articleId)).arrayBuffer();
+    assert.deepEqual([...new Uint8Array(screenshot).subarray(0,4)],[0x89,0x50,0x4e,0x47]);
     const manifest=await(await bucket.get(`${article.prefix}/manifest.json`)).json();
     assert.equal(manifest.status,'complete');
   }finally{

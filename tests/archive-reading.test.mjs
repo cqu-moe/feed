@@ -77,8 +77,8 @@ async function fixture({failAfterOcrStore=false}={}){
     api.onResolve({filter:/^cloudflare:workers$/},()=>({path:'workers',namespace:'reading-platform'}));
     api.onLoad({filter:/.*/,namespace:'reading-platform'},()=>({loader:'js',contents:'export class WorkflowEntrypoint{constructor(env){this.env=env;}}'}));
   }};
-  const providerPlugin={name:'reading-firecrawl-provider',setup(api){
-    api.onResolve({filter:/\.\/firecrawl\.mjs$/},()=>({path:'provider',namespace:'reading-provider'}));
+  const providerPlugin={name:'reading-browser-provider',setup(api){
+    api.onResolve({filter:/\.\/browser-scrape\.mjs$/},()=>({path:'provider',namespace:'reading-provider'}));
     api.onLoad({filter:/.*/,namespace:'reading-provider'},()=>({loader:'js',contents:`
       const encoded=value=>btoa(String.fromCharCode(...new TextEncoder().encode(value)));
       export async function scrape(){
