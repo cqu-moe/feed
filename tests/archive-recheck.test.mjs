@@ -136,14 +136,13 @@ test('bounded recheck admission schedules ready articles by configured age tiers
     }
     assert.equal(scheduled.status, 202, JSON.stringify(scheduled.body));
     assert.equal(scheduled.body.scheduled.length, 2);
-    const intervals = await db.prepare(`SELECT
-        CASE WHEN id=? THEN next_recheck_at-? ELSE 0 END AS recent,
-        CASE WHEN id=? THEN next_recheck_at-? ELSE 0 END AS old
-      FROM articles WHERE id IN (?,?)`).bind(recent, now, old, now, recent, old).all();
+    const intervals = await db.prepare(`SELECT a.id,a.next_recheck_at-t.created_at AS interval_ms
+      FROM articles a JOIN tasks t ON t.article_id=a.id AND t.kind='recheck'
+      WHERE a.id IN (?,?)`).bind(recent, old).all();
     assert.equal(intervals.results.length, 2);
-    const byArticle = new Map(intervals.results.map(row => [row.recent ? 'recent' : 'old', row]));
-    assert.equal(Math.round(byArticle.get('recent').recent / 1000), 3600);
-    assert.equal(Math.round(byArticle.get('old').old / 1000), 86400);
+    const byArticle = new Map(intervals.results.map(row => [row.id, row.interval_ms]));
+    assert.equal(byArticle.get(recent), 3_600_000);
+    assert.equal(byArticle.get(old), 86_400_000);
     assert.equal((await db.prepare(`SELECT COUNT(*) AS n FROM tasks WHERE kind='recheck'`).first()).n, 2);
     assert.deepEqual((await db.prepare(`SELECT state FROM outbox WHERE topic='feed-jobs'`).all()).results,
       [{ state: 'queued' }, { state: 'queued' }]);
