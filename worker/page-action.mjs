@@ -1,4 +1,4 @@
-// Runs in the original successful Firecrawl Scrape page, including file fetches.
+// Runs in the original source browser page, including file fetches.
 export async function captchaPage(input) {
   const normalizedTitle=value=>String(value??'').normalize('NFKC').replace(/[\s\u200b●•·—–_-]/g,'');
   const contentSelector='.v_news_content, #vsb_content, #vsb_content_2, article, .article-content, .news_content';
@@ -28,8 +28,8 @@ export async function captchaPage(input) {
   let popup, listener;
   const pending=new Map();
   try {
-    report.bodyRecognized=titleMatches()&&(document.body?.innerText?.length??0)>100;
-    if(!report.bodyRecognized)return report;
+    report.bodyRecognized=false;
+    if(!titleMatches())return report;
     const content = document.querySelector(contentSelector) || document.body;
     report.bodyText = content.innerText.trim();
     report.bodyHtml = content.innerHTML;
@@ -46,6 +46,9 @@ export async function captchaPage(input) {
       }catch{}
     }
     report.attachmentCandidates=candidates;report.attachmentsDiscovered=candidates.length;
+    report.bodyRecognized=(document.body?.innerText?.length??0)>100
+      ||!!document.querySelector(contentSelector)&&candidates.some(item=>item.role==='body-pdf');
+    if(!report.bodyRecognized)return report;
     let readyResolve;
     const ready=new Promise(resolve=>{readyResolve=resolve;});
     listener=event=>{if(event.origin!==input.bridgeOrigin||event.source!==popup||event.data?.channel!==input.channel)return;if(event.data.type==='ready')readyResolve(event.data);if(event.data.type==='result')pending.get(event.data.slot)?.(event.data);};
