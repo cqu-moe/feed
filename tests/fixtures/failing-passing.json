@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "sites": [
+    {
+      "key": "uc",
+      "name": "UC",
+      "origin": "https://uc.cqu.edu.cn",
+      "sampleArticleUrl": "https://uc.cqu.edu.cn/info/1004/4525.htm",
+      "columns": [
+        {"name": "Failing", "listUrl": "https://uc.cqu.edu.cn/failing.htm"},
+        {"name": "Passing", "listUrl": "https://uc.cqu.edu.cn/passing.htm"}
+      ]
+    }
+  ]
+}

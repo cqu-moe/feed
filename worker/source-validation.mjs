@@ -37,9 +37,9 @@ async function collectEvidence(env,source,scrapeDependency){
   const sampleArticleId=await articleId(sample.href),runId=crypto.randomUUID();
   const grant=await issueGrant(env,source,runId,sampleArticleId);
   const bridgeURL=new URL('/internal/bridge',env.BASE_URL);bridgeURL.searchParams.set('grant',grant.token);
-  const title=first.articles.find(row=>row.url===sample.href)?.title??'通知样本';
+  const title=first.articles.find(row=>row.url===sample.href)?.title;
   const input={
-    id:sampleArticleId,url:sample.href,title:title.slice(0,18),bridgeURL:bridgeURL.href,
+    id:sampleArticleId,url:sample.href,title:title?.slice(0,18)??null,bridgeURL:bridgeURL.href,
     bridgeOrigin:bridgeURL.origin,channel:grant.channel,bundle:singleFileBundle,
     options:{...singleFileOptions,selfExtractingArchive:false,maxResourceSize:3,maxResourceSizeEnabled:true,networkTimeout:8000,insertMetaCSP:false},
   };

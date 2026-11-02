@@ -40,9 +40,16 @@ export type Source = {
   siteId: string;
   name: string;
   url: string;
+  listUrl?: string | null;
+  enabled?: boolean;
+  siteEnabled?: boolean;
+  validationState?: 'draft' | 'verified' | 'failed' | (string & {});
+  refreshIntervalSec?: number | null;
+  nextDiscoveryAt?: number | null;
   lastRunAt: string | null;
   articleCount: number;
   error?: string | null;
+  maintenanceStateKnown?: boolean;
 };
 
 export type ArticleListItem = {
@@ -154,6 +161,20 @@ function stringOrNull(value: unknown): string | null {
 
 function numberOrNull(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function optionalBoolean(value: unknown): boolean | undefined {
+  return value === undefined ? undefined : value === true;
+}
+
+function optionalInteger(value: unknown): number | null | undefined {
+  return value === undefined ? undefined : numberOrNull(value);
+}
+
+function optionalPositiveInteger(value: unknown): number | null | undefined {
+  if (value === undefined) return undefined;
+  const parsed = numberOrNull(value);
+  return parsed !== null && parsed > 0 ? parsed : 86400;
 }
 
 async function readJson(response: Response): Promise<unknown> {
@@ -291,9 +312,16 @@ function parseSource(value: unknown): Source {
     siteId: value.siteId,
     name: value.name,
     url: value.url,
+    listUrl: stringOrNull(value.listUrl),
+    enabled: optionalBoolean(value.enabled),
+    siteEnabled: optionalBoolean(value.siteEnabled),
+    validationState: typeof value.validationState === 'string' && value.validationState ? value.validationState : undefined,
+    refreshIntervalSec: optionalPositiveInteger(value.refreshIntervalSec),
+    nextDiscoveryAt: optionalInteger(value.nextDiscoveryAt),
     lastRunAt: value.lastRunAt,
     articleCount: value.articleCount,
     error: stringOrNull(value.error),
+    maintenanceStateKnown: Object.keys(value).some(key => ['enabled','siteEnabled','validationState','refreshIntervalSec','nextDiscoveryAt'].includes(key)),
   };
 }
 

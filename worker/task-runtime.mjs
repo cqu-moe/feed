@@ -439,6 +439,12 @@ async function finishTask(env,kind,taskId,attemptNo,result,now=()=>Date.now()){
       AND EXISTS(SELECT 1 FROM tasks WHERE id=? AND attempt_no=? AND state=?)`)
       .bind(state,JSON.stringify(result),timestamp,errorCode,taskId,attemptNo,taskId,attemptNo,state),
     ...(kind==='backfill'?[backfillFailureStatement(env,taskId,attemptNo,timestamp)]:[]),
+    ...(kind==='discover'&&result.error?[env.DB.prepare(`UPDATE sources SET error=?,updated_at=?
+      WHERE EXISTS(SELECT 1 FROM tasks t WHERE t.id=? AND t.attempt_no=? AND t.state=?
+        AND t.source_id=sources.id AND json_extract(t.payload_json,'$.source.configVersion')=sources.config_version
+        AND COALESCE(json_extract(t.payload_json,'$.mode'),'live')='live'
+        AND (sources.last_run_at IS NULL OR sources.last_run_at<=strftime('%Y-%m-%dT%H:%M:%fZ',t.created_at/1000.0,'unixepoch')))`)
+      .bind(result.error,timestamp,taskId,attemptNo,state)]:[]),
   ]);
 }
 

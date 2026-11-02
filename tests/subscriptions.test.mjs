@@ -362,6 +362,14 @@ test('site retries keep the first source snapshot and the retrievable RSS creden
 
     const sources=(await call(mf,'/api/sources',{cookie})).body.sources;
     assert.equal(sources.filter(source=>source.siteId===staticSiteId).length,2);
+    const enabled=sources.find(source=>source.id===added.body.source.id);
+    assert.equal(enabled.enabled,true);
+    assert.equal(enabled.siteEnabled,true);
+    assert.equal(enabled.validationState,'verified');
+    assert.equal(enabled.refreshIntervalSec,1800);
+    assert.equal(enabled.nextDiscoveryAt,0);
+    assert.equal(enabled.listUrl,'https://jwc.cqu.edu.cn/new/list.htm');
+    assert.equal(enabled.error,null);
   }finally{
     await mf.dispose();
   }
