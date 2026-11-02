@@ -23,7 +23,7 @@ export async function openBrowser({signal}={}){
   });
   const child=spawn(executablePath,[
     `--remote-debugging-port=${debugPort}`,`--user-data-dir=${profile}`,'--no-first-run',
-    '--no-default-browser-check','--no-sandbox','--disable-dev-shm-usage',
+    '--no-default-browser-check','--no-sandbox','--disable-dev-shm-usage','--disable-popup-blocking',
     '--window-size=1440,1000','about:blank',
   ],{stdio:'ignore',detached:true});
   let spawnError;

@@ -72,3 +72,16 @@ test('stalled VSB counters cannot block article parsing while content scripts st
     await new Promise(resolve=>server.close(resolve));
   }
 });
+
+test('the signed CAPTCHA bridge can open without transient user activation',async()=>{
+  const browser=await openBrowser({signal:AbortSignal.timeout(15000)});
+  try{
+    await browser.navigate('data:text/html,<title>Notice</title><article>Public notice</article>');
+    const result=await browser.evaluate(`(() => {
+      const popup=window.open('about:blank','captcha-bridge','popup,width=360,height=240');
+      const result={opened:!!popup,hasOpener:popup?.opener===window};
+      popup?.close();return result;
+    })()`);
+    assert.deepEqual(result,{opened:true,hasOpener:true});
+  }finally{await browser.close();}
+});
