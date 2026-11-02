@@ -10,7 +10,8 @@ test('a historical sample uses the configured CAPTCHA bridge and rejects an arti
   const source = { id: 'sample', url: 'https://school.test/', listUrl: 'https://school.test/list.htm',
     configVersion: 1, enabled: false, validationTaskId: 'test-validation', timezone: 'Asia/Shanghai',
     config: { articlePattern: '^/info/\\d+/\\d+\\.htm$', sampleArticleUrl: 'https://school.test/info/1/1.htm' } };
-  const list = '<meta charset="utf-8"><ul><li><a href="/info/1/2.htm">当前公告</a><time datetime="2026-11-02">2026-11-02</time></li></ul>';
+  const list = '<meta charset="utf-8"><ul><li><a href="/info/1/2.htm">当前公告</a><time datetime="2026-11-02">2026-11-02</time></li></ul><a href="/list/2.htm">下一页</a>';
+  const continuation = '<meta charset="utf-8"><ul><li><span>2026-10-20</span><a href="https://mp.weixin.qq.com/s/public-article">重大青年公众号文章</a></li></ul>';
   const article = `<meta charset="utf-8"><title>历史附件样本-学院</title><div class="v_news_content"><h1>历史附件样本</h1><p>${'这是已公开的往期通知正文。'.repeat(20)}</p><a href="/file.pdf">附件.pdf</a></div>`;
   let challenge = false;
   const solveOrigins: string[] = [];
@@ -30,7 +31,7 @@ test('a historical sample uses the configured CAPTCHA bridge and rejects an arti
     if (url.pathname === '/file.pdf') return url.searchParams.get('codeValue') === '1234'
       ? route.fulfill({ contentType: 'application/pdf', body: '%PDF-1.7\nfixture-file-bytes' })
       : route.fulfill({ contentType: 'text/html', body: '<form><input name="codeValue"><img src="/captcha.png"></form>' });
-    const body = url.pathname === '/list.htm' ? list : challenge
+    const body = url.pathname === '/list.htm' ? list : url.pathname === '/list/2.htm' ? continuation : challenge
       ? `<title>访问验证</title><p>${'请通过验证后继续访问。'.repeat(30)}</p>` : article;
     return route.fulfill({ contentType: 'text/html; charset=utf-8', body });
   });
@@ -46,7 +47,7 @@ test('a historical sample uses the configured CAPTCHA bridge and rejects an arti
   // Avoid printing a megabyte-sized bundled data URL in a failure stack.
   const result = await verify().catch((error: Error) => { throw new Error(error.message); });
   expect(result.verified).toBe(true);
-  expect(result.evidence).toMatchObject({ articleBody: true, attachmentSample: true, snapshotSample: true });
+  expect(result.evidence).toMatchObject({ listPages: 2, paginationMode: 'followed', articleBody: true, attachmentSample: true, snapshotSample: true });
   expect(result.evidence.fileHashes).toHaveLength(1);
   expect(solveOrigins).toEqual(['https://bridge.test']);
   challenge = true;
