@@ -28,6 +28,7 @@ export async function openBrowser({signal}={}){
   ],{stdio:'ignore',detached:true});
   let spawnError;
   child.on('error',error=>{spawnError=error;});
+  const exited=new Promise(resolve=>child.once('close',resolve));
   let socket;
   const pending=new Map();
   let closing;
@@ -37,11 +38,18 @@ export async function openBrowser({signal}={}){
     for(const {reject,timer} of pending.values()){clearTimeout(timer);reject(new Error('Browser closed'));}
     pending.clear();
     if(child.pid){
-      try{child.kill('SIGTERM');}catch{}
-      await delay(500);
-      try{child.kill('SIGKILL');}catch{}
+      // Chrome is a detached process group. Killing only its parent can leave
+      // renderers writing the profile while it is being removed.
+      const kill=signal=>{
+        try{process.kill(-child.pid,signal);}
+        catch(error){if(error.code!=='ESRCH')throw error;}
+      };
+      kill('SIGTERM');
+      await Promise.race([exited,delay(500)]);
+      kill('SIGKILL');
+      await exited;
     }
-    await rm(profile,{recursive:true,force:true});
+    await rm(profile,{recursive:true,force:true,maxRetries:3,retryDelay:100});
   })();
   const abort=()=>{void close();};
   signal?.addEventListener('abort',abort,{once:true});

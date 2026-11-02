@@ -15,6 +15,11 @@ ENV CHROME_EXECUTABLE=/opt/chrome/chrome-linux64/chrome
 WORKDIR /app
 COPY browser.mjs scrape.mjs server.mjs ./
 USER node
+# Exercise real Chrome process cleanup while building the Linux image. The test
+# file is mounted only for this step and is not shipped in the runtime image.
+RUN --mount=type=bind,source=browser.test.mjs,target=/app/browser.test.mjs \
+    /usr/bin/tini -g -- xvfb-run -a -s "-screen 0 1440x1000x24 -nolisten tcp" \
+    node --test /app/browser.test.mjs
 EXPOSE 8080
 ENTRYPOINT ["/usr/bin/tini", "-g", "--", "xvfb-run", "-a", "-s", "-screen 0 1440x1000x24 -nolisten tcp"]
 CMD ["node", "server.mjs"]
