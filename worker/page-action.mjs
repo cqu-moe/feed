@@ -1,7 +1,10 @@
 // Runs in the original successful Firecrawl Scrape page, including file fetches.
 export async function captchaPage(input) {
   const normalizedTitle=value=>String(value??'').normalize('NFKC').replace(/[\s\u200b●•·—–_-]/g,'');
-  const titleMatches=()=>normalizedTitle(document.title).includes(normalizedTitle(input.title));
+  const contentSelector='.v_news_content, #vsb_content, #vsb_content_2, article, .article-content, .news_content';
+  const expectedTitle=normalizedTitle(input.title);
+  // A configured historical sample may not have a title in the current list.
+  const titleMatches=()=>expectedTitle?normalizedTitle(document.title).includes(expectedTitle):!!document.querySelector(contentSelector);
   const readyStarted=Date.now();
   while((!document.body||!titleMatches())&&Date.now()-readyStarted<10000)await new Promise(resolve=>setTimeout(resolve,200));
   const report = { page: { title:document.title, url:location.href }, downloads:[], artifacts:[], errors:[], bridge:{}, policyViolations:[] };
@@ -27,7 +30,7 @@ export async function captchaPage(input) {
   try {
     report.bodyRecognized=titleMatches()&&(document.body?.innerText?.length??0)>100;
     if(!report.bodyRecognized)return report;
-    const content = document.querySelector('.v_news_content, #vsb_content, #vsb_content_2, article, .article-content, .news_content') || document.body;
+    const content = document.querySelector(contentSelector) || document.body;
     report.bodyText = content.innerText.trim();
     report.bodyHtml = content.innerHTML;
     report.bodyCapturedAt = new Date().toISOString();

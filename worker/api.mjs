@@ -8,9 +8,9 @@ export async function apiRoute(request,env){
   if(!['GET','HEAD'].includes(request.method))return json({error:'Method not allowed'},405);
   const archived=await archiveRoute(request,env);if(archived)return archived;
   if(path==='/api/sources'){
-    if(dynamic){const sources=await createSources(env).listSources();return json({sources:sources.map(source=>({id:source.id,siteId:source.siteId,name:source.name,url:source.url,articleCount:source.articleCount,lastRunAt:source.lastRunAt??null,error:source.error}))});}
+    if(dynamic){const sources=await createSources(env).listSources();return json({sources:sources.map(source=>({id:source.id,siteId:source.siteId,name:source.name,url:source.url,listUrl:source.listUrl??null,enabled:source.enabled,siteEnabled:source.siteEnabled,validationState:source.validationState,refreshIntervalSec:source.refreshIntervalSec,nextDiscoveryAt:source.nextDiscoveryAt,articleCount:source.articleCount,lastRunAt:source.lastRunAt??null,error:source.error??null}))});}
     const rows=await env.DB.prepare('SELECT s.*, (SELECT COUNT(*) FROM articles a WHERE a.source_id=s.id) AS articleCount FROM sources s').all();
-    return json({sources:configuredSources.map(s=>{const row=rows.results.find(r=>r.id===s.id);return {id:s.id,siteId:s.siteId,name:s.name,url:s.url,lastRunAt:row?.last_run_at??null,articleCount:row?.articleCount??0,error:row?.error??null};})});
+    return json({sources:configuredSources.map(s=>{const row=rows.results.find(r=>r.id===s.id);return {id:s.id,siteId:s.siteId,name:s.name,url:s.url,listUrl:s.listUrls[0]??s.url,articleCount:row?.articleCount??0,lastRunAt:row?.last_run_at??null,error:row?.error??null};})});
   }
   if(path==='/api/articles'){
     const q=(url.searchParams.get('q')??'').trim().slice(0,100),source=url.searchParams.get('source')??'';

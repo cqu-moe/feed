@@ -4,22 +4,56 @@ import {canonicalUrl} from './sources.mjs';
 
 function listPage(input) {
   const date=text=>{
-    const match=String(text??'').match(/(20\d{2})[年.\/-](\d{1,2})[月.\/-](\d{1,2})(?:日)?(?:[T\s]+\d{1,2}:\d{2}(?::\d{2}(?:[.]\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?/);
-    return match?.[0]??null;
+    const match=String(text??'').match(/(20\d{2})[年.\/-]\s*(\d{1,2})[月.\/-]\s*(\d{1,2})(?:日)?(?:[T\s]+\d{1,2}:\d{2}(?::\d{2}(?:[.]\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?/);
+    if(!match)return null;
+    const clock=match[0].match(/[T\s]+\d{1,2}:\d{2}(?::\d{2}(?:[.]\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?/);
+    return `${match[1]}-${match[2].padStart(2,'0')}-${match[3].padStart(2,'0')}${clock?.[0]??''}`;
+  };
+  const articleUrl=anchor=>{
+    let url;try{url=new URL(anchor.getAttribute('href'),location.href);url.hash='';}catch{return null;}
+    if(url.origin!==location.origin)return null;
+    if((url.pathname==='/detail.jsp'||url.pathname==='/2022b/wznr.jsp')
+      &&url.searchParams.getAll('urltype').length===1
+      &&url.searchParams.get('urltype')==='news.NewsContentUrl'){
+      const id=name=>{const values=url.searchParams.getAll(name);return values.length===1&&/^\d+$/.test(values[0])?values[0]:null;};
+      const tree=id('wbtreeid'),news=id('wbnewsid');
+      if(tree&&news){url.pathname=`/info/${tree}/${news}.htm`;url.search='';}
+    }
+    return url;
   };
   const articles=[],next=[],pattern=new RegExp(input.articlePattern);
   for(const anchor of document.querySelectorAll('a[href]')){
-    let url;try{url=new URL(anchor.getAttribute('href'),location.href);url.hash='';}catch{continue;}
-    if(url.origin!==location.origin)continue;
-    const title=(anchor.getAttribute('title')||anchor.innerText||'').replace(/^[●•·\s]+/,'').trim();
+    const url=articleUrl(anchor);if(!url)continue;
+    if(anchor.closest('nav,.nav,.pup-nav,.subpage-nav,header,footer'))continue;
+    const heading=anchor.querySelector('.title,[class*=title],h1,h2,h3,h4,.det .p1');
+    const title=(anchor.getAttribute('title')||heading?.innerText||anchor.innerText||'').replace(/^[●•·\s]+/,'').trim();
     if(pattern.test(url.pathname)){
-      let node=anchor,publishedAt;
-      for(let depth=0;node&&depth<5;depth++,node=node.parentElement){
-        if(node.querySelectorAll('a[href]').length>5)break;
-        publishedAt=date(node.querySelector('[date]')?.getAttribute('date')
-          ||node.querySelector('time')?.getAttribute('datetime')||node.innerText);
+      let publishedAt=null,fallback=null;
+      // Stop at the article boundary so an undated card cannot borrow its neighbour's date.
+      for(let card=anchor,depth=0;card&&card!==document.body&&depth<6;card=card.parentElement,depth++){
+        const otherArticle=[...card.querySelectorAll('a[href]')].some(link=>{
+          const candidate=articleUrl(link);
+          return candidate&&pattern.test(candidate.pathname)&&candidate.href!==url.href;
+        });
+        if(otherArticle)break;
+        const parts=[...card.querySelectorAll('time[datetime],[date],.time,.sspan,[class*=timestyle],[class*=time-line]')];
+        for(const part of parts){
+          if(part.contains(anchor))continue;
+          // SEE places MM/DD above the year; CS splits YYYY/MM/ and DD.
+          const year=part.querySelector('p')?.innerText.trim();
+          const monthDay=part.querySelector('h4')?.innerText.trim();
+          publishedAt=/^20\d{2}$/.test(year??'')&&/^\d{1,2}\/\d{1,2}$/.test(monthDay??'')
+            ?date(`${year}/${monthDay}`)
+            :date(part.getAttribute('datetime')||part.getAttribute('date')||part.innerText);
+          if(publishedAt)break;
+        }
         if(publishedAt)break;
+        if(!fallback&&card!==anchor){
+          const copy=card.cloneNode(true);copy.querySelectorAll('a').forEach(link=>link.remove());
+          fallback=date(copy.textContent);
+        }
       }
+      publishedAt??=fallback;
       if(title&&!articles.some(row=>row.url===url.href))articles.push({url:url.href,title,publishedAt});
     }else if(/^(下[一]?页|next|下一頁|›|>)$/i.test(title.replace(/\s+/g,''))){
       next.push(url.href);
@@ -50,6 +84,7 @@ export async function discoverList(env,source,url,{scrape:scrapeDependency=scrap
       ...published,
     });
   }
+  if(!articles.length)throw new Error('No article links found in list');
   return {
     articles,added:articles.length,dated:articles.filter(row=>row.precision!=='unknown').length,
     undated:articles.length-articles.filter(row=>row.precision!=='unknown').length,

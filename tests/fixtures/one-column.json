@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "sites": [
+    {
+      "key": "uc",
+      "name": "UC",
+      "origin": "https://uc.cqu.edu.cn",
+      "sampleArticleUrl": "https://uc.cqu.edu.cn/info/1004/4525.htm",
+      "columns": [
+        {"name": "新闻中心", "listUrl": "https://uc.cqu.edu.cn/index/xwzx.htm", "refreshIntervalSec": 3600}
+      ]
+    }
+  ]
+}

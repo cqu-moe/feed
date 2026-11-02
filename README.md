@@ -1,12 +1,12 @@
 # 重大通知存档（CQU Feed）
 
-重大通知存档是一个运行在 Cloudflare 上的重庆大学通知采集、私有备份、统一阅读和搜索服务。MVP 覆盖教务处、国际处、土木学院、学工部和新闻网 5 个栏目；访问统一走 auth.cqu.moe，并且账号必须拥有 `feed.access` 权益。
+重大通知存档是一个运行在 Cloudflare 上的重庆大学通知采集、私有备份、统一阅读和搜索服务。采集范围按站点下的栏目管理，访问统一走 auth.cqu.moe，并且账号必须拥有 `feed.access` 权益。初始来源为教务处、国际处、土木学院、学工部和新闻网；新增五个站点的栏目目录与启用流程见 [来源维护](docs/source-maintenance.md)。
 
 已部署到 [Feed](https://feed.cqu.moe/)。2026-10-11 首次补抓已归档 33 篇通知、63 个附件、33 份原貌 HTML 和截图；真实账号已完成登录与中文搜索验证。详细验收与限制见 [docs/acceptance.md](docs/acceptance.md)。
 
 ## 功能
 
-- 每日自动发现 5 个站点中最近 30 天内发布的通知。
+- 每五分钟检查到期栏目，按各自刷新间隔发现通知；新栏目通过样本验证后启用，本次五站栏目目录设为每周检查一次。
 - 使用 Firecrawl 云页面抓取列表和正文，并在原始源站会话中下载附件。
 - 遇到四位数字附件验证码时，通过带时限 HMAC 授权的 Worker 桥接调用 Workers AI OCR，再用源站会话重试下载。
 - 将正文、正文型 PDF 文本、原貌 HTML、截图和附件保存到 R2；通知元数据和索引进 D1。
@@ -18,7 +18,7 @@
 
 ```text
 Cloudflare Cron
-  -> FeedIngest Workflow（每个来源一个实例）
+  -> 到期栏目 -> DiscoveryWorkflow -> 单篇 CaptureWorkflow
   -> Firecrawl scrape（列表解析 / 正文抓取 / 源站内附件下载）
   -> Worker 桥接（CAPTCHA OCR、超大附件流式上传）
   -> Workers AI（CAPTCHA 识别） / unpdf（PDF 文字层）
@@ -27,7 +27,7 @@ Cloudflare Cron
   -> Worker API + React SPA（私有阅读、搜索和存档预览）
 ```
 
-调度配置为 `0 0 * * *`。Cloudflare Cron 使用 UTC，因此每天 UTC 00:00 运行，即北京时间 08:00。初始补抓窗口是运行时往前 30 天；这不是全量历史导入，更早通知不会被猜测或采集。
+当前调度配置为 `*/5 * * * *`，仅为已启用、已验证且到期的栏目创建任务。新栏目从接入当天开始发现；旧来源保留原有时间窗口。历史补抓需要单独启动，不随新增目录自动运行。暂停栏目保留已存档通知，来源页显示暂停、验证、失败和超期状态。
 
 搜索使用 D1 SQLite FTS5 `article_search` 的 trigram 分词，索引字段为通知标题和正文文本。少于 3 个字符的查询回退到标题/正文 `LIKE`。正文型 PDF 会用 unpdf 读取文字层，无文字层扫描页由 TextIn 补识别并并入 `body_text`，因此可搜索；普通 Office、压缩包等附件只保存和提供下载，不做通用 Office 文本抽取，也不会并入搜索索引。
 
@@ -74,7 +74,9 @@ pnpm check:design
 4. Firecrawl、Auth、桥接和管理入口的敏感配置都通过 Workers secrets 注入。
 5. R2 桶和 D1 不是公共读；所有文件出口经 Worker 鉴权。
 
-## MVP 边界
+## MVP 阶段历史边界
+
+以下记录初期 MVP 的约束，不代表动态栏目调度和当前生产额度。当前来源接入见 [来源维护](docs/source-maintenance.md)，运行时额度与限制以 [运维说明](docs/operations.md) 为准。
 
 - 只覆盖 `worker/sources.json` 中的 5 个站点和已配置的 URL pattern。
 - 每个来源每次运行最多采集 40 篇待处理通知；每来源最多跟随 12 页列表。

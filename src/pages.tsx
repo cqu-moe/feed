@@ -26,6 +26,7 @@ import {
   safeNext,
 } from './components';
 import { FeedLanding } from './landing';
+import { sourceStatus } from './source-status';
 
 type RequestState<T> =
   | { kind: 'loading' }
@@ -36,6 +37,18 @@ type RequestState<T> =
   | { kind: 'not-found' };
 
 type SourceState = RequestState<Source[]>;
+
+function refreshIntervalLabel(value: number | null | undefined): string {
+  if (value === null || value === undefined) return '未知';
+  if (value % 86400 === 0) return `${value / 86400} 天`;
+  return `${Math.round(value / 60)} 分钟`;
+}
+
+function discoveryTimeLabel(value: number | null | undefined): string {
+  if (value === null || value === undefined) return '等待调度';
+  if (value === 0) return '等待调度';
+  return formatDateTime(new Date(value).toISOString());
+}
 
 function fromResult<T>(
   result: Awaited<ReturnType<typeof requestJson<T>>>,
@@ -193,38 +206,48 @@ export function SourcesPage() {
       )}
       {state.kind === 'success' && state.data.length > 0 && (
         <div className="feed-source-grid feed-source-ledger">
-          {state.data.map((source) => (
-            <article className="feed-card feed-source-card" key={source.id}>
-              <div className="feed-source-heading">
-                <div>
-                  <h2>{source.name}</h2>
-                  <a href={source.url} target="_blank" rel="noreferrer">
-                    栏目首页
-                    <ExternalLink aria-hidden="true" />
-                  </a>
+          {state.data.map((source) => {
+            const status = sourceStatus(source);
+            const scheduled = source.enabled === true && source.siteEnabled === true && source.validationState === 'verified';
+            return (
+              <article className="feed-card feed-source-card" key={source.id}>
+                <div className="feed-source-heading">
+                  <div>
+                    <h2>{source.name}</h2>
+                    <a href={source.listUrl ?? source.url} target="_blank" rel="noreferrer">
+                      栏目列表
+                      <ExternalLink aria-hidden="true" />
+                    </a>
+                  </div>
+                  <span className={`feed-source-state ${status.tone}`}>{status.label}</span>
                 </div>
-                <span className={`feed-source-state ${source.error ? 'is-error' : source.lastRunAt ? 'is-ok' : 'is-warning'}`}>
-                  {source.error ? '最近有错误' : source.lastRunAt ? '运行正常' : '等待首次采集'}
-                </span>
-              </div>
-              <dl className="feed-source-meta">
-                <div>
-                  <dt>已存档通知</dt>
-                  <dd>{source.articleCount}</dd>
-                </div>
-                <div>
-                  <dt>最近采集</dt>
-                  <dd>{formatDateTime(source.lastRunAt)}</dd>
-                </div>
-              </dl>
-              {source.error && (
-                <Alert variant="destructive">
-                  <AlertTitle>最近一次采集失败</AlertTitle>
-                  <AlertDescription>{source.error}</AlertDescription>
-                </Alert>
-              )}
-            </article>
-          ))}
+                <dl className="feed-source-meta">
+                  <div>
+                    <dt>已存档通知</dt>
+                    <dd>{source.articleCount}</dd>
+                  </div>
+                  <div>
+                    <dt>{status.timeLabel}</dt>
+                    <dd>{formatDateTime(source.lastRunAt)}</dd>
+                  </div>
+                  <div>
+                    <dt>刷新间隔</dt>
+                    <dd>{refreshIntervalLabel(source.refreshIntervalSec)}</dd>
+                  </div>
+                  <div>
+                    <dt>下次检查</dt>
+                    <dd>{!source.maintenanceStateKnown ? '未知' : scheduled ? discoveryTimeLabel(source.nextDiscoveryAt) : '暂停'}</dd>
+                  </div>
+                </dl>
+                {source.error && (
+                  <Alert variant="destructive">
+                    <AlertTitle>最近一次采集失败</AlertTitle>
+                    <AlertDescription>{source.error}</AlertDescription>
+                  </Alert>
+                )}
+              </article>
+            );
+          })}
         </div>
       )}
     </>

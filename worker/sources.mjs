@@ -449,12 +449,12 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
       statements.push(env.DB.prepare(`UPDATE task_attempts SET result_json=COALESCE(result_json,?) WHERE task_id=? AND attempt_no=? AND ${activeTask.sql}`)
         .bind(JSON.stringify(outcome),taskId,attemptNo,...activeTask.args));
       statements.push(isBackfill
-        ?env.DB.prepare(`UPDATE sources SET last_run_at=?,error=NULL,backfill_cursor=?,backfill_seen_pages=backfill_seen_pages+1,
+        ?env.DB.prepare(`UPDATE sources SET backfill_cursor=?,backfill_seen_pages=backfill_seen_pages+1,
             backfill_processed_articles=(SELECT COUNT(*) FROM backfill_seen_articles WHERE source_id=? AND run_id=?),backfill_next_at=?,
             backfill_state=CASE WHEN ? THEN 'completed' WHEN ? THEN 'paused' ELSE 'running' END,
             backfill_completed_at=CASE WHEN ? THEN ? ELSE backfill_completed_at END,
             backfill_last_error=?,updated_at=? WHERE id=? AND config_version=? AND backfill_state='running' AND ${activeTask.sql}`)
-          .bind(new Date(at).toISOString(),checkpointJson,source.id,context.runId,at,
+          .bind(checkpointJson,source.id,context.runId,at,
             nextPageUrls.length?0:1,pageLimitReached?1:0,nextPageUrls.length?0:1,nextPageUrls.length?null:at,
             hardPageLimitReached?'Backfill hard page limit reached; source pagination requires manual inspection'
               :pageLimitReached?'Backfill page limit reached; raise maxPages explicitly to continue':null,

@@ -983,11 +983,48 @@ test('rate limiting defers only the failing source and pausing a source stops sc
       const task=(await request(mf,`/internal/capture-tasks/${scheduled.scheduled[0]}`)).data.task;
       assert.equal(task.state,'deferred');
       assert.match(task.lastError,/429|rate limit/i);
+      const publicSources=await(await read('/api/sources')).json();
+      const failing=publicSources.sources.find(source=>source.id===b);
+      assert.match(failing.error,/429|rate limit/i);
+      assert.equal(failing.enabled,true);
+      assert.equal(failing.siteEnabled,true);
+      assert.equal(failing.validationState,'verified');
+      assert.equal(failing.refreshIntervalSec,1800);
+      assert.equal(failing.listUrl,'https://a.test/list-b.htm');
+      const paused=publicSources.sources.find(source=>source.id===a);
+      assert.equal(paused.enabled,false);
+      assert.equal(paused.siteEnabled,true);
+      assert.equal(paused.validationState,'verified');
     });
     assert.equal((await request(mf,`/internal/sources/${b}`,{method:'PATCH',body:{enabled:false}})).status,200);
     const stopped=await(await mf.dispatchFetch('https://feed.test/fixture/advance-schedule',{method:'POST',body:JSON.stringify({advanceMs:3600001})})).json();
     assert.equal(stopped.scheduled.length,0);
     assert.equal((await(await read(`/api/articles?source=${b}`)).json()).total,1);
+  }finally{await mf.dispose();}
+});
+
+test('an empty discovery fails visibly and later history backfill cannot erase live health',async()=>{
+  const {mf,read}=await fixture({versioned:true});
+  try{
+    const site=await request(mf,'/internal/sites',{method:'POST',body:{name:'空列表站点',origin:'https://a.test'}});
+    const id=await createVerifiedSource(mf,site.data.site.id,'https://a.test/list.htm');
+    await control(mf,'list-options',{articles:[],chainPages:1});
+    const scheduled=await request(mf,'/internal/sources/schedule',{method:'POST'});
+    await waitFor(async()=>{
+      const task=(await request(mf,`/internal/capture-tasks/${scheduled.data.scheduled[0]}`)).data.task;
+      assert.equal(task.state,'failed');
+      assert.match(task.lastError,/No article links/);
+    });
+    const source=(await(await read('/api/sources')).json()).sources.find(source=>source.id===id);
+    assert.equal(source.lastRunAt,null);
+    assert.match(source.error,/No article links/);
+    await control(mf,'list-options',{chainPages:1});
+    const backfill=await request(mf,`/internal/sources/${id}/backfill`,{method:'POST',body:{requestId:'health-history-backfill'}});
+    assert.equal(backfill.status,202,JSON.stringify(backfill));
+    await waitFor(async()=>assert.equal((await request(mf,`/internal/sources/${id}`)).data.source.backfill.state,'completed'));
+    const after=(await(await read('/api/sources')).json()).sources.find(source=>source.id===id);
+    assert.equal(after.error,source.error);
+    assert.equal(after.lastRunAt,source.lastRunAt);
   }finally{await mf.dispose();}
 });
 

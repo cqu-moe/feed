@@ -318,7 +318,9 @@ node scripts/manage.mjs auth-check
 
 不要把真实 token 替换进文档或提交记录。真实账号登录、搜索和存档验证见 `acceptance.md`。权益撤销通过隔离集成测试验证，不会为测试撤销生产账号权益。
 
-## 6. 采集 Workflow
+## 6. 旧版采集 Workflow（兼容入口）
+
+下述每日 `FeedIngest` 流程仅保留给旧版兼容入口；当前生产使用每五分钟到期调度的 `DiscoveryWorkflow` / `CaptureWorkflow`。新增来源与故障排查见 [来源维护](source-maintenance.md)，不要依据旧版五来源清单判断当前生产范围。
 
 Cron 每天采集的 5 个来源来自 `worker/sources.json`：
 

@@ -198,6 +198,7 @@ export interface ReadingOptions {
   fileStatus?: number;
   previewStatus?: number;
   downloadStatus?: number;
+  sources?: unknown[];
 }
 
 /** External HTTP data only is controlled; routes, components and PDF.js stay real. */
@@ -239,7 +240,7 @@ export async function installReadingRoutes(page: Page, options: ReadingOptions =
     if (path === '/api/session') return json({ authenticated: options.authenticated ?? true, entitled: options.entitled ?? true, user: { id: 'browser-fixture', name: '测试读者' } });
     if (options.authenticated === false) return json({ error: 'unauthorized' }, 401);
     if (options.entitled === false) return json({ error: 'forbidden' }, 403);
-    if (path === '/api/sources') return json({ sources: [{ id: 'academic', siteId: 'university', name: '教务处', url: 'https://example.edu/', lastRunAt: null, articleCount: 1 }] });
+    if (path === '/api/sources') return json({ sources: options.sources ?? [{ id: 'academic', siteId: 'university', name: '教务处', url: 'https://example.edu/', lastRunAt: null, articleCount: 1 }] });
     if (path === '/api/articles') return json({ articles: [detail.article], total: 1, page: 1, pageSize: 20 });
     if (path === `/api/articles/${articleId}/revisions`) {
       if (options.historyDelay) await new Promise(resolve => setTimeout(resolve, options.historyDelay));
