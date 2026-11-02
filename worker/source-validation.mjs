@@ -5,7 +5,7 @@ import {issueGrant} from './bridge.mjs';
 import {scrape} from './firecrawl.mjs';
 import {discoverList} from './discovery.mjs';
 import {canonicalUrl} from './sources.mjs';
-import {articleId,fileKind,sha} from './utils.mjs';
+import {articleId,fileKind,sha,cleanError} from './utils.mjs';
 import {Buffer} from 'node:buffer';
 
 export async function verifySource(env,sources,sourceId,{source,taskId,attemptNo,scrape:scrapeDependency=scrape}){
@@ -36,7 +36,7 @@ async function collectEvidence(env,source,scrapeDependency){
   }
   const sampleArticleId=await articleId(sample.href),runId=crypto.randomUUID();
   const grant=await issueGrant(env,source,runId,sampleArticleId);
-  const bridgeURL=new URL('/internal/bridge',env.BASE_URL);bridgeURL.searchParams.set('grant',grant.token);
+  const bridgeURL=new URL('/internal/bridge',env.BRIDGE_BASE_URL??env.BASE_URL);bridgeURL.searchParams.set('grant',grant.token);
   const title=first.articles.find(row=>row.url===sample.href)?.title;
   const input={
     id:sampleArticleId,url:sample.href,title:title?.slice(0,18)??null,bridgeURL:bridgeURL.href,
@@ -57,8 +57,8 @@ async function collectEvidence(env,source,scrapeDependency){
   if(!snapshot?.base64)throw validationError('Sample original appearance was not captured');
   const fileHashes=[];
   for(const candidate of report.attachmentCandidates??[]){
-    const row=report.downloads?.find(row=>row.url===candidate.url&&row.originalFile);
-    if(!row?.saved?.name)throw validationError('Sample attachment was not retrieved');
+    const row=report.downloads?.find(row=>row.url===candidate.url);
+    if(!row?.originalFile||!row.saved?.name)throw validationError(`Sample attachment was not retrieved: ${cleanError(row?.error??'missing original file')}`);
     if(canonicalUrl(candidate.url).origin!==sample.origin)throw validationError('Sample attachment origin differs');
     const inline=report.artifacts?.find(item=>item.name===row.saved.name);
     let bytes;
