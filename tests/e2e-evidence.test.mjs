@@ -131,6 +131,13 @@ test('a rejected sensitive JSON key leaves private originals intact and no publi
   await writeFile(join(destination, 'old-success.json'), 'old owned evidence');
   await assert.rejects(exportPublic(source, destination, []), /must be fresh/);
   assert.equal(await readFile(join(destination, 'old-success.json'), 'utf8'), 'old owned evidence');
+  // Explicitly supplied short secrets still fail closed, including when the
+  // matching bytes occur in numeric metadata rather than a string value.
+  await rm(destination, { recursive: true });
+  await writeFile(join(source, 'data.json'), JSON.stringify({ durationMs: 123456 }));
+  await assert.rejects(exportPublic(source, destination, ['123456']), /Sensitive synthetic value/);
+  await exportPublic(source, destination, []);
+  assert.deepEqual(JSON.parse(await readFile(join(destination, 'data.json'), 'utf8')), { durationMs: 123456 });
 });
 
 test('run publication scans metadata before promotion and publishes only a safe summary after rejection', async t => {

@@ -527,7 +527,9 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir, ingestion 
       controlOrigin: `http://127.0.0.1:${control.address().port}`,
       controlSecret,
       async sensitiveValues() {
-        const values = [oauthClientSecret, rpcClientSecret, controlSecret, ingest?.bindings.ADMIN_TOKEN, mailFixture?.bindings.RESEND_API_KEY, mailFixture?.bindings.RESEND_WEBHOOK_SECRET, ...mails.values()].filter(Boolean);
+        // Short-lived mail OTPs can collide with numeric report metadata. Keep
+        // them in the private mail fixture, outside the global byte inventory.
+        const values = [oauthClientSecret, rpcClientSecret, controlSecret, ingest?.bindings.ADMIN_TOKEN, mailFixture?.bindings.RESEND_API_KEY, mailFixture?.bindings.RESEND_WEBHOOK_SECRET].filter(Boolean);
         for (const table of ['session', 'oauthAccessToken', 'oauthRefreshToken']) {
           const rows = await authDb.prepare(`SELECT token FROM ${table}`).all();
           values.push(...rows.results.map(row => row.token).filter(Boolean));
