@@ -1,5 +1,5 @@
 import {sha} from './utils.mjs';
-import {readingExcerpt} from './reading.mjs';
+import {readingExcerpt,readingTitleSql} from './reading.mjs';
 import {fingerprintContent} from './archive-fingerprint.mjs';
 import {pdfPages,PDF_TEXT_UNAVAILABLE} from './pdf-text.mjs';
 import {adoptExistingOcrStatements,ocrTaskStatements,withOcrIdentity} from './archive-ocr.mjs';
@@ -133,14 +133,14 @@ async function savedRawBody(env,capture){
   return stored.text();
 }
 
-const revisionColumns=`r.id,r.article_id AS articleId,r.revision_no AS revisionNo,r.title,r.state,r.observed_at AS observedAt,
+const revisionColumns=`r.id,r.article_id AS articleId,r.revision_no AS revisionNo,${readingTitleSql('r.title','a.title','r.observed_at')} AS title,r.state,r.observed_at AS observedAt,
   r.ready_at AS readyAt,r.change_kind AS changeKind,
   (SELECT COUNT(*) FROM revision_requirements q WHERE q.revision_id=r.id AND q.required=1 AND q.state<>'fulfilled') AS missingCount`;
 const iso=value=>value===null?null:new Date(value).toISOString();
 const presentRevision=row=>({...row,observedAt:iso(row.observedAt),readyAt:iso(row.readyAt)});
 
 export async function listRevisions(env,articleId){
-  const rows=await env.DB.prepare(`SELECT ${revisionColumns} FROM article_revisions r WHERE r.article_id=? ORDER BY r.revision_no DESC`).bind(articleId).all();
+  const rows=await env.DB.prepare(`SELECT ${revisionColumns} FROM article_revisions r JOIN articles a ON a.id=r.article_id WHERE r.article_id=? ORDER BY r.revision_no DESC`).bind(articleId).all();
   return rows.results.map(presentRevision);
 }
 export async function readRevision(env,articleId,revisionId,{current=false}={}){

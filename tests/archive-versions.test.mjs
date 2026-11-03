@@ -119,6 +119,7 @@ before(async () => {
           return {
             bodyRecognized: true,
             page: { url: ${JSON.stringify(articleUrl)} },
+            heading: variant.startsWith('truncated-title') ? '关于开展重庆大学2026—2027学' : undefined,
             bodyText: body,
             errors: [],
             artifacts,
@@ -133,7 +134,7 @@ before(async () => {
           providerState.calls++;
           while (providerState.hold) await new Promise(resolve => setTimeout(resolve, 20));
           if (providerState.failAfterCapture) providerState.failNextD1 = true;
-          const incomplete = providerState.variant === 'incomplete';
+          const incomplete = providerState.variant.endsWith('incomplete');
           const capturedPage = page(providerState.variant, incomplete);
           return {
             markdown: capturedPage.bodyText,
@@ -685,6 +686,36 @@ async function provider(state) {
   assert.equal(response.status, 200);
 }
 
+test('legacy truncated titles are restored while new short titles and frozen archives are preserved', { concurrency: false }, async () => {
+  const title = '关于开展重庆大学2026—2027学年第一学期“阳光60分”健康行活动的通知';
+  const cookie = await login();
+  await provider({ hold: false, failAfterCapture: false, failNextD1: false });
+  for (const [id, variant, state, observedAt, expected] of [
+    ['222222222222222222222222', 'truncated-title', 'ready', '2026-11-02T00:00:00Z', title],
+    ['333333333333333333333333', 'truncated-title-incomplete', 'blocked', '2026-11-02T00:00:00Z', title],
+    ['444444444444444444444444', 'truncated-title', 'ready', '2026-11-04T00:00:00Z', title.slice(0, 18)],
+  ]) {
+    await db.prepare(`INSERT INTO articles(id,source_id,url,title,published_at,discovered_at,status)
+      VALUES (?,'jwc',?,?,'2026-10-30','2026-10-30','pending')`)
+      .bind(id, `https://jwc.cqu.edu.cn/info/1082/${id}.htm`, title).run();
+    await capture(`request-${id}`, variant, id, Date.parse(observedAt));
+    const history = await revisions(id, cookie);
+    const current = await detail(id, undefined, cookie);
+    assert.equal(current.revision.state, state);
+    assert.equal(current.article.title, expected);
+    assert.equal(current.revision.title, expected);
+    assert.equal(history.revisions[0].title, expected);
+    const archived = await db.prepare('SELECT title FROM article_revisions WHERE id=?').bind(current.revision.id).first();
+    assert.equal(archived.title, title.slice(0, 18));
+    for (const q of ['', '健康行', '活动']) {
+      const listing = await json(miniflare.dispatchFetch(`${feedOrigin}/api/articles?${new URLSearchParams({ q })}`, {
+        headers: { Cookie: cookie },
+      }));
+      assert.equal(listing.articles.find(row => row.id === id)?.title, !q || expected === title ? expected : undefined);
+    }
+  }
+});
+
 async function submit(requestId, id = articleId) {
   const response = await miniflare.dispatchFetch(`${feedOrigin}/internal/capture-tasks`, {
     method: 'POST',
@@ -695,11 +726,16 @@ async function submit(requestId, id = articleId) {
   return response.json();
 }
 
-async function capture(requestId, variant, id = articleId) {
+async function capture(requestId, variant, id = articleId, observedAt) {
   await provider({ variant });
   const created = await submit(requestId, id);
   await handleJobs();
   const outcome = await waitWorkflows();
+  if (observedAt !== undefined) {
+    // Seed historical observation metadata before the revision becomes immutable.
+    await db.prepare('UPDATE article_revisions SET observed_at=? WHERE capture_task_id=?')
+      .bind(observedAt, created.task.id).run();
+  }
   await handleJobs();
   const workflow = outcome.instances.at(-1);
   if (workflow?.status !== 'complete') assert.fail(JSON.stringify(workflow));

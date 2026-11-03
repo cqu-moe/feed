@@ -16,3 +16,7 @@ export function readingText(value) {
   return result || (pdfAt >= 0 ? 'PDF 正文暂未提取到可搜索文字；可在下方阅读原文件。' : '');
 }
 export const readingExcerpt = value => readingText(value).replace(/\s+/g, ' ').slice(0,180);
+
+// Restore the known pre-fix captures (before 2026-11-03 04:45 UTC), without changing frozen archives or later title edits.
+export const readingTitleSql = (title, original, observedAt) =>
+  `CASE WHEN ${observedAt}<1793681100000 AND length(${title})=18 AND substr(${original},1,18)=${title} THEN ${original} ELSE ${title} END`;

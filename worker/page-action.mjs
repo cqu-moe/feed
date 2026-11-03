@@ -2,7 +2,7 @@
 export async function captchaPage(input) {
   const normalizedTitle=value=>String(value??'').normalize('NFKC').replace(/[\s\u200b●•·—–_-]/g,'');
   const contentSelector='.v_news_content, #vsb_content, #vsb_content_2, article, .article-content, .news_content';
-  const expectedTitle=normalizedTitle(input.title);
+  const expectedTitle=normalizedTitle(input.title?.slice(0,18));
   // A configured historical sample may not have a title in the current list.
   const titleMatches=()=>expectedTitle?normalizedTitle(document.title).includes(expectedTitle):!!document.querySelector(contentSelector);
   const readyStarted=Date.now();

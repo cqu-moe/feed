@@ -2,6 +2,7 @@ import {json} from './utils.mjs';
 import {createSources} from './sources.mjs';
 import {listRevisions,readRevision,revisionArtifact} from './archive-versions.mjs';
 import {serveObject,serveSnapshot} from './storage.mjs';
+import {readingTitleSql} from './reading.mjs';
 
 export async function archiveRoute(request,env){
   if(env.ARCHIVE_READS_ENABLED!=='true')return null;
@@ -40,6 +41,7 @@ async function versionedList(env,url){
   const query=(url.searchParams.get('q')??'').trim().slice(0,100),source=url.searchParams.get('source')??'';
   const page=Math.min(500,Math.max(1,parseInt(url.searchParams.get('page')??'1')||1)),pageSize=20;
   const clauses=[],bindings=[];
+  const storedTitle='COALESCE(m.title,observed.title,a.title)',title=readingTitleSql(storedTitle,'a.title','COALESCE(r.observed_at,observed.observed_at)');
   if(source){
     const configured=await createSources(env).all();
     if(!configured.some(row=>row.id===source))return json({error:'未知来源'},400);
@@ -48,11 +50,12 @@ async function versionedList(env,url){
   if(query){
     if([...query].length>=3){
       clauses.push(`(EXISTS(SELECT 1 FROM article_read_search WHERE id=a.id AND article_read_search MATCH ?)
+        OR (${title}<>${storedTitle} AND ${title} LIKE ? ESCAPE '\\')
         OR (m.article_id IS NULL AND observed.id IS NULL
           AND EXISTS(SELECT 1 FROM article_search WHERE id=a.id AND article_search MATCH ?)))`);
-      const match='"'+query.replace(/"/g,'""')+'"';bindings.push(match,match);
+      const match='"'+query.replace(/"/g,'""')+'"';bindings.push(match,'%'+query.replace(/[\\%_]/g,'\\$&')+'%',match);
     }else{
-      clauses.push(`(COALESCE(m.title,observed.title,a.title) LIKE ? ESCAPE '\\'
+      clauses.push(`(${title} LIKE ? ESCAPE '\\'
         OR (CASE WHEN m.article_id IS NOT NULL THEN m.readable_text
           WHEN observed.id IS NULL THEN a.body_text ELSE '' END LIKE ? ESCAPE '\\'))`);
       const match='%'+query.replace(/[\\%_]/g,'\\$&')+'%';bindings.push(match,match);
@@ -63,7 +66,7 @@ async function versionedList(env,url){
     LEFT JOIN article_revisions observed ON observed.id=a.latest_observed_revision_id`;
   const where=clauses.length?' WHERE '+clauses.join(' AND '):'';
   const count=await env.DB.prepare(`SELECT COUNT(*) AS n ${from}${where}`).bind(...bindings).first();
-  const rows=await env.DB.prepare(`SELECT a.id,COALESCE(m.title,observed.title,a.title) AS title,a.source_id AS sourceId,s.name AS sourceName,a.url,
+  const rows=await env.DB.prepare(`SELECT a.id,${title} AS title,a.source_id AS sourceId,s.name AS sourceName,a.url,
     NULLIF(COALESCE(r.published_at,observed.published_at,a.published_at),'unknown') AS publishedAt,a.captured_at AS capturedAt,
     COALESCE(r.observed_at,observed.observed_at) AS revisionObservedAt,
     CASE WHEN m.revision_id IS NOT NULL THEN 'complete' WHEN observed.id IS NOT NULL THEN 'partial' ELSE a.status END AS status,
