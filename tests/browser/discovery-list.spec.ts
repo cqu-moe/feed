@@ -168,3 +168,24 @@ test('dated WeChat cards are skipped only on continuation pages, while empty/err
     await expect(discoverList({}, source, url, { scrape, allowExternalOnly: true })).rejects.toThrow('No article links found in list');
   }
 });
+
+
+test('explicitly empty VSB lists succeed, but blank or challenge pages still fail', async ({ page }) => {
+  const bundle = await build({ entryPoints: ['worker/discovery.mjs'], bundle: true, write: false,
+    platform: 'node', format: 'esm', external: ['cloudflare:workers'] });
+  const { discoverList } = await import('data:text/javascript;base64,' + Buffer.from(bundle.outputFiles[0].text).toString('base64'));
+  const source = { url: 'https://jwc.cqu.edu.cn/', articlePattern: '^/info/\\d+/\\d+\\.htm$' };
+  let html = '<meta charset="utf-8"><main><ul></ul><div class="pb_sys_common"><span class="p_t">共0条</span><span class="p_t">0/0</span></div></main>';
+  await page.route('**/*', route => route.fulfill({ contentType: 'text/html', body: html }));
+  const discover = async () => {
+    await page.goto('https://jwc.cqu.edu.cn/index/tzgg/xjgl.htm');
+    return discoverList({}, source, page.url(), { scrape: async (_env: unknown, _url: string,
+      options: { actions: { script: string }[] }) => ({ actions: { javascriptReturns: [{ value: await page.evaluate(options.actions[0].script) }] } }) });
+  };
+  expect((await discover()).articles).toEqual([]);
+  for (const invalid of ['', '<main>共0条</main>', '<main>验证后查看</main>',
+    '<div class="pb_sys_common"><span class="p_t">共12条</span><span class="p_t">1/2</span></div>']) {
+    html = invalid;
+    await expect(discover()).rejects.toThrow('No article links found in list');
+  }
+});

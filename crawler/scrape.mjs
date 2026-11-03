@@ -1,5 +1,6 @@
 import {setTimeout as delay} from 'node:timers/promises';
 import {openBrowser} from './browser.mjs';
+import {isExplicitlyEmptyList} from './list-state.mjs';
 
 export function validateJob(input){
   const url=new URL(input?.url);
@@ -29,6 +30,7 @@ export async function scrapePage(job,signal){
       signal.throwIfAborted();
       try{state=await browser.evaluate(`(() => {
         const input=${readiness};
+        const isExplicitlyEmptyList=${isExplicitlyEmptyList.toString()};
         const pattern=input.articlePattern?new RegExp(input.articlePattern):null;
         const content=pattern?[...document.querySelectorAll('a[href]')].some(anchor=>{
           if(anchor.closest('nav,header,footer'))return false;
@@ -41,7 +43,7 @@ export async function scrapePage(job,signal){
           return input.allowExternalOnly&&url.origin==='https://mp.weixin.qq.com'
             &&/^\\/s(?:\\/|$)/.test(url.pathname)&&/20\\d{2}[年.\\/-]\\s*\\d{1,2}/.test(anchor.closest('li')?.textContent??'');
         }):(document.body?.innerText?.length??0)>100||!!document.querySelector('iframe[src],embed[src],object[data]');
-        return {url:location.href,parsed:document.readyState!=='loading',content};
+        return {url:location.href,parsed:document.readyState!=='loading',content:content||(!!pattern&&isExplicitlyEmptyList(document))};
       })()`);}
       catch(error){if(signal.aborted)throw error;}
       const status=browser.documents.at(-1)?.status;

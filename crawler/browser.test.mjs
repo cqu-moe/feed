@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {readFile,readdir} from 'node:fs/promises';
 import {setTimeout as delay} from 'node:timers/promises';
 import {openBrowser} from './browser.mjs';
+import {scrapePage} from './scrape.mjs';
 import {createServer} from 'node:http';
 
 async function processes(){
@@ -114,5 +115,23 @@ test('list probes skip the stalled CS carousel while captures retain it',async()
         assert.equal(carouselRequests,list?0:1);
       }finally{await browser.close();}
     }
+  }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
+});
+
+// Reduced from JWC's live 学籍管理 list on 2026-11-03: HTTP 200, no
+// articles, and the VSB paginator explicitly says there are zero records.
+test('an explicitly empty VSB list reaches extraction instead of timing out',async()=>{
+  const server=createServer((_request,response)=>{
+    response.setHeader('content-type','text/html; charset=utf-8');
+    response.end('<main><ul></ul><div class="pb_sys_common"><span class="p_t">共0条</span><span class="p_t">0/0</span></div></main>');
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  try{
+    const result=await scrapePage({
+      url:`http://127.0.0.1:${server.address().port}/list.htm`,
+      readiness:{articlePattern:'^/info/\\d+/\\d+\\.htm$'},formats:[],
+      actions:[{type:'executeJavascript',script:'({extracted:true})'}],
+    },AbortSignal.timeout(10000));
+    assert.deepEqual(result.actions.javascriptReturns[0].value,{extracted:true});
   }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
 });
