@@ -1,6 +1,7 @@
 import {bounded} from './utils.mjs';
 import {handoffOrReleaseSiteExecution} from './site-scheduler.mjs';
 import {createTaskRuntime} from './task-runtime.mjs';
+import {articleNavigationUrl} from './source-url.mjs';
 
 function siteIdentity(source){
   const identity=source?.siteId;
@@ -19,7 +20,7 @@ export async function scrape(env,url,options={}){
     const response=await browser.fetch(new Request('https://browser.internal/scrape',{
       method:'POST',
       headers:{'content-type':'application/json','x-feed-browser-job-id':jobId},
-      body:JSON.stringify({url,siteId,jobId,...request,...(siteAdmission?{generation:siteAdmission.generation}:{})}),
+      body:JSON.stringify({url:articleNavigationUrl(url),siteId,jobId,...request,...(siteAdmission?{generation:siteAdmission.generation}:{})}),
     }));
     const bytes=await bounded(response,40*1024*1024);
     const acceptedJobId=response.headers.get('x-feed-browser-job-id');

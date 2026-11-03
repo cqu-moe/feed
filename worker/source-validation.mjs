@@ -7,6 +7,7 @@ import {discoverList} from './discovery.mjs';
 import {canonicalUrl} from './sources.mjs';
 import {articleId,fileKind,sha,cleanError} from './utils.mjs';
 import {Buffer} from 'node:buffer';
+import {articleNavigationUrl} from './source-url.mjs';
 
 export async function verifySource(env,sources,sourceId,{source,taskId,attemptNo,scrape:scrapeDependency=scrape,siteAdmission}){
   const current=await sources.find(sourceId);
@@ -51,7 +52,7 @@ async function collectEvidence(env,source,scrapeDependency,siteAdmission){
   });
   let report=data.actions?.javascriptReturns?.[0]?.value;
   if(typeof report==='string')report=JSON.parse(report);
-  if(!report?.bodyRecognized||!report.page?.url||canonicalUrl(report.page.url).href!==sample.href
+  if(!report?.bodyRecognized||!report.page?.url||articleNavigationUrl(canonicalUrl(report.page.url).href)!==articleNavigationUrl(sample.href)
     ||!(String(report.bodyText??'').trim()||report.attachmentCandidates?.some(row=>row.role==='body-pdf'))){
     throw validationError('Sample article body was not recognized');
   }
