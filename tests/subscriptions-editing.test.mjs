@@ -10,7 +10,7 @@ import {
 } from './helpers/subscriptions-fixture.mjs';
 
 test('distinct target changes remain valid when the server clock has the same millisecond', async () => {
-  const { mf } = await subscriptionsFixture({ clock: 1791800000000 });
+  const { mf, admin } = await subscriptionsFixture({ clock: 1791800000000 });
   try {
     const invoke = (method, ...args) => subscriptionCall(mf, '/__test/subscriptions', {
       method: 'POST', body: { method, actor: { id: 'same-clock-owner' }, args },
@@ -44,7 +44,7 @@ test('distinct target changes remain valid when the server clock has the same mi
 });
 
 test('an owner can edit subscription settings and targets with version guards and stable replay', async () => {
-  const { mf, login, setPolicy } = await subscriptionsFixture();
+  const { mf, login, setPolicy, admin } = await subscriptionsFixture();
   try {
     await setPolicy('editor', { access: true, limit: { kind: 'limited', value: 2 } });
     const cookie = await login('editor');
@@ -137,7 +137,7 @@ test('an owner can edit subscription settings and targets with version guards an
 });
 
 test('concurrent target edits share one version transition and only the winner writes targets', async () => {
-  const { mf, login, setPolicy } = await subscriptionsFixture();
+  const { mf, login, setPolicy, admin } = await subscriptionsFixture();
   try {
     await setPolicy('race-editor', { access: true, limit: { kind: 'unlimited' } });
     const cookie = await login('race-editor');
@@ -186,7 +186,7 @@ test('concurrent target edits share one version transition and only the winner w
 });
 
 test('editing may retain an existing target after an administrator disables it', async () => {
-  const { mf, login, setPolicy } = await subscriptionsFixture();
+  const { mf, login, setPolicy, admin } = await subscriptionsFixture();
   try {
     await setPolicy('disabled-target-editor', { access: true, limit: { kind: 'unlimited' } });
     const cookie = await login('disabled-target-editor');
@@ -204,7 +204,7 @@ test('editing may retain an existing target after an administrator disables it',
     });
     assert.equal(created.status, 201, JSON.stringify(created));
     const id = created.body.subscription.id;
-    const disabled = await adminRequest(mf, '/internal/sources/jwc', { enabled: false }, { method: 'PATCH' });
+    const disabled = await adminRequest(mf, admin, '/internal/sources/jwc', { enabled: false }, { method: 'PATCH' });
     assert.equal(disabled.status, 200, JSON.stringify(disabled));
 
     const edited = await subscriptionCall(mf, `/api/subscriptions/${id}`, {
@@ -231,7 +231,7 @@ test('editing may retain an existing target after an administrator disables it',
 });
 
 test('finite quota preserves configuration while priority selects the running set and email verification only pauses email', async () => {
-  const { mf, login, setPolicy, setRecipient, setPolicyService } = await subscriptionsFixture();
+  const { mf, login, setPolicy, setRecipient, setPolicyService, admin } = await subscriptionsFixture();
   try {
     await setPolicy('runtime-user', { access: true, limit: { kind: 'unlimited' } });
     const cookie = await login('runtime-user');
@@ -323,7 +323,7 @@ test('finite quota preserves configuration while priority selects the running se
 });
 
 test('an owner can delete and later restore a subscription with a fresh quota check, target interval, and RSS credential', async () => {
-  const { mf, login, setPolicy } = await subscriptionsFixture();
+  const { mf, login, setPolicy, admin } = await subscriptionsFixture();
   try {
     await setPolicy('delete-restore-user', { access: true, limit: { kind: 'limited', value: 1 } });
     const cookie = await login('delete-restore-user');
@@ -465,7 +465,7 @@ test('an owner can delete and later restore a subscription with a fresh quota ch
 });
 
 test('concurrent restores share the creation quota and leave only one configuration active', async () => {
-  const { mf, login, setPolicy } = await subscriptionsFixture();
+  const { mf, login, setPolicy, admin } = await subscriptionsFixture();
   try {
     await setPolicy('restore-race-user', { access: true, limit: { kind: 'unlimited' } });
     const cookie = await login('restore-race-user');
@@ -543,7 +543,7 @@ test('concurrent restores share the creation quota and leave only one configurat
 });
 
 test('an owner can independently rotate and revoke an RSS credential without changing quota usage', async () => {
-  const { mf, db, login, setPolicy } = await subscriptionsFixture();
+  const { mf, db, login, setPolicy, admin } = await subscriptionsFixture();
   try {
     await setPolicy('rss-manager', { access: true, limit: { kind: 'limited', value: 1 } });
     const cookie = await login('rss-manager');
@@ -656,7 +656,7 @@ test('an owner can independently rotate and revoke an RSS credential without cha
 });
 
 test('update commands are owner and subscription scoped without leaking targets across subscriptions', async () => {
-  const { mf, login, setPolicy } = await subscriptionsFixture();
+  const { mf, login, setPolicy, admin } = await subscriptionsFixture();
   try {
     await setPolicy('owner-a', { access: true, limit: { kind: 'unlimited' } });
     await setPolicy('owner-b', { access: true, limit: { kind: 'unlimited' } });

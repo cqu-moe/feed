@@ -12,11 +12,11 @@ const articleUrl='https://jwc.cqu.edu.cn/info/1082/900.htm';
 // direct OCR invocation with a manually-running task cannot exercise that path.
 for(const failAfterOcrStore of [false,true]){
 test(`queued OCR publishes readable content${failAfterOcrStore?' after a storage commit failure':''} without paying twice`,async()=>{
-  const {mf,auth,ocr}=await fixture({failAfterOcrStore});
+  const {mf,auth,ocr,adminHeaders}=await fixture({failAfterOcrStore});
   try{
     const cookie=await login(mf,auth);
     const read=path=>mf.dispatchFetch('https://feed.test'+path,{headers:{Cookie:cookie}});
-    const admin=(path,body)=>mf.dispatchFetch('https://feed.test'+path,{method:body?'POST':'GET',headers:{Authorization:'Bearer reading-admin','Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});
+    const admin=(path,body)=>mf.dispatchFetch('https://feed.test'+path,{method:body?'POST':'GET',headers:{...adminHeaders,'Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});
     const command={articleId,requestId:'reading-queue-capture-001'};
     const submitted=await admin('/internal/capture-tasks',command);
     assert.equal(submitted.status,202,await submitted.clone().text());
@@ -160,7 +160,7 @@ async function fixture({failAfterOcrStore=false}={}){
       const body=await request.json();assert.deepEqual(body.pages,[0]);ocr.calls++;ocr.held=true;
       if(ocr.calls===1)await new Promise(resolve=>{ocr.release=resolve;});
       return Response.json({model:'mistral-ocr-4-1',pages:[{index:0,markdown:'桥接验收名单 测试同学 1200',tables:[]}],usage_info:{pages_processed:1,doc_size_bytes:pdf.length}});
-    }},bindings:{...auth.bindings,ADMIN_TOKEN:'reading-admin',BASE_URL:'https://feed.test',BRIDGE_SECRET:'test-bridge',
+    }},bindings:{...auth.bindings,BASE_URL:'https://feed.test',BRIDGE_SECRET:'test-bridge',
       CRAWL_ENABLED:'true',TASK_RUNTIME_ENABLED:'true',ARCHIVE_VERSIONS_ENABLED:'true',ARCHIVE_READS_ENABLED:'true',
       SOURCE_MANAGEMENT_ENABLED:'false',PDF_OCR_ENABLED:'true',PDF_OCR_MODEL:'mistral-ocr-4-1',MISTRAL_API_KEY:'test-mistral'},
     queueProducers:{FEED_JOBS:{queueName:'feed-jobs'},FEED_EVENTS:{queueName:'feed-events'}},
@@ -173,7 +173,8 @@ async function fixture({failAfterOcrStore=false}={}){
   }
   await db.prepare("INSERT OR IGNORE INTO sources(id,name,url) VALUES ('jwc','教务处','https://jwc.cqu.edu.cn')").run();
   await db.prepare("INSERT INTO articles(id,source_id,url,title,published_at,discovered_at) VALUES (?,'jwc',?,'正文识别验收通知','2026-10-12','2026-10-12T00:00:00Z')").bind(articleId,articleUrl).run();
-  return {mf,auth,ocr};
+  auth.setAdmin(true,'reading-admin');
+  return {mf,auth,ocr,adminHeaders:{Cookie:await login(mf,auth,'reading-admin'),Origin:'https://feed.test'}};
 }
 async function until(check){
   let failure;

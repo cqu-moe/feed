@@ -5,11 +5,11 @@ The source catalog is provisioned from `worker/source-catalog.json`. The default
 ```sh
 node scripts/provision-sources.mjs
 FEED_URL=https://feed.cqu.moe node scripts/provision-sources.mjs \
-  --apply --credentials-file /absolute/path/to/production-secrets.json \
+  --apply --credentials-file /absolute/path/to/feed-session.json \
   --timeout-minutes 120
 ```
 
-The credentials file is the existing JSON shape `{ "ADMIN_TOKEN": "..." }`; `FEED_ADMIN_TOKEN` may be used instead. Apply fetches sites and sources first, creates an absent site with `requestId: catalog-v1-<site-key>`, and creates absent columns as disabled drafts. Site reuse is by origin and source reuse is by list URL. Each column keeps its configured refresh interval, uses `Asia/Shanghai`, and uses the standard article pattern. Sites are processed sequentially and one validation is submitted at a time. Progress is written immediately to stderr; the JSON summary is written once to stdout.
+The credentials file must contain `{ "FEED_SESSION_COOKIE": "__Host-feed_session=..." }`; an explicitly supplied `FEED_SESSION_COOKIE` environment variable may be used instead. This is an authenticated Feed session with current `feed.admin`, not a shared administrator token. The script sends the Feed origin and refuses redirects; it never reads browser profiles or a default production secrets file. Apply fetches sites and sources first, creates an absent site with `requestId: catalog-v1-<site-key>`, and creates absent columns as disabled drafts. Site reuse is by origin and source reuse is by list URL. Each column keeps its configured refresh interval, uses `Asia/Shanghai`, and uses the standard article pattern. Sites are processed sequentially and one validation is submitted at a time. Progress is written immediately to stderr; the JSON summary is written once to stdout.
 
 A source is enabled only after the server reports `verified`. A running validation task is polled and resumed instead of submitted again. A failed validation is not retried unless `--retry-failed` is explicitly supplied. Failed entries are recorded, unrelated sources continue, and the command exits nonzero. HTTP 402 or an upstream quota/balance error stops the run.
 

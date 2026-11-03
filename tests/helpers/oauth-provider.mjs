@@ -7,9 +7,11 @@ export function oauthProvider({feedOrigin='https://feed.test',authOrigin='https:
   const keys=generateKeyPair('EdDSA',{crv:'Ed25519',extractable:true});
   let access=true;
   let subject='test-user';
+  const admins=new Map();
   return {
     bindings:{AUTH_BASE_URL:authOrigin,FEED_AUTH_CLIENT_ID:clientId,FEED_AUTH_CLIENT_SECRET:clientSecret,FEED_SESSION_ENCRYPTION_KEY:'test-session-encryption-key'},
     setAccess(value){access=value;},
+    setAdmin(value,userId=subject){admins.set(userId,value);},
     setSubject(value){subject=value;},
     async fetch(request){
       const url=new URL(request.url);
@@ -34,10 +36,12 @@ export function oauthProvider({feedOrigin='https://feed.test',authOrigin='https:
           .setIssuer(authOrigin+'/api/auth').setAudience(clientId).setSubject(subject).setIssuedAt().setExpirationTime('10m').sign((await keys).privateKey);
         return Response.json({access_token:token,token_type:'Bearer',expires_in:3600,id_token:jwt});
       }
-      if(url.pathname.endsWith('/userinfo'))return Response.json({sub:tokens.get(request.headers.get('Authorization')?.slice(7)),name:'测试读者'});
+      if(url.pathname.endsWith('/userinfo')){
+        return Response.json({sub:tokens.get(request.headers.get('Authorization')?.slice(7)),name:'测试读者'});
+      }
       if(url.pathname.endsWith('/introspect')){
         const sub=tokens.get(new URLSearchParams(await request.text()).get('token'));
-        return Response.json(sub?{active:true,sub,sid:'test-session',client_id:clientId,exp:Math.floor(Date.now()/1000)+3600,caps:{feed:{access}}}:{active:false});
+        return Response.json(sub?{active:true,sub,sid:'test-session',client_id:clientId,exp:Math.floor(Date.now()/1000)+3600,caps:{feed:{access,admin:admins.get(sub)??false}}}:{active:false});
       }
       return new Response('Not found',{status:404});
     },
@@ -54,4 +58,10 @@ export async function login(mf,provider,subject){
   const session=callback.headers.getSetCookie().find(value=>value.startsWith('__Host-feed_session='))?.split(';')[0];
   if(!session)throw new Error('Login callback failed: '+await callback.text());
   return session;
+}
+
+export async function loginAdmin(mf,provider,subject='feed-admin'){
+  provider.setAdmin(true,subject);
+  const cookie=await login(mf,provider,subject);
+  return {cookie,headers:{Cookie:cookie,Origin:'https://feed.test'}};
 }

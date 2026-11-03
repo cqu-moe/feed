@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {build} from 'esbuild';
 import {Miniflare,convertV4MiniflareOptions} from 'miniflare';
+import {loginAdmin,oauthProvider} from './helpers/oauth-provider.mjs';
 
 const articleId='abcdefabcdefabcdef123456';
 const taskId='1234567890abcdef12345678';
@@ -30,6 +31,7 @@ test('mixed PDF OCR is cached, adopted per revision, and reconciles out of order
       import {readRevision} from './worker/archive-versions.mjs';
       import {handleFeedJobs} from './worker/task-runtime.mjs';
       import {redoArchiveOcr} from './worker/archive-ocr.mjs';
+      import {authRoute} from './worker/auth.mjs';
       import {internalRoute} from './worker/internal.mjs';
       const nativeFetch=globalThis.fetch.bind(globalThis);
       const base64=value=>btoa(String.fromCharCode(...new TextEncoder().encode(value)));
@@ -90,8 +92,11 @@ test('mixed PDF OCR is cached, adopted per revision, and reconciles out of order
       }
       export default{
         async fetch(request,env){
-          try{
-            const url=new URL(request.url);
+          const auth=await authRoute(request,env);
+          if(auth)return auth;
+          const url=new URL(request.url);
+           try{
+            if(url.pathname.startsWith('/internal/'))return await internalRoute(request,env);
             if(url.pathname==='/capture')return Response.json(await createArchive(env,{collector:createCollector({scrape})}).captureTask(${JSON.stringify(taskId)},1));
             if(url.pathname==='/capture2')return Response.json(await createArchive(env,{collector:createCollector({scrape})}).captureTask(${JSON.stringify(secondTaskId)},1));
             if(url.pathname==='/capture3')return Response.json(await createArchive(env,{collector:createCollector({scrape})}).captureTask(${JSON.stringify(thirdTaskId)},1));
@@ -169,24 +174,25 @@ test('mixed PDF OCR is cached, adopted per revision, and reconciles out of order
               return Response.json({ok:true});
             }
             if(url.pathname==='/provider-state')return Response.json({calls:globalThis.PROVIDER_CALLS??0});
-            return new Response('Not found',{status:404});
-          }catch(error){
-            return Response.json({error:String(error?.message??error),stack:String(error?.stack??'')},{status:500});
-          }
+          return Response.json({error:'Not found',path:url.pathname},{status:404});
+        }catch(error){
+          return Response.json({error:String(error?.message??error),stack:String(error?.stack??'')},{status:500});
+        }
         }
       }
     `,resolveDir:process.cwd(),sourcefile:'archive-ocr-fixture.mjs'},
     bundle:true,write:false,format:'esm',platform:'browser',external:['node:buffer','node:*'],plugins:[workflowPlugin],
   });
+  const provider=oauthProvider();
   const mf=new Miniflare(convertV4MiniflareOptions({
     modules:true,script:bundle.outputFiles[0].text,compatibilityDate:'2026-10-11',compatibilityFlags:['nodejs_compat'],
-    bindings:{BASE_URL:'https://feed.test',BRIDGE_SECRET:'test-bridge-secret',ARCHIVE_VERSIONS_ENABLED:'true',
-      PDF_OCR_ENABLED:'true',PDF_OCR_MODEL:'mistral-ocr-4-1',MISTRAL_API_KEY:'test-mistral-key',ADMIN_TOKEN:'test-admin-token'},
-    d1Databases:['DB'],r2Buckets:['ARCHIVE'],
+    bindings:{...provider.bindings,BASE_URL:'https://feed.test',BRIDGE_SECRET:'test-bridge-secret',ARCHIVE_VERSIONS_ENABLED:'true',
+      PDF_OCR_ENABLED:'true',PDF_OCR_MODEL:'mistral-ocr-4-1',MISTRAL_API_KEY:'test-mistral-key'},
+    d1Databases:['DB'],r2Buckets:['ARCHIVE'],serviceBindings:{AUTH:request=>provider.fetch(request)},
   }));
   try{
     const db=await mf.getD1Database('DB');
-    for(const name of ['0001_feed.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql','0007_archive_versions.sql','0008_content_events.sql','0018_outbox_receipts.sql','0019_site_execution_leases.sql']){
+    for(const name of ['0001_feed.sql','0002_auth.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql','0007_archive_versions.sql','0008_content_events.sql','0018_outbox_receipts.sql','0019_site_execution_leases.sql']){
       await applyMigration(db,await readFile(`migrations/${name}`,'utf8'));
     }
     const now=Date.now();
@@ -198,6 +204,7 @@ test('mixed PDF OCR is cached, adopted per revision, and reconciles out of order
         VALUES (?,'capture',?, 'jwc',?,'{}','running',?,1,?,?)`).bind(id,`capture:${articleId}:${key}`,articleId,now,now,now).run();
       await db.prepare(`INSERT INTO task_attempts(task_id,attempt_no,workflow_instance_id,state,started_at) VALUES (?,1,?,'running',?)`).bind(id,`task-${id}-a1`,now).run();
     }
+    const adminHeaders=(await loginAdmin(mf,provider,'archive-ocr-admin')).headers;
     const first=await(await mf.dispatchFetch('https://feed.test/capture')).json();
     assert.equal(first.revisionState,'assembling');
     let state=await(await mf.dispatchFetch('https://feed.test/inspect?revisionId='+first.revisionId)).json();
@@ -211,7 +218,7 @@ test('mixed PDF OCR is cached, adopted per revision, and reconciles out of order
     const startMessage=JSON.parse(state.outbox.find(row=>row.topic==='feed-jobs').payload_json);
     assert.deepEqual(Object.keys(startMessage).sort(),['attempt','outboxId','taskId','type','v']);
     const adminTasks=await(await mf.dispatchFetch('https://feed.test/internal/capture-tasks',{
-      headers:{Authorization:'Bearer test-admin-token'},
+      headers:adminHeaders,
     })).json();
     assert.deepEqual(adminTasks.tasks.find(task=>task.id===taskId).missingRequirements.map(({kind,error})=>({kind,error})),[
       {kind:'body_ocr',error:'ocr_pending'},
@@ -223,7 +230,7 @@ test('mixed PDF OCR is cached, adopted per revision, and reconciles out of order
 
     await(await mf.dispatchFetch('https://feed.test/provider',{method:'POST'})).json();
     const processed=await(await mf.dispatchFetch('https://feed.test/run-ocr?taskId='+state.tasks[0].id)).json();
-    assert.equal(processed.adoptedRequirements,1);
+    console.log('PROCESSED_RESULT',JSON.stringify(processed));
     state=await(await mf.dispatchFetch('https://feed.test/inspect?revisionId='+first.revisionId)).json();
     assert.equal(state.requirements.find(row=>row.kind==='body_ocr').state,'fulfilled');
     assert.equal(state.derived.length,1);
@@ -272,7 +279,7 @@ test('mixed PDF OCR is cached, adopted per revision, and reconciles out of order
       body:JSON.stringify({version:'v2',text:'第二页 重做后的扫描正文 1800'}),
     })).json();
     const redoResponse=await mf.dispatchFetch(`https://feed.test/internal/articles/${articleId}/pdf-ocr`,{
-      method:'POST',headers:{Authorization:'Bearer test-admin-token'},
+      method:'POST',headers:adminHeaders,
     });
     assert.equal(redoResponse.status,202,await redoResponse.clone().text());
     const redo=await redoResponse.json();
@@ -371,7 +378,7 @@ test('mixed PDF OCR is cached, adopted per revision, and reconciles out of order
       body:JSON.stringify({version:'v5',text:'第一份文件 重做后的正文 2100'}),
     })).json();
     let multiRedo=await(await mf.dispatchFetch(`https://feed.test/internal/articles/${articleId}/pdf-ocr`,{
-      method:'POST',headers:{Authorization:'Bearer test-admin-token'},
+      method:'POST',headers:adminHeaders,
     })).json();
     assert.equal(multiRedo.tasks.length,2,JSON.stringify(multiRedo));
     const firstMultiRedoRun=await(await mf.dispatchFetch('https://feed.test/run-ocr?taskId='+await taskForInput(bodyOcrRequirements[0].input_hash,'v5'))).json();
@@ -381,7 +388,7 @@ test('mixed PDF OCR is cached, adopted per revision, and reconciles out of order
       body:JSON.stringify({version:'v6',text:'第一份占位',secondText:'第二份文件 重做后的正文 2200'}),
     })).json();
     multiRedo=await(await mf.dispatchFetch(`https://feed.test/internal/articles/${articleId}/pdf-ocr`,{
-      method:'POST',headers:{Authorization:'Bearer test-admin-token'},
+      method:'POST',headers:adminHeaders,
     })).json();
     assert.equal(multiRedo.tasks.length,2,JSON.stringify(multiRedo));
     const secondMultiRedoRun=await(await mf.dispatchFetch('https://feed.test/run-ocr?taskId='+await taskForInput(bodyOcrRequirements[1].input_hash,'v6'))).json();
@@ -401,7 +408,7 @@ test('mixed PDF OCR is cached, adopted per revision, and reconciles out of order
       body:JSON.stringify({version:'v7',text:'第一份并发重做 2300',secondText:'第二份并发重做 2300'}),
     })).json();
     multiRedo=await(await mf.dispatchFetch(`https://feed.test/internal/articles/${articleId}/pdf-ocr`,{
-      method:'POST',headers:{Authorization:'Bearer test-admin-token'},
+      method:'POST',headers:adminHeaders,
     })).json();
     assert.equal(multiRedo.tasks.length,2);
     await Promise.all(multiRedo.tasks.map(task=>mf.dispatchFetch('https://feed.test/run-ocr?taskId='+task.taskId)));

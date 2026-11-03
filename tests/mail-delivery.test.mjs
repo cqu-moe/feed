@@ -28,7 +28,7 @@ test('mail telemetry separates provider acceptance from verified delivery',async
     const eventId=await seedReadyEvent(f.mf,{id:'f55555555555555555555555',sourceId:'jwc',firstSeenAt:start+1,observedAt:start+1,readyAt:start+2,publishedAt:new Date(start+1).toISOString(),datePrecision:'minute'});
     await notificationInvoke(f.mf,'enqueueEvent',eventId);await notificationInvoke(f.mf,'replayMatchOutbox');
     await f.mailClock(start+120_000);await f.mail('preparePending');await f.replayMail();
-    const view=await adminRequest(f.mf,'/internal/mail',undefined,{method:'GET'});
+    const view=await adminRequest(f.mf, f.admin,'/internal/mail',undefined,{method:'GET'});
     const messageId=view.body.messages[0].id;
     let events=(await telemetryEvents(f)).filter(event=>event.event==='feed_delivery_finalized');
     assert.equal(events.length,1);
@@ -40,7 +40,7 @@ test('mail telemetry separates provider acceptance from verified delivery',async
     assert.equal(events[0].properties.attempt_id,`${messageId}:1`);
     assert.equal(events[0].properties.owner_sub,'mail-owner');
 
-    const reconciled=await adminRequest(f.mf,`/internal/mail/${messageId}/reconcile`,{});
+    const reconciled=await adminRequest(f.mf, f.admin,`/internal/mail/${messageId}/reconcile`,{});
     assert.equal(reconciled.status,200,JSON.stringify(reconciled));
     assert.equal(reconciled.body.state,'delivered');
     events=(await telemetryEvents(f)).filter(event=>event.event==='feed_delivery_finalized');
@@ -70,7 +70,7 @@ test('a suppression committed at the final submission boundary prevents a provid
       VALUES (OLD.recipient_hash,'bounced','concurrent-webhook',${start}); END`).run();
     await f.replayMail();await f.mail('recover');await f.replayMail();
     assert.equal(submissions,0);
-    const view=await adminRequest(f.mf,'/internal/mail',undefined,{method:'GET'});
+    const view=await adminRequest(f.mf, f.admin,'/internal/mail',undefined,{method:'GET'});
     assert.equal(view.body.messages[0].state,'cancelled');
     assert.equal(view.body.messages[0].lastError,'email_bounced');
   }finally{await f.mf.dispose();}
@@ -91,13 +91,13 @@ test('repeated queue exhaustion before provider submission stops automatic recov
       await f.db.prepare("UPDATE outbox SET state='sent',attempts=? WHERE topic='feed-mail'").bind(attempt).run();
       await f.mail('recover');
     }
-    const view=await adminRequest(f.mf,'/internal/mail',undefined,{method:'GET'});
+    const view=await adminRequest(f.mf, f.admin,'/internal/mail',undefined,{method:'GET'});
     assert.equal(view.body.messages[0].state,'deferred');
     assert.equal(view.body.messages[0].nextAttemptAt,null);
     assert.equal(view.body.messages[0].lastError,'retry_limit_reached');
     assert.equal((await f.replayMail()).retried,0);
     assert.equal(submissions,0);
-    const event=await adminRequest(f.mf,`/internal/notification-events/${id}`,undefined,{method:'GET'});
+    const event=await adminRequest(f.mf, f.admin,`/internal/notification-events/${id}`,undefined,{method:'GET'});
     assert.equal(event.body.delivery.state,'claimed');
     assert.equal((await f.mail('preparePending')).prepared,0);
   }finally{await f.mf.dispose();}
@@ -110,16 +110,16 @@ test('two subscriptions and duplicate preparation submit one immutable version e
     submissions.push({key:request.headers.get('idempotency-key'),body:await request.json()});
     return Response.json({id:'11111111-1111-4111-8111-111111111111'});
   }}});
-  const {mf}=fixture;
+  const {mf,admin}=fixture;
   try{
     for(const [i,name] of ['及时一','及时二'].entries())await subscriptionsInvoke(mf,'change',{id:'mail-owner'},{requestId:`mail-create-${i}`,name,sourceIds:['jwc'],emailMode:'immediate'});
     const eventId=await seedReadyEvent(mf,{id:'a11111111111111111111111',sourceId:'jwc',firstSeenAt:start+1,observedAt:start+1,readyAt:start+2,publishedAt:new Date(start+1).toISOString(),datePrecision:'minute',title:'申请 <script>alert(1)</script>'});
     await notificationInvoke(mf,'enqueueEvent',eventId);
     await notificationInvoke(mf,'replayMatchOutbox');
-    const [prepared,again]=await Promise.all([adminRequest(mf,'/internal/mail/prepare',{}),adminRequest(mf,'/internal/mail/prepare',{})]);
+    const [prepared,again]=await Promise.all([adminRequest(mf, admin,'/internal/mail/prepare',{}),adminRequest(mf, admin,'/internal/mail/prepare',{})]);
     assert.equal(prepared.status,202,JSON.stringify(prepared));
     assert.equal(again.status,202);
-    let view=await adminRequest(mf,'/internal/mail',undefined,{method:'GET'});
+    let view=await adminRequest(mf, admin,'/internal/mail',undefined,{method:'GET'});
     assert.equal(view.body.messages.length,1,JSON.stringify(view));
     await fixture.mailClock(Date.now());
     const replay=await fixture.replayMail();
@@ -132,13 +132,13 @@ test('two subscriptions and duplicate preparation submit one immutable version e
     assert.ok(!submissions[0].body.html.includes('<script>'));
     assert.match(submissions[0].body.text,new RegExp(`/articles/${eventId}\\?revision=${eventId}`));
     assert.ok(submissions[0].key.startsWith('feed-mail/'));
-    view=await adminRequest(mf,'/internal/mail',undefined,{method:'GET'});
+    view=await adminRequest(mf, admin,'/internal/mail',undefined,{method:'GET'});
     assert.equal(view.body.messages[0].state,'accepted');
     assert.ok(!JSON.stringify(view).includes('reader@example.test'));
-    const event=await adminRequest(mf,`/internal/notification-events/${eventId}`,undefined,{method:'GET'});
+    const event=await adminRequest(mf, admin,`/internal/notification-events/${eventId}`,undefined,{method:'GET'});
     assert.equal(event.body.deliveries.length,1);
     assert.equal(event.body.deliveries[0].state,'accepted');
-    const reconciled=await adminRequest(mf,`/internal/mail/${view.body.messages[0].id}/reconcile`,{});
+    const reconciled=await adminRequest(mf, admin,`/internal/mail/${view.body.messages[0].id}/reconcile`,{});
     assert.equal(reconciled.status,200,JSON.stringify(reconciled));
     assert.equal(reconciled.body.state,'delivered');
     assert.equal(submissions.length,1);
@@ -173,23 +173,23 @@ test('signed durable webhooks reconcile unknown submissions and out-of-order bou
     assert.equal(response.status,200,await response.text());
     await f.db.prepare('DROP TRIGGER fail_receipt_apply').run();
     await f.mail('recoverDisabled');
-    const recoveredWhileDisabled=await adminRequest(f.mf,'/internal/mail',undefined,{method:'GET'});
+    const recoveredWhileDisabled=await adminRequest(f.mf, f.admin,'/internal/mail',undefined,{method:'GET'});
     assert.equal(recoveredWhileDisabled.body.messages[0].state,'delivered');
     response=await f.mf.dispatchFetch('https://feed.test/webhooks/resend',requests.get('evt_delivered_1'));
     assert.equal(response.status,200);
     response=await sendHook('email.sent','evt_accepted_older');assert.equal(response.status,200);
-    let view=await adminRequest(f.mf,'/internal/mail',undefined,{method:'GET'});
+    let view=await adminRequest(f.mf, f.admin,'/internal/mail',undefined,{method:'GET'});
     assert.equal(view.body.messages[0].state,'delivered');
     assert.ok(view.body.messages[0].acceptedAt&&view.body.messages[0].deliveredAt);
     response=await sendHook('email.bounced','evt_bounce_1');assert.equal(response.status,200);
     response=await sendHook('email.delivered','evt_delivered_2');assert.equal(response.status,200);
-    view=await adminRequest(f.mf,'/internal/mail',undefined,{method:'GET'});
+    view=await adminRequest(f.mf, f.admin,'/internal/mail',undefined,{method:'GET'});
     assert.equal(view.body.messages[0].state,'bounced');
     assert.ok(view.body.messages[0].deliveredAt&&view.body.messages[0].bouncedAt);
     const second=await seedReadyEvent(f.mf,{id:'e11111111111111111111111',sourceId:'jwc',firstSeenAt:start+1,observedAt:start+1,readyAt:start+2,publishedAt:new Date(start+1).toISOString(),datePrecision:'minute'});
     await notificationInvoke(f.mf,'enqueueEvent',second);await notificationInvoke(f.mf,'replayMatchOutbox');
     assert.equal((await f.mail('preparePending')).prepared,0);
-    const event=await adminRequest(f.mf,`/internal/notification-events/${second}`,undefined,{method:'GET'});
+    const event=await adminRequest(f.mf, f.admin,`/internal/notification-events/${second}`,undefined,{method:'GET'});
     assert.equal(event.body.delivery.suppressionReason,'email_bounced');
     const rss=await f.mf.dispatchFetch('https://feed.test'+created.body.subscription.rssUrl);
     assert.equal(rss.status,200);assert.match(await rss.text(),/及时匹配通知/);
@@ -212,7 +212,7 @@ test('provider acceptance followed by a local commit failure retries the origina
     await f.db.prepare('DROP TRIGGER fail_accept').run();
     await f.mailClock(at+121_000);await f.mail('recover');await f.replayMail();
     assert.equal(sent.length,2);assert.deepEqual(sent[0],sent[1]);
-    const view=await adminRequest(f.mf,'/internal/mail',undefined,{method:'GET'});
+    const view=await adminRequest(f.mf, f.admin,'/internal/mail',undefined,{method:'GET'});
     assert.equal(view.body.messages.length,1);assert.equal(view.body.messages[0].state,'accepted');
   }finally{await f.mf.dispose();}
 });
@@ -235,9 +235,9 @@ test('a delivered callback arriving before the send response cannot be downgrade
     const id=await seedReadyEvent(f.mf,{id:'f22222222222222222222222',sourceId:'jwc',firstSeenAt:start+1,observedAt:start+1,readyAt:start+2,publishedAt:new Date(start+1).toISOString(),datePrecision:'minute'});
     await notificationInvoke(f.mf,'enqueueEvent',id);await notificationInvoke(f.mf,'replayMatchOutbox');
     await f.mailClock(start+120_000);await f.mail('preparePending');await f.replayMail();
-    const message=await adminRequest(f.mf,'/internal/mail',undefined,{method:'GET'});
+    const message=await adminRequest(f.mf, f.admin,'/internal/mail',undefined,{method:'GET'});
     assert.equal(message.body.messages[0].state,'delivered');
-    const event=await adminRequest(f.mf,`/internal/notification-events/${id}`,undefined,{method:'GET'});
+    const event=await adminRequest(f.mf, f.admin,`/internal/notification-events/${id}`,undefined,{method:'GET'});
     assert.equal(event.body.delivery.state,'delivered');
   }finally{await f.mf.dispose();}
 });
@@ -267,7 +267,7 @@ test('first submission rechecks current Auth, target preference, address and unc
       }
       await f.replayMail();
       assert.equal(submissions.length,0,scenario);
-      const view=await adminRequest(f.mf,'/internal/mail',undefined,{method:'GET'});
+      const view=await adminRequest(f.mf, f.admin,'/internal/mail',undefined,{method:'GET'});
       assert.equal(view.body.messages[0].state,scenario==='auth'?'deferred':'cancelled',scenario);
       if(scenario==='address'){
         assert.equal((await f.mail('preparePending')).prepared,1);
@@ -279,7 +279,7 @@ test('first submission rechecks current Auth, target preference, address and unc
         await f.setPolicyService({outage:false});await f.mailClock(at+120_000);
         await f.mail('recover');await f.replayMail();
         assert.equal(submissions.length,0);
-        const event=await adminRequest(f.mf,`/internal/notification-events/${id}`,undefined,{method:'GET'});
+        const event=await adminRequest(f.mf, f.admin,`/internal/notification-events/${id}`,undefined,{method:'GET'});
         assert.equal(event.body.delivery.kind,'daily_digest');assert.equal(event.body.delivery.state,'pending');
       }
     }finally{await f.mf.dispose();}
@@ -301,17 +301,17 @@ test('lost provider responses retain the original claim, payload and key and sto
       const id=await seedReadyEvent(f.mf,{id:'c11111111111111111111111',sourceId:'jwc',firstSeenAt:start+1,observedAt:start+1,readyAt:start+2,publishedAt:new Date(start+1).toISOString(),datePrecision:'minute'});
       await notificationInvoke(f.mf,'enqueueEvent',id);await notificationInvoke(f.mf,'replayMatchOutbox');
       const at=start+120_000;await f.mailClock(at);await f.mail('preparePending');await f.replayMail();
-      let events=await adminRequest(f.mf,`/internal/notification-events/${id}`,undefined,{method:'GET'});
+      let events=await adminRequest(f.mf, f.admin,`/internal/notification-events/${id}`,undefined,{method:'GET'});
       assert.equal(events.body.delivery.state,'submission_unknown');
       assert.equal((await f.mail('preparePending')).prepared,0);
       if(mode==='changed-address')await f.setRecipient('mail-owner',{status:'verified',email:'new@example.test'});
       await f.mailClock(at+(mode==='expired'?25*3600_000:120_000));
       await f.mail('recover');await f.replayMail();
       assert.equal(submissions.length,['retry','limited-retry'].includes(mode)?2:1,mode);
-      const view=await adminRequest(f.mf,'/internal/mail',undefined,{method:'GET'});
+      const view=await adminRequest(f.mf, f.admin,'/internal/mail',undefined,{method:'GET'});
       assert.equal(view.body.messages.length,1);
       assert.equal(view.body.messages[0].state,mode==='retry'?'accepted':'submission_unknown');
-      events=await adminRequest(f.mf,`/internal/notification-events/${id}`,undefined,{method:'GET'});
+      events=await adminRequest(f.mf, f.admin,`/internal/notification-events/${id}`,undefined,{method:'GET'});
       assert.equal(events.body.delivery.state,mode==='retry'?'accepted':'submission_unknown');
       if(mode==='retry')assert.deepEqual(submissions[1],submissions[0]);
       if(mode==='expired')assert.equal(view.body.messages[0].lastError,'reconciliation_required');

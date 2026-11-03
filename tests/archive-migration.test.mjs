@@ -12,12 +12,12 @@ const articleUrl='https://jwc.cqu.edu.cn/info/1082/1.htm';
 const prefix='articles/1234567890abcdef12345678/legacy-run';
 
 for(const [model,ocrRole,caption='',native=false] of [['mistral-ocr-4-1','body-pdf'],['textin-xparse-auto','body-pdf'],['textin-xparse-auto','attachment'],['mistral-ocr-4-1','body-pdf','page 1'],['textin-xparse-auto','attachment','page 1',true]])test(`an MVP ${model} ${ocrRole} ${caption} archive imports through Archive reconcile and supports read switching`,async()=>{
-  const {mf,auth,bucket,legacy}=await fixture({model,ocrRole,caption,native});
+  const {mf,auth,adminHeaders,bucket,legacy}=await fixture({model,ocrRole,caption,native});
   const pdfText=native?'page 1':'扫描通知 资助名单';
   try{
     const cookie=await login(mf,auth);
     const admin=(path,init={})=>mf.dispatchFetch('https://feed.test'+path,{
-      ...init,headers:{Authorization:'Bearer migration-admin',...(init.headers??{})},
+      ...init,headers:{...adminHeaders,...(init.headers??{})},
     });
 
     const submitted=await admin('/internal/archive-migration',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -105,13 +105,13 @@ for(const [model,ocrRole,caption='',native=false] of [['mistral-ocr-4-1','body-p
 });
 
 test('a complete legacy record stays blocked until its original PDF OCR is recovered',async()=>{
-  const {mf,auth,db,bucket,legacy}=await fixture();
+  const {mf,auth,adminHeaders,db,bucket,legacy}=await fixture();
   try{
     await bucket.delete(legacy.keys.ocr);
     await db.prepare("UPDATE pdf_ocr_jobs SET status='failed' WHERE id='legacy-ocr-1'").run();
     const cookie=await login(mf,auth);
     const admin=(path,body)=>mf.dispatchFetch('https://feed.test'+path,{
-      method:body?'POST':'GET',headers:{Authorization:'Bearer migration-admin','Content-Type':'application/json'},
+      method:body?'POST':'GET',headers:{...adminHeaders,'Content-Type':'application/json'},
       ...(body?{body:JSON.stringify(body)}:{}),
     });
     const read=path=>mf.dispatchFetch('https://feed.test'+path,{headers:{Cookie:cookie}});
@@ -148,13 +148,13 @@ test('a complete legacy record stays blocked until its original PDF OCR is recov
 });
 
 for(const pdfReadFailure of [false,true])test(`migration repair preserves originals and classifies rechecks with PDF read failure=${pdfReadFailure}`,async()=>{
-  const {mf,auth,db,bucket,legacy}=await fixture();
+  const {mf,auth,adminHeaders,db,bucket,legacy}=await fixture();
   try{
     const original=await(await bucket.get(legacy.keys.normal)).arrayBuffer();
     await bucket.delete(legacy.keys.normal);
     const cookie=await login(mf,auth);
     const admin=(path,body)=>mf.dispatchFetch('https://feed.test'+path,{
-      method:body?'POST':'GET',headers:{Authorization:'Bearer migration-admin','Content-Type':'application/json'},
+      method:body?'POST':'GET',headers:{...adminHeaders,'Content-Type':'application/json'},
       ...(body?{body:JSON.stringify(body)}:{}),
     });
     const read=path=>mf.dispatchFetch('https://feed.test'+path,{headers:{Cookie:cookie}});
@@ -213,11 +213,11 @@ for(const pdfReadFailure of [false,true])test(`migration repair preserves origin
 });
 
 test('an unchanged mixed body PDF recheck does not create a false update event',async()=>{
-  const {mf,auth,db,bucket,legacy}=await fixture({pageCount:2,mixed:true});
+  const {mf,auth,adminHeaders,db,bucket,legacy}=await fixture({pageCount:2,mixed:true});
   try{
     const cookie=await login(mf,auth);
     const admin=(path,body)=>mf.dispatchFetch('https://feed.test'+path,{
-      method:body?'POST':'GET',headers:{Authorization:'Bearer migration-admin','Content-Type':'application/json'},
+      method:body?'POST':'GET',headers:{...adminHeaders,'Content-Type':'application/json'},
       ...(body?{body:JSON.stringify(body)}:{}),
     });
     const read=path=>mf.dispatchFetch('https://feed.test'+path,{headers:{Cookie:cookie}});
@@ -260,12 +260,12 @@ test('an unchanged mixed body PDF recheck does not create a false update event',
 });
 
 test('an old mixed saved capture replays without a false update event',async()=>{
-  const {mf,auth,db,bucket,legacy}=await fixture({pageCount:2,mixed:true,baselineNative:true});
+  const {mf,auth,adminHeaders,db,bucket,legacy}=await fixture({pageCount:2,mixed:true,baselineNative:true});
   const taskId='abcdefabcdefabcdef12345a';
   try{
     const cookie=await login(mf,auth);
     const admin=(path,body)=>mf.dispatchFetch('https://feed.test'+path,{
-      method:body?'POST':'GET',headers:{Authorization:'Bearer migration-admin','Content-Type':'application/json'},
+      method:body?'POST':'GET',headers:{...adminHeaders,'Content-Type':'application/json'},
       ...(body?{body:JSON.stringify(body)}:{}),
     });
     const read=path=>mf.dispatchFetch('https://feed.test'+path,{headers:{Cookie:cookie}});
@@ -298,11 +298,11 @@ test('an old mixed saved capture replays without a false update event',async()=>
 });
 
 test('a native mixed baseline survives an interrupted original PDF read',async()=>{
-  const {mf,auth,db,bucket,legacy}=await fixture({pageCount:2,mixed:true,baselineNative:true});
+  const {mf,auth,adminHeaders,db,bucket,legacy}=await fixture({pageCount:2,mixed:true,baselineNative:true});
   try{
     const cookie=await login(mf,auth);
     const admin=(path,body)=>mf.dispatchFetch('https://feed.test'+path,{
-      method:body?'POST':'GET',headers:{Authorization:'Bearer migration-admin','Content-Type':'application/json'},
+      method:body?'POST':'GET',headers:{...adminHeaders,'Content-Type':'application/json'},
       ...(body?{body:JSON.stringify(body)}:{}),
     });
     const read=path=>mf.dispatchFetch('https://feed.test'+path,{headers:{Cookie:cookie}});
@@ -338,13 +338,13 @@ test('a native mixed baseline survives an interrupted original PDF read',async()
 });
 
 test('an old journal with unavailable comparison evidence stays deferred and reusable',async()=>{
-  const {mf,auth,db,bucket,legacy}=await fixture({pageCount:2,mixed:true,baselineNative:true});
+  const {mf,auth,adminHeaders,db,bucket,legacy}=await fixture({pageCount:2,mixed:true,baselineNative:true});
   const taskId='abcdefabcdefabcdef12345b';
   try{
     const cookie=await login(mf,auth),read=path=>mf.dispatchFetch('https://feed.test'+path,{headers:{Cookie:cookie}});
-    const admin=path=>mf.dispatchFetch('https://feed.test'+path,{headers:{Authorization:'Bearer migration-admin'}});
+    const admin=path=>mf.dispatchFetch('https://feed.test'+path,{headers:adminHeaders});
     const migration=await mf.dispatchFetch('https://feed.test/internal/archive-migration',{
-      method:'POST',headers:{Authorization:'Bearer migration-admin','Content-Type':'application/json'},
+      method:'POST',headers:{...adminHeaders,'Content-Type':'application/json'},
       body:JSON.stringify({requestId:'mvp-deferred-journal',batchSize:20}),
     });
     assert.equal(migration.status,202,await migration.clone().text());
@@ -388,7 +388,7 @@ test('an old journal with unavailable comparison evidence stays deferred and reu
 });
 
 test('bounded migration batches resume concurrently and expose paged comparison evidence',async()=>{
-  const {mf,auth,db,bucket,legacy}=await fixture();
+  const {mf,auth,adminHeaders,db,bucket,legacy}=await fixture();
   const secondId='2234567890abcdef12345678';
   try{
     const secondPrefix=`articles/${secondId}/old`;
@@ -402,7 +402,7 @@ test('bounded migration batches resume concurrently and expose paged comparison 
       published_at,published_day,date_precision,source_timezone) VALUES (?,'jwc',1791532800000,1791622800000,
       'migrated','2026-10-08','2026-10-08','day','Asia/Shanghai')`).bind(secondId).run();
     const admin=(path,body)=>mf.dispatchFetch('https://feed.test'+path,{
-      method:body?'POST':'GET',headers:{Authorization:'Bearer migration-admin','Content-Type':'application/json'},
+      method:body?'POST':'GET',headers:{...adminHeaders,'Content-Type':'application/json'},
       ...(body?{body:JSON.stringify(body)}:{}),
     });
     const first=await admin('/internal/archive-migration',{requestId:'mvp-bounded-batch',batchSize:1});
@@ -450,10 +450,10 @@ test('bounded migration batches resume concurrently and expose paged comparison 
 });
 
 test('legacy OCR must identify the original PDF and cover every scanned page',async()=>{
-  const {mf,bucket,legacy}=await fixture({pageCount:2});
+  const {mf,adminHeaders,bucket,legacy}=await fixture({pageCount:2});
   try{
     const admin=(path,body)=>mf.dispatchFetch('https://feed.test'+path,{
-      method:body?'POST':'GET',headers:{Authorization:'Bearer migration-admin','Content-Type':'application/json'},
+      method:body?'POST':'GET',headers:{...adminHeaders,'Content-Type':'application/json'},
       ...(body?{body:JSON.stringify(body)}:{}),
     });
     await bucket.put(legacy.keys.ocr,JSON.stringify({...legacy.ocrResult,pages:legacy.ocrResult.pages.slice(0,1)}));
@@ -477,10 +477,10 @@ test('legacy OCR must identify the original PDF and cover every scanned page',as
 });
 
 test('migration resumes after storage succeeds but the database import is interrupted',async()=>{
-  const {mf}=await fixture();
+  const {mf,adminHeaders}=await fixture();
   try{
     const admin=(path,body)=>mf.dispatchFetch('https://feed.test'+path,{
-      method:body?'POST':'GET',headers:{Authorization:'Bearer migration-admin','Content-Type':'application/json'},
+      method:body?'POST':'GET',headers:{...adminHeaders,'Content-Type':'application/json'},
       ...(body?{body:JSON.stringify(body)}:{}),
     });
     await mf.dispatchFetch('https://feed.test/fixture/fail-batch',{method:'POST'});
@@ -504,14 +504,14 @@ test('migration resumes after storage succeeds but the database import is interr
 });
 
 test('recovering a missing body PDF requires OCR and preserves unconfirmed migration evidence',async()=>{
-  const {mf,db,bucket,legacy}=await fixture();
+  const {mf,adminHeaders,db,bucket,legacy}=await fixture();
   try{
     await db.prepare('UPDATE articles SET discovered_at=?,captured_at=NULL WHERE id=?')
       .bind('not-a-date',articleId).run();
     const pdf=await(await bucket.get(legacy.keys.pdf)).arrayBuffer();
     await bucket.delete(legacy.keys.pdf);
     const admin=(path,body)=>mf.dispatchFetch('https://feed.test'+path,{
-      method:body?'POST':'GET',headers:{Authorization:'Bearer migration-admin','Content-Type':'application/json'},
+      method:body?'POST':'GET',headers:{...adminHeaders,'Content-Type':'application/json'},
       ...(body?{body:JSON.stringify(body)}:{}),
     });
     const first=await admin('/internal/archive-migration',{requestId:'mvp-body-pdf-recover',batchSize:20});
@@ -642,7 +642,7 @@ async function fixture({pageCount=1,model='mistral-ocr-4-1',ocrRole='body-pdf',c
   const mf=new Miniflare(convertV4MiniflareOptions({modules:true,script:bundle.outputFiles[0].text,
     compatibilityDate:'2026-10-11',compatibilityFlags:['nodejs_compat'],d1Databases:['DB'],r2Buckets:['ARCHIVE'],
     serviceBindings:{AUTH:request=>auth.fetch(request)},
-    bindings:{...auth.bindings,ADMIN_TOKEN:'migration-admin',BASE_URL:'https://feed.test',BRIDGE_SECRET:'test-bridge-secret',
+    bindings:{...auth.bindings,BASE_URL:'https://feed.test',BRIDGE_SECRET:'test-bridge-secret',
       TASK_RUNTIME_ENABLED:'true',ARCHIVE_VERSIONS_ENABLED:'true',PDF_OCR_ENABLED:'false',PDF_OCR_MODEL:'mistral-ocr-4-1'}}));
   const db=await mf.getD1Database('DB'),bucket=await mf.getR2Bucket('ARCHIVE');
   try{
@@ -650,7 +650,8 @@ async function fixture({pageCount=1,model='mistral-ocr-4-1',ocrRole='body-pdf',c
       await applyMigration(db,await readFile('migrations/'+name,'utf8'));
     }
     const legacy=await seedLegacyArchive({db,bucket,pageCount,model,ocrRole,caption,native,mixed,baselineNative});
-    return {mf,auth,db,bucket,legacy};
+    auth.setAdmin(true,'migration-admin');
+    return {mf,auth,adminHeaders:{Cookie:await login(mf,auth,'migration-admin'),Origin:'https://feed.test'},db,bucket,legacy};
   }catch(error){
     await mf.dispose();throw error;
   }

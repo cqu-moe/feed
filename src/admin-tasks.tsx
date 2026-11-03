@@ -1,12 +1,12 @@
-import { useRef, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link } from 'react-router';
 import { Alert, AlertDescription, AlertTitle, Button, ContentContainer, Input, Label, PageHeader, PageState } from '@cqu-moe/ui';
 import { RefreshCw } from 'lucide-react';
-import { requestJson } from './api';
 import { articleStatusLabel, formatDateTime, StandaloneHeader } from './components';
 import { AdminMailPanel } from './admin-mail';
 import { AdminNotificationEvents } from './admin-notifications';
 import { AdminOperationsPanel } from './admin-operations';
+import { adminRequestMessage, requestJson } from './api';
 
 type Task = {
   id: string; kind?: string; sourceId?: string; articleId: string | null; articleTitle?: string; state: string;
@@ -48,9 +48,6 @@ function parseCreated(value: unknown): Task {
 const label = (state: string | null) => state ? states[state] ?? state : '尚未接手';
 
 export function AdminTasksPage() {
-  // Operator credentials exist only for this mounted page, never in URLs or browser storage.
-  const [credential, setCredential] = useState('');
-  const [token, setToken] = useState('');
   const [tasks, setTasks] = useState<Task[]>([]);
   const [articleId, setArticleId] = useState('');
   const [selected, setSelected] = useState<string | null>(null);
@@ -60,9 +57,19 @@ export function AdminTasksPage() {
   const intent = useRef<{ articleId: string; requestId: string } | null>(null);
   const activeTask = tasks.find(task => task.id === selected);
 
-  async function load(operatorToken: string) {
-    const result = await requestJson('/internal/capture-tasks', parseList, { headers: { Authorization: `Bearer ${operatorToken}` } });
-    if (!result.ok) throw new Error(result.status === 401 ? '管理员凭据无效，请重新输入。' : result.message);
+  useEffect(() => {
+    let cancelled = false;
+    requestJson('/internal/capture-tasks', parseList).then(result => {
+      if (cancelled) return;
+      if (!result.ok) setError(adminRequestMessage(result.status, '读取', result.message));
+      else setTasks(result.data);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  async function load() {
+    const result = await requestJson('/internal/capture-tasks', parseList);
+    if (!result.ok) throw new Error(adminRequestMessage(result.status, '读取', result.message));
     setTasks(result.data);
   }
   async function action(run: () => Promise<void>) {
@@ -71,10 +78,6 @@ export function AdminTasksPage() {
     try { await run(); } catch (cause) { setError(cause instanceof Error ? cause.message : '操作未确认，请稍后重试。'); }
     finally { setBusy(false); }
   }
-  function connect(event: FormEvent) {
-    event.preventDefault();
-    void action(async () => { await load(credential); setToken(credential); setCredential(''); });
-  }
   function submit(event: FormEvent) {
     event.preventDefault();
     void action(async () => {
@@ -82,25 +85,22 @@ export function AdminTasksPage() {
       if (!/^[a-f0-9]{24}$/.test(id)) throw new Error('请填写通知链接中的 24 位通知 ID。');
       if (intent.current?.articleId !== id) intent.current = { articleId: id, requestId: crypto.randomUUID() };
       const result = await requestJson('/internal/capture-tasks', parseCreated, {
-        method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: JSON.stringify(intent.current),
+        method: 'POST', body: JSON.stringify(intent.current),
       });
-      if (!result.ok) throw new Error(result.status === 503 ? '暂时无法提交，请确认采集已启用后重试；重试会保留本次请求身份。' : result.message);
+      if (!result.ok) throw new Error(adminRequestMessage(result.status, '提交', result.message));
       setSelected(result.data.id);
       setTasks(prior => [result.data, ...prior.filter(task => task.id !== result.data.id)]);
       setNotice('采集任务已保存。刷新状态可查看接手与归档结果。');
       intent.current = null;
     });
   }
-  function disconnect() {
-    setToken(''); setCredential(''); setTasks([]); setSelected(null); setError(''); setNotice(''); intent.current = null;
-  }
   function recover() {
     void action(async () => {
       const result = await requestJson('/internal/capture-tasks/recover', value => value, {
-        method: 'POST', headers: { Authorization: `Bearer ${token}` },
+        method: 'POST',
       });
-      if (!result.ok) throw new Error(result.message);
-      await load(token);
+      if (!result.ok) throw new Error(adminRequestMessage(result.status, '恢复', result.message));
+      await load();
       setNotice('已检查到期任务。余额不足和需要人工处理的任务会保留原因。');
     });
   }
@@ -113,22 +113,16 @@ export function AdminTasksPage() {
     } />
     <ContentContainer width="standard">
       <div className="feed-admin-content">
-        <PageHeader title="采集任务管理" description="对已发现的通知发起采集，查看任务接手、延期和归档结果。"
-          actions={token ? <Button variant="outline" onClick={disconnect} disabled={busy}>退出管理</Button> : undefined} />
+        <PageHeader title="采集任务管理" description="对已发现的通知发起采集，查看任务接手、延期和归档结果。" />
         {error && <Alert variant="destructive"><AlertTitle>操作未完成</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
         {notice && <p role="status">{notice}</p>}
-        {!token ? <form className="feed-card feed-admin-form" onSubmit={connect}>
-          <Label htmlFor="admin-token">管理员凭据</Label>
-          <Input id="admin-token" type="password" autoComplete="off" value={credential} onChange={event => setCredential(event.target.value)} required disabled={busy} />
-          <p className="feed-admin-note">凭据仅在此页面暂存，离开后需要重新输入。普通阅读权限不能用于管理采集。</p>
-          <Button type="submit" disabled={busy || !credential}>{busy ? '正在验证…' : '进入管理'}</Button>
-        </form> : <>
+        <>
           <form className="feed-card feed-admin-form" onSubmit={submit}>
             <Label htmlFor="capture-article-id">通知 ID</Label>
             <Input id="capture-article-id" value={articleId} onChange={event => setArticleId(event.target.value)} placeholder="通知阅读链接中的 24 位 ID" maxLength={24} required disabled={busy} />
             <div className="feed-card-actions">
               <Button type="submit" disabled={busy || !articleId}>{busy ? '正在处理…' : '发起一次采集'}</Button>
-              <Button type="button" variant="outline" disabled={busy} onClick={() => void action(() => load(token))}><RefreshCw aria-hidden="true" />刷新状态</Button>
+              <Button type="button" variant="outline" disabled={busy} onClick={() => void action(() => load())}><RefreshCw aria-hidden="true" />刷新状态</Button>
               <Button type="button" variant="outline" disabled={busy} onClick={recover}>恢复到期任务</Button>
             </div>
           </form>
@@ -157,9 +151,9 @@ export function AdminTasksPage() {
             {activeTask.lastError && <p role="status">{activeTask.lastError}</p>}
             {activeTask.articleId && <Button asChild variant="outline"><Link to={`/articles/${activeTask.articleId}`}>查看通知</Link></Button>}
           </section>}
-          <AdminOperationsPanel token={token} />
-          <AdminNotificationEvents token={token} />
-          <AdminMailPanel token={token} />
+          <AdminOperationsPanel />
+          <AdminNotificationEvents />
+          <AdminMailPanel />
           <section aria-label="最近采集任务">
             <h2>最近采集任务</h2>
             {tasks.length === 0 ? <PageState state="empty" title="还没有采集任务" description="填写已发现通知的 ID，发起第一次采集。" /> :
@@ -169,7 +163,7 @@ export function AdminTasksPage() {
                 <Button variant="outline" onClick={() => setSelected(task.id)} aria-pressed={selected === task.id}>查看任务详情</Button>
               </article>)}</div>}
           </section>
-        </>}
+        </>
       </div>
     </ContentContainer>
   </div>;

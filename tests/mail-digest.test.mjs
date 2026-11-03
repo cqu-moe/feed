@@ -19,14 +19,14 @@ test('an already compiled digest keeps its message and sends after a temporary A
       await notificationInvoke(f.mf,'enqueueEvent',id);await notificationInvoke(f.mf,'replayMatchOutbox');
     }
     await f.mailClock(evening);await f.mail('prepareDigests');
-    const initial=(await adminRequest(f.mf,'/internal/mail',undefined,{method:'GET'})).body.messages[0];
+    const initial=(await adminRequest(f.mf, f.admin,'/internal/mail',undefined,{method:'GET'})).body.messages[0];
     await f.setPolicyService({outage:true});await f.replayMail();assert.equal(sent.length,0);
-    assert.equal((await adminRequest(f.mf,'/internal/mail',undefined,{method:'GET'})).body.messages[0].state,'deferred');
+    assert.equal((await adminRequest(f.mf, f.admin,'/internal/mail',undefined,{method:'GET'})).body.messages[0].state,'deferred');
     await f.setPolicyService({outage:false});await f.mailClock(evening+120_000);await f.mail('recover');await f.replayMail();
     assert.equal(sent.length,1);
     assert.equal(sent[0].key,`feed-mail/${initial.id}`);
     assert.match(sent[0].body.text,/恢复后同批发送0/);assert.match(sent[0].body.text,/恢复后同批发送1/);
-    const recovered=(await adminRequest(f.mf,'/internal/mail',undefined,{method:'GET'})).body.messages;
+    const recovered=(await adminRequest(f.mf, f.admin,'/internal/mail',undefined,{method:'GET'})).body.messages;
     assert.equal(recovered.length,1);assert.equal(recovered[0].id,initial.id);assert.equal(recovered[0].state,'accepted');
     await f.mailClock(evening+86400_000);await f.mail('recover');await f.replayMail({duplicate:true});assert.equal(sent.length,1);
   }finally{await f.mf.dispose();}
@@ -47,8 +47,8 @@ test('a competing delivery claim cannot leave a digest containing an item it did
       WHEN NEW.claim_token IS NOT NULL AND OLD.claim_token IS NULL BEGIN
       UPDATE user_deliveries SET state='accepted',claimed_message_id='aaaaaaaaaaaaaaaaaaaaaaaa' WHERE event_id='${ids[0]}'; END`).run();
     await f.mailClock(evening);await f.mail('prepareDigests');await f.replayMail();assert.equal(sent.length,0);
-    assert.equal((await adminRequest(f.mf,'/internal/mail',undefined,{method:'GET'})).body.messages.length,0);
-    const remaining=await adminRequest(f.mf,`/internal/notification-events/${ids[1]}`,undefined,{method:'GET'});
+    assert.equal((await adminRequest(f.mf, f.admin,'/internal/mail',undefined,{method:'GET'})).body.messages.length,0);
+    const remaining=await adminRequest(f.mf, f.admin,`/internal/notification-events/${ids[1]}`,undefined,{method:'GET'});
     assert.equal(remaining.body.delivery.state,'pending');
     await f.db.prepare('DROP TRIGGER competing_claim').run();
     await f.mail('prepareDigests');await f.replayMail();
@@ -73,11 +73,11 @@ test('Auth outage backlog stays a digest and an uncertain submission keeps the s
     await f.setPolicyService({outage:false});await f.mailClock(evening);await f.mail('recover');await f.replayMail();
     assert.equal(sent.length,1);assert.match(sent[0].body.subject,/每日摘要/);
     assert.match(sent[0].body.text,/积压0/);assert.match(sent[0].body.text,/积压1/);
-    assert.equal((await adminRequest(f.mf,'/internal/mail',undefined,{method:'GET'})).body.messages[0].state,'submission_unknown');
+    assert.equal((await adminRequest(f.mf, f.admin,'/internal/mail',undefined,{method:'GET'})).body.messages[0].state,'submission_unknown');
     await f.mailClock(evening+120_000);await f.mail('recover');await f.replayMail();
     assert.equal(sent.length,2);assert.deepEqual(sent[1],sent[0]);
     await f.mailClock(evening+86400_000);await f.mail('recover');await f.replayMail();assert.equal(sent.length,2);
-    const view=await adminRequest(f.mf,'/internal/mail',undefined,{method:'GET'});
+    const view=await adminRequest(f.mf, f.admin,'/internal/mail',undefined,{method:'GET'});
     assert.equal(view.body.messages.length,1);assert.equal(view.body.messages[0].state,'accepted');
   }finally{await f.mf.dispose();}
 });
@@ -122,7 +122,7 @@ test('configured item and UTF-8 payload limits split a large digest without losi
       }
       for(const id of ids)assert.equal(sent.map(mail=>mail.body.text).join('\n').split(`?revision=${id}`).length-1,1,id);
       await f.mail('recover');await f.replayMail({duplicate:true});
-      assert.equal((await adminRequest(f.mf,'/internal/mail',undefined,{method:'GET'})).body.messages.length,sent.length);
+      assert.equal((await adminRequest(f.mf, f.admin,'/internal/mail',undefined,{method:'GET'})).body.messages.length,sent.length);
     }finally{await f.mf.dispose();}
   }
 });
@@ -166,7 +166,7 @@ test('digest send preflight checks every item when a date is withdrawn after com
       const result=await notificationInvoke(f.mf,'verifyDate',ids[withdrawn],{requestId:'digest-date-withdraw',sourceId:'jwc',verifiedBy:'operator',datePrecision:'unknown',evidence:{note:'date withdrawn before digest'}});
       assert.equal(result.status,200);
       await f.replayMail();assert.equal(sent,0,`withdrawn item ${withdrawn}`);
-      assert.equal((await adminRequest(f.mf,'/internal/mail',undefined,{method:'GET'})).body.messages[0].state,'cancelled');
+      assert.equal((await adminRequest(f.mf, f.admin,'/internal/mail',undefined,{method:'GET'})).body.messages[0].state,'cancelled');
     }finally{await f.mf.dispose();}
   }
 });
@@ -181,13 +181,13 @@ test('20:00 Shanghai compiles one immutable cross-subscription digest and repeat
       await notificationInvoke(f.mf,'enqueueEvent',eventId);await notificationInvoke(f.mf,'replayMatchOutbox');
     }
     await f.mailClock(evening-60_000);await f.mail('prepareDigests');
-    assert.equal((await adminRequest(f.mf,'/internal/mail',undefined,{method:'GET'})).body.messages.length,0);
+    assert.equal((await adminRequest(f.mf, f.admin,'/internal/mail',undefined,{method:'GET'})).body.messages.length,0);
     await f.mailClock(evening);await Promise.all([f.mail('prepareDigests'),f.mail('prepareDigests')]);
     await f.replayMail();await f.mail('prepareDigests');await f.replayMail({duplicate:true});
     assert.equal(sent.length,1);
     assert.match(sent[0].body.subject,/每日摘要/);
     assert.match(sent[0].body.text,/第一篇通知/);assert.match(sent[0].body.text,/第二篇通知/);
-    const view=await adminRequest(f.mf,'/internal/mail',undefined,{method:'GET'});
+    const view=await adminRequest(f.mf, f.admin,'/internal/mail',undefined,{method:'GET'});
     assert.equal(view.body.messages.length,1);assert.equal(view.body.messages[0].kind,'daily_digest');
     assert.equal(view.body.messages[0].state,'accepted');
   }finally{await f.mf.dispose();}

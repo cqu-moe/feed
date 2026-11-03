@@ -4,6 +4,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { readdir, readFile, rm, stat } from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { seedSyntheticReadingArchive } from './reading-fixtures.mjs';
 
@@ -13,7 +14,7 @@ import { createMailFixture } from './mail-runtime.mjs';
 import { createIngestionFixture } from './ingestion-runtime.mjs';
 
 export const FEED_E2E_BASE_COMMIT = 'dc57c11a324e9e0091dfc3f0c0ddf666f205069e';
-export const AUTH_E2E_COMMIT = 'd9bf0c5e6d5cc459029da6a345991b8d0f13f514';
+export const AUTH_E2E_COMMIT = '9cbfed93dcd73b626c6e9d7f0b663ce679c0d1bd';
 
 function base64Url(bytes) {
   return Buffer.from(bytes).toString('base64url');
@@ -140,6 +141,17 @@ export async function setFeedEntitlements(db, userId, { access = true, limit = 3
   ]);
 }
 
+export async function setFeedAdmin(db, userId, enabled) {
+  if (typeof enabled !== 'boolean') throw new Error('setFeedAdmin requires a boolean');
+  const now = new Date().toISOString();
+  const statement = enabled
+    ? `INSERT INTO user_entitlement(user_id,subsystem,capability,value,updated_at)
+       VALUES (?,'feed','admin','1',?)
+       ON CONFLICT(user_id,subsystem,capability) DO UPDATE SET value='1',updated_at=excluded.updated_at`
+    : `DELETE FROM user_entitlement WHERE user_id=? AND subsystem='feed' AND capability='admin'`;
+  await db.prepare(statement).bind(...(enabled ? [userId, now] : [userId])).run();
+}
+
 export async function seedSyntheticNotification(db, bucket) {
   const id = 'e2e000000000000000000001';
   const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>FEED-01 合成通知</title></head>
@@ -200,6 +212,8 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir, ingestion 
   const observations = [];
   const unexpected = [];
   const mails = new Map();
+  const { TURNSTILE_SECRET, parseTurnstileToken } = await import(pathToFileURL(join(authDir, 'e2e/turnstile.mjs')).href);
+  const usedTurnstileTokens = new Set();
   const ingest = ingestion || mail ? createIngestionFixture({ dateOnly: mail }) : null;
   const mailFixture = mail ? createMailFixture() : null;
   let mf;
@@ -216,13 +230,22 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir, ingestion 
     const url = new URL(request.url);
     if (url.origin === 'https://api.resend.com' && url.pathname === '/emails' && request.method === 'POST') {
       const mail = await request.json();
-      const otp = mail.html?.match(/letter-spacing:6px">(\d{6})</)?.[1];
+      const otp = mail.text?.match(/\n\n(\d{6})\n\n/)?.[1];
       if (!otp) throw new Error('Unexpected external email payload');
       for (const recipient of [].concat(mail.to)) {
         if (!recipient.endsWith('@example.test')) throw new Error('Non-synthetic email denied');
         mails.set(recipient, otp);
       }
       return Response.json({ id: crypto.randomUUID() });
+    }
+    if (url.origin === 'https://challenges.cloudflare.com' && url.pathname === '/turnstile/v0/siteverify' && request.method === 'POST') {
+      const form = await request.json();
+      const claim = parseTurnstileToken(form.response);
+      const valid = Boolean(claim && form.secret === TURNSTILE_SECRET && !usedTurnstileTokens.has(form.response));
+      if (valid) usedTurnstileTokens.add(form.response);
+      return Response.json(valid
+        ? { success: true, action: claim.action, hostname: claim.hostname, 'challenge-ts': new Date().toISOString() }
+        : { success: false, 'error-codes': ['invalid-input-response'] });
     }
     unexpected.push(`${request.method} ${url.origin}${url.pathname}`);
     return new Response('Unexpected Worker request denied', { status: 502 });
@@ -292,7 +315,7 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir, ingestion 
       ...(ingest ? [ingest.deadLetterObserver, ingest.browserWorker] : []),
       {
         name: 'auth',
-        modules: [{ type: 'ESModule', path: join(buildDir, 'auth', 'index.js'), contents: authBundle }],
+        modules: [...(mailFixture ? [{ type: 'ESModule', path: join(buildDir, 'auth', 'mail-entry.mjs'), contents: mailFixture.module('./index.js', controlSecret, false) }] : []), { type: 'ESModule', path: join(buildDir, 'auth', 'index.js'), contents: authBundle }],
         compatibilityDate: '2026-05-01',
         compatibilityFlags: ['nodejs_compat'],
         unsafeDirectSockets: [{ host: '127.0.0.1', port: authPort, entrypoint: 'default' }],
@@ -300,7 +323,8 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir, ingestion 
           BETTER_AUTH_URL: `http://127.0.0.1:${authPort}`,
           BETTER_AUTH_SECRET: 'synthetic-feed-e2e-auth-secret-never-use',
           ENCRYPTION_KEY: 'MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=',
-          RESEND_API_KEY: 're_synthetic',
+          AUTH_RESEND_API_KEY: 're_synthetic',
+          TURNSTILE_SECRET,
           ENVIRONMENT: 'development',
           BIND_EMAIL_DOMAIN: 'example.test',
           QUICKLOGIN_DEVICE_MODE: 'on',
@@ -377,6 +401,11 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir, ingestion 
         ]);
       } else if (input.action === 'set-entitlements') {
         await setFeedEntitlements(authDb, input.userId, { access: input.access, limit: input.limit });
+      } else if (input.action === 'set-feed-admin') {
+        await setFeedAdmin(authDb, input.userId, input.enabled);
+      } else if (input.action === 'set-auth-role') {
+        if (!['user', 'admin', 'superAdmin'].includes(input.role)) throw new Error('Invalid Auth role');
+        await authDb.prepare('UPDATE "user" SET role=? WHERE id=?').bind(input.role, input.userId).run();
       } else if (input.action === 'reading-manifest') {
         response.writeHead(200, { 'content-type': 'application/json' });
         response.end(JSON.stringify({
@@ -529,7 +558,7 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir, ingestion 
       async sensitiveValues() {
         // Short-lived mail OTPs can collide with numeric report metadata. Keep
         // them in the private mail fixture, outside the global byte inventory.
-        const values = [oauthClientSecret, rpcClientSecret, controlSecret, ingest?.bindings.ADMIN_TOKEN, mailFixture?.bindings.RESEND_API_KEY, mailFixture?.bindings.RESEND_WEBHOOK_SECRET].filter(Boolean);
+        const values = [oauthClientSecret, rpcClientSecret, controlSecret, mailFixture?.bindings.RESEND_API_KEY, mailFixture?.bindings.RESEND_WEBHOOK_SECRET].filter(Boolean);
         for (const table of ['session', 'oauthAccessToken', 'oauthRefreshToken']) {
           const rows = await authDb.prepare(`SELECT token FROM ${table}`).all();
           values.push(...rows.results.map(row => row.token).filter(Boolean));

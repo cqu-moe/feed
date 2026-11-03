@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router';
 import { Alert, AlertDescription, AlertTitle, Button, PageState } from '@cqu-moe/ui';
 import { RefreshCw } from 'lucide-react';
-import { requestJson } from './api';
+import { adminRequestMessage, requestJson } from './api';
 import { formatDateTime } from './components';
 
 type MailMessage = {
@@ -39,6 +40,8 @@ type MailState =
 type MailLoadState =
   | { kind: 'loading' }
   | { kind: 'ready'; data: MailResponse }
+  | { kind: 'unauthorized' }
+  | { kind: 'forbidden' }
   | { kind: 'error'; message: string; retryable: boolean };
 
 const mailStates: Record<MailState, string> = {
@@ -122,7 +125,7 @@ function mailTime(value: number | null): string | null {
   return value === null ? null : new Date(value).toISOString();
 }
 
-export function AdminMailPanel({ token }: { token: string }) {
+export function AdminMailPanel() {
   const [state, setState] = useState<MailLoadState>({ kind: 'loading' });
   const [reloadKey, setReloadKey] = useState(0);
 
@@ -131,21 +134,22 @@ export function AdminMailPanel({ token }: { token: string }) {
     setState({ kind: 'loading' });
     requestJson('/internal/mail', parseMailResponse, {
       signal: controller.signal,
-      headers: { Authorization: `Bearer ${token}` },
     }).then(result => {
       if (controller.signal.aborted) return;
       if (result.ok) {
         setState({ kind: 'ready', data: result.data });
       } else {
-        setState({
+        if (result.status === 401) setState({ kind: 'unauthorized' });
+        else if (result.status === 403) setState({ kind: 'forbidden' });
+        else setState({
           kind: 'error',
-          message: result.status === 401 ? '管理员凭据无效，请重新进入管理。' : result.message,
-          retryable: result.status !== 401,
+          message: adminRequestMessage(result.status, '读取', result.message),
+          retryable: result.status === 503,
         });
       }
     });
     return () => controller.abort();
-  }, [token, reloadKey]);
+  }, [reloadKey]);
 
   const loading = state.kind === 'loading';
   return <section className="feed-card feed-admin-mail" aria-label="邮件投递管理">
@@ -169,6 +173,22 @@ export function AdminMailPanel({ token }: { token: string }) {
       </Alert>
     )}
     {state.kind === 'loading' && <PageState state="loading" title="正在读取邮件" description="正在获取邮件投递状态。" />}
+    {state.kind === 'unauthorized' && (
+      <Alert variant="destructive">
+        <AlertTitle>登录已过期</AlertTitle>
+        <AlertDescription>当前会话已失效，已保存的投递状态不会丢失。</AlertDescription>
+        <div className="feed-card-actions">
+          <Button asChild><a href={`/auth/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`}>重新登录</a></Button>
+        </div>
+      </Alert>
+    )}
+    {state.kind === 'forbidden' && (
+      <Alert variant="destructive">
+        <AlertTitle>管理员权限已变化</AlertTitle>
+        <AlertDescription>当前账号没有 Feed 管理权限，已保存的投递状态不会丢失。</AlertDescription>
+        <div className="feed-card-actions"><Button asChild><Link to="/">返回通知列表</Link></Button></div>
+      </Alert>
+    )}
     {state.kind === 'error' && (
       <Alert variant="destructive">
         <AlertTitle>邮件状态读取失败</AlertTitle>

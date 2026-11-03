@@ -1,6 +1,6 @@
 # 重大通知存档（CQU Feed）
 
-重大通知存档是一个运行在 Cloudflare 上的重庆大学通知采集、私有备份、统一阅读和搜索服务。采集范围按站点下的栏目管理，访问统一走 auth.cqu.moe，并且账号必须拥有 `feed.access` 权益。初始来源为教务处、国际处、土木学院、学工部和新闻网；新增五个站点的栏目目录与启用流程见 [来源维护](docs/source-maintenance.md)。
+重大通知存档是一个运行在 Cloudflare 上的重庆大学通知采集、私有备份、统一阅读和搜索服务。采集范围按站点下的栏目管理，访问统一走 auth.cqu.moe，阅读账号必须拥有 `feed.access` 权益。后台复用同一登录并实时检查 `feed.admin`：Auth 管理员及超级管理员默认拥有，普通用户可单独授权。初始来源为教务处、国际处、土木学院、学工部和新闻网；新增五个站点的栏目目录与启用流程见 [来源维护](docs/source-maintenance.md)。
 
 已部署到 [Feed](https://feed.cqu.moe/)。2026-10-11 首次补抓已归档 33 篇通知、63 个附件、33 份原貌 HTML 和截图；真实账号已完成登录与中文搜索验证。详细验收与限制见 [docs/acceptance.md](docs/acceptance.md)。
 
@@ -71,7 +71,7 @@ pnpm check:design
 1. D1 迁移必须先于 Worker 依赖新表上线。
 2. 日常部署 push 到 main，由 Cloudflare Git Connector 检查、构建、应用 D1 迁移并部署；GitHub Actions 负责检查。配置见 [docs/ci-cd.md](docs/ci-cd.md)。
 3. `BASE_URL` 必须与 OAuth 回调 origin 一致；更换域名时要同步更新 Auth client 的 redirect URI。
-4. Auth、桥接和管理入口的敏感配置都通过 Workers secrets 注入。
+4. Auth 与桥接的敏感配置都通过 Workers secrets 注入。
 5. R2 桶和 D1 不是公共读；所有文件出口经 Worker 鉴权。
 
 ## MVP 阶段历史边界

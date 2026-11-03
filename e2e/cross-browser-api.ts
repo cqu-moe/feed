@@ -1,5 +1,5 @@
 import { test as base, expect, firefox, webkit, type BrowserContext, type Page, type Route } from '@playwright/test';
-import type { Browser } from '@e2e-dev/web';
+import type { Browser, Cookie } from '@e2e-dev/web';
 import type { App, Screen } from 'e2e';
 import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -87,11 +87,12 @@ const native = base.extend<{ surfaces: Surfaces }>({
       await page.route(pattern, (route: Route) => handler({
         request: { url: route.request().url(), method: route.request().method(), headers: route.request().headers(), postData: route.request().postData() },
         continue: (options: any) => route.continue(options), abort: () => route.abort(),
+        fulfill: (options: any) => route.fulfill(options),
       }));
     }
     const browser = queries(() => page, {
       back: async () => { await page.goBack(); await observe(); },
-      cookies: () => context!.cookies(),
+      cookies: (): Promise<Cookie[]> => context!.cookies(),
       route: async (pattern: string | RegExp, handler: (route: any) => any) => { routes.push({ pattern, handler }); await install(pattern, handler); },
       waitForDownload: async (trigger: () => Promise<void>, options?: { timeout?: number }) => {
         const download = page.waitForEvent('download', options);

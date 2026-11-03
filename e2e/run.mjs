@@ -110,29 +110,34 @@ try {
       console.log(`Real Feed/Auth ready (${variant}); synthetic isolated storage`);
       const { prepareAccount } = await import(pathToFileURL(join(authDir, 'e2e/prepare-account.mjs')).href);
       accounts.password = `Feed-E2e-${randomBytes(18).toString('base64url')}`;
-      for (const role of ['owner', 'reject', 'other']) {
+      const roles = ['owner', ingestion || mail ? 'admin' : 'reject', 'other'];
+      for (const role of roles) {
         const email = `feed-${variant}-${role}-${randomBytes(9).toString('hex')}@example.test`;
         accounts[role] = await prepareAccount(
           { ...runtime, db: runtime.authDb, origin: new URL(runtime.authOrigin).origin },
           { email, password: accounts.password, name: `FEED E2E ${role}` },
         );
-        await setFeedEntitlements(runtime.authDb, accounts[role].userId, { access: true, limit: role === 'owner' ? 3 : 1 });
+        await setFeedEntitlements(runtime.authDb, accounts[role].userId, { access: role !== 'admin', limit: role === 'owner' ? 3 : 1 });
+        if (role === 'admin') {
+          await runtime.authDb.prepare("UPDATE \"user\" SET role='admin' WHERE id=?").bind(accounts[role].userId).run();
+        }
       }
       const childEnv = {
         ...isolatedEnv,
         FEED_E2E_APP_URL: runtime.feedOrigin, FEED_E2E_AUTH_URL: runtime.authOrigin,
+        FEED_E2E_AUTH_CHECKOUT: authDir,
         FEED_E2E_CONTROL_URL: runtime.controlOrigin, FEED_E2E_CONTROL_SECRET: runtime.controlSecret,
         FEED_E2E_OUTPUT: variantDir, FEED_E2E_MOBILE: variant === 'mobile' ? '1' : '',
         FEED_E2E_BREAK_ASSERTION: faults.assertion,
         FEED_E2E_SUITE: suite,
         FEED_E2E_MAIL_WRONG_ORACLE: process.env.FEED_E2E_MAIL_WRONG_ORACLE || '',
-        FEED_E2E_ADMIN_TOKEN: runtime.ingestion?.bindings.ADMIN_TOKEN ?? '',
         FEED_E2E_BROWSER: browserName,
         FEED_E2E_CROSS_BROWSER: crossBrowser ? '1' : '',
         FEED_E2E_STOCK_BROWSER: process.env.FEED_E2E_STOCK_BROWSER || '',
         FEED_E2E_OWNER_ID: accounts.owner.userId, FEED_E2E_OTHER_ID: accounts.other.userId,
+        FEED_E2E_ADMIN_ID: accounts.admin?.userId,
       };
-      for (const role of ['owner', 'reject', 'other']) {
+      for (const role of roles) {
         childEnv[`FEED_E2E_${role.toUpperCase()}_EMAIL`] = accounts[role].email;
         childEnv[`FEED_E2E_${role.toUpperCase()}_PASSWORD`] = accounts.password;
       }

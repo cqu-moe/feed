@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { mixedPdf } from '../tests/helpers/mixed-pdf.mjs';
 
 export const SCHOOL = 'https://school.example.test';
@@ -22,7 +22,6 @@ export function createIngestionFixture({ dateOnly = false } = {}) {
   const calendar = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' });
   const day = offset => calendar.format(new Date(Date.now() + offset * 86400000));
   const bindings = {
-    ADMIN_TOKEN: randomBytes(32).toString('hex'),
     BRIDGE_SECRET: 'synthetic-ingestion-bridge-secret',
     TEXTIN_APP_ID: 'synthetic-textin', TEXTIN_SECRET_CODE: 'synthetic-textin',
     CRAWL_ENABLED: 'true', TASK_RUNTIME_ENABLED: 'true',

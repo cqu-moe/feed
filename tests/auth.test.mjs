@@ -19,12 +19,14 @@ before(async () => {
     stdin: {
       contents: `
         import { authRoute, session } from './worker/auth.mjs';
+        import { internalRoute } from './worker/internal.mjs';
         export default {
           async fetch(request, env) {
             const auth = await authRoute(request, env);
             if (auth) return auth;
 
             const url = new URL(request.url);
+            if (url.pathname.startsWith('/internal/')) return internalRoute(request, env, {});
             if (!url.pathname.startsWith('/api/')) {
               return new Response('Not found', { status: 404 });
             }
@@ -58,6 +60,7 @@ before(async () => {
     format: 'esm',
     platform: 'browser',
     target: 'es2022',
+    external: ['node:*', 'cloudflare:workers'],
   });
 
   const provider = await build({
@@ -69,6 +72,7 @@ before(async () => {
         const encoder = new TextEncoder();
         const state = {
           feedAccess: true,
+          feedAdmin: false,
           feedLimit: { kind: 'limited', value: 10 },
           feedEmailStatus: 'verified',
           feedRpcOutage: false,
@@ -242,7 +246,7 @@ before(async () => {
                 sub: token.sub,
                 sid: token.sid,
                 exp: Math.floor(Date.now() / 1000) + 600,
-                caps: { feed: { access: state.feedAccess } },
+                caps: { feed: { access: state.feedAccess, admin: state.feedAdmin } },
               });
             }
 
@@ -270,6 +274,7 @@ before(async () => {
         compatibilityFlags: ['nodejs_compat'],
         bindings: {
           BASE_URL: feedOrigin,
+          ADMIN_TOKEN: 'retired-test-admin-token',
           AUTH_BASE_URL: authOrigin,
           FEED_AUTH_CLIENT_ID: clientId,
           FEED_AUTH_CLIENT_SECRET: clientSecret,
@@ -328,8 +333,10 @@ async function setProviderState(changes) {
   return response.json();
 }
 
-async function createFeedSession() {
-  const login = await miniflare.dispatchFetch(`${feedOrigin}/auth/login`, { redirect: 'manual' });
+async function createFeedSession(returnTo) {
+  const loginUrl = new URL('/auth/login', feedOrigin);
+  if (returnTo) loginUrl.searchParams.set('next', returnTo);
+  const login = await miniflare.dispatchFetch(loginUrl.href, { redirect: 'manual' });
   assert.equal(login.status, 303);
   const loginCookie = cookie(login, '__Host-feed_login');
   const authorize = new URL(login.headers.get('Location'));
@@ -340,6 +347,7 @@ async function createFeedSession() {
     headers: { Cookie: `__Host-feed_login=${loginCookie}` },
   });
   assert.equal(callback.status, 303);
+  if (returnTo) assert.equal(callback.headers.get('Location'), returnTo);
   return cookie(callback, '__Host-feed_session');
 }
 
@@ -464,6 +472,7 @@ test('trusted session exposes Auth feed policy and verified email state', async 
   assert.deepEqual(await response.json(), {
     authenticated: true,
     entitled: true,
+    admin: false,
     user: { id: 'user-uu', name: 'UU', email: 'uu@401.moe' },
     account: {
       status: 'available',
@@ -472,6 +481,46 @@ test('trusted session exposes Auth feed policy and verified email state', async 
       email: { status: 'verified', address: 'verified@401.moe' },
     },
   });
+});
+
+test('management uses live Auth permission, rejects the retired token and protects cookie writes', async () => {
+  const endpoint = `${feedOrigin}/internal/operations/provider-usage`;
+  await setProviderState({ feedAccess: true, feedAdmin: false, outage: false });
+  assert.equal((await miniflare.dispatchFetch(endpoint, {
+    headers: { Authorization: 'Bearer retired-test-admin-token' },
+  })).status, 401);
+  const token = await createFeedSession();
+  const headers = { Cookie: `__Host-feed_session=${token}` };
+  assert.equal((await miniflare.dispatchFetch(endpoint, { headers })).status, 403);
+
+  await setProviderState({ feedAccess: false, feedAdmin: true });
+  await createFeedSession('/admin/tasks?from=login');
+  const allowed = await miniflare.dispatchFetch(endpoint, { headers });
+  assert.equal(allowed.status, 200);
+  assert.equal(allowed.headers.get('Cache-Control'), 'no-store');
+  const state = await (await miniflare.dispatchFetch(`${feedOrigin}/api/session`, { headers })).json();
+  assert.equal(state.admin, true);
+  assert.equal(state.entitled, false);
+  for (const origin of [undefined, 'null', authOrigin, 'https://evil.test']) {
+    const denied = await miniflare.dispatchFetch(endpoint, {
+      method: 'POST', headers: { ...headers, ...(origin ? { Origin: origin } : {}) },
+    });
+    assert.equal(denied.status, 403);
+    assert.equal((await denied.json()).error, 'invalid_origin');
+  }
+  // A permitted administrator reaches the endpoint's read-only method guard.
+  assert.equal((await miniflare.dispatchFetch(endpoint, {
+    method: 'POST', headers: { ...headers, Origin: feedOrigin },
+  })).status, 405);
+
+  await setProviderState({ outage: true });
+  assert.equal((await miniflare.dispatchFetch(endpoint, { headers })).status, 503);
+  await setProviderState({ outage: false, feedAdmin: false });
+  assert.equal((await miniflare.dispatchFetch(endpoint, { headers })).status, 403);
+  // Malformed truthy claims cannot grant administration.
+  await setProviderState({ feedAdmin: 'true' });
+  assert.equal((await miniflare.dispatchFetch(endpoint, { headers })).status, 403);
+  await setProviderState({ feedAccess: true, feedAdmin: false });
 });
 
 test('session account state distinguishes quota, email, access, and RPC availability', async () => {

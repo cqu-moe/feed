@@ -22,6 +22,7 @@ import {
   Textarea,
 } from '@cqu-moe/ui';
 import { ExternalLink, Plus, RefreshCw } from 'lucide-react';
+import { adminRequestMessage } from './api';
 import { StandaloneHeader } from './components';
 import { readValidationSnapshot } from './admin-source-validation';
 
@@ -237,7 +238,6 @@ function responseDetail(value: unknown): string {
 
 async function adminJson<T>(
   path: string,
-  token: string,
   validate: (value: unknown) => T,
   init?: RequestInit,
 ): Promise<T> {
@@ -248,7 +248,6 @@ async function adminJson<T>(
       ...init,
       headers: {
         Accept: 'application/json',
-        Authorization: `Bearer ${token}`,
         ...(init?.body === undefined ? {} : { 'Content-Type': 'application/json' }),
         ...init?.headers,
       },
@@ -433,12 +432,10 @@ function safeFieldId(value: string): string {
 
 function BackfillControls({
   source,
-  token,
   onReplace,
   onError,
 }: {
   source: Source;
-  token: string;
   onReplace: (source: Source) => void;
   onError: (cause: unknown) => void;
 }) {
@@ -473,7 +470,7 @@ function BackfillControls({
       return;
     }
     void run(async () => {
-      const result = await adminJson(`/internal/sources/${encodeURIComponent(source.id)}/backfill`, token, parseSourceResponse, {
+      const result = await adminJson(`/internal/sources/${encodeURIComponent(source.id)}/backfill`, parseSourceResponse, {
         method: 'POST',
         body: JSON.stringify({ requestId: crypto.randomUUID(), ...(days === undefined ? {} : { windowDays: days }) }),
       });
@@ -483,7 +480,7 @@ function BackfillControls({
 
   function pause() {
     void run(async () => {
-      const result = await adminJson(`/internal/sources/${encodeURIComponent(source.id)}/backfill/pause`, token, parseSourceResponse, {
+      const result = await adminJson(`/internal/sources/${encodeURIComponent(source.id)}/backfill/pause`, parseSourceResponse, {
         method: 'POST',
       });
       return result;
@@ -497,7 +494,7 @@ function BackfillControls({
       return;
     }
     void run(async () => {
-      const result = await adminJson(`/internal/sources/${encodeURIComponent(source.id)}/backfill/resume`, token, parseSourceResponse, {
+      const result = await adminJson(`/internal/sources/${encodeURIComponent(source.id)}/backfill/resume`, parseSourceResponse, {
         method: 'POST',
         body: JSON.stringify({ maxPages }),
       });
@@ -558,9 +555,7 @@ function BackfillControls({
 }
 
 export function AdminSourcesPage() {
-  // The operator token and every draft stay in component memory only.
-  const [credential, setCredential] = useState('');
-  const [token, setToken] = useState('');
+  const [identityReady, setIdentityReady] = useState(false);
   const [sites, setSites] = useState<Site[]>([]);
   const [sources, setSources] = useState<Source[]>([]);
   const [siteForm, setSiteForm] = useState<SiteForm>(emptySiteForm);
@@ -586,17 +581,30 @@ export function AdminSourcesPage() {
   const siteDirty = selectedSite !== null && siteNameDraft.trim() !== selectedSite.name;
 
   useEffect(() => {
+    setIdentityReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (!identityReady) return;
+    let cancelled = false;
+    void loadLists(true).catch(cause => {
+      if (!cancelled) reportError(cause);
+    });
+    return () => { cancelled = true; };
+  }, [identityReady]);
+
+  useEffect(() => {
     setValidationStatus('');
     const sourceId = selectedSource?.id;
     const taskId = selectedSource?.validationTaskId;
-    if (!token || !sourceId || !taskId) return;
+    if (!sourceId || !taskId) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
     async function poll() {
       try {
         const { source, task } = await readValidationSnapshot(
-          () => adminJson(`/internal/sources/${encodeURIComponent(sourceId!)}`, token, parseSourceResponse),
-          () => adminJson(`/internal/capture-tasks/${encodeURIComponent(taskId!)}`, token, parseValidationTask),
+          () => adminJson(`/internal/sources/${encodeURIComponent(sourceId!)}`, parseSourceResponse),
+          () => adminJson(`/internal/capture-tasks/${encodeURIComponent(taskId!)}`, parseValidationTask),
         );
         if (cancelled) return;
         setSources(prior => prior.map(item => item.id === source.id ? source : item));
@@ -614,9 +622,8 @@ export function AdminSourcesPage() {
         if (['queued', 'starting', 'running', 'deferred'].includes(task.state)) timer = setTimeout(poll, 3000);
       } catch (cause) {
         if (cancelled) return;
-        if (cause instanceof AdminRequestError && cause.status === 401) {
-          setToken(''); setCredential(''); setSources([]); setSites([]);
-          setError('管理员凭据已失效，请重新输入。');
+        if (cause instanceof AdminRequestError && (cause.status === 401 || cause.status === 403)) {
+          setError(adminRequestMessage(cause.status, '验证进度', cause.detail));
         } else {
           setValidationStatus('验证进度暂时无法读取，系统中的任务会继续执行。');
           timer = setTimeout(poll, 5000);
@@ -625,16 +632,16 @@ export function AdminSourcesPage() {
     }
     void poll();
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [token, selectedSource?.id, selectedSource?.configVersion, selectedSource?.validationTaskId]);
+  }, [selectedSource?.id, selectedSource?.configVersion, selectedSource?.validationTaskId]);
 
   useEffect(() => {
     const sourceId = selectedSource?.id;
-    if (!token || !sourceId || selectedSource?.backfill.state !== 'running') return;
+    if (!sourceId || selectedSource?.backfill.state !== 'running') return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
     async function poll() {
       try {
-        const next = await adminJson(`/internal/sources/${encodeURIComponent(sourceId!)}`, token, parseSourceResponse);
+        const next = await adminJson(`/internal/sources/${encodeURIComponent(sourceId!)}`, parseSourceResponse);
         if (cancelled) return;
         setSources(prior => prior.map(item => item.id === next.id ? next : item));
         if (next.backfill.state === 'running') timer = setTimeout(poll, 3000);
@@ -644,22 +651,11 @@ export function AdminSourcesPage() {
     }
     void poll();
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [token, selectedSource?.id, selectedSource?.backfill.state]);
+  }, [selectedSource?.id, selectedSource?.backfill.state]);
 
   function reportError(cause: unknown) {
-    if (cause instanceof AdminRequestError && cause.status === 401) {
-      setToken('');
-      setCredential('');
-      setSites([]);
-      setSources([]);
-      setSelectedSourceId(null);
-      setEditingSiteId(null);
-      setError('管理员凭据无效或已失效，请重新输入。');
-      setErrorDetail(cause.detail);
-      return;
-    }
     if (cause instanceof AdminRequestError) {
-      setError(`请求失败（HTTP ${cause.status}）。`);
+      setError(adminRequestMessage(cause.status, '请求', cause.detail));
       setErrorDetail(cause.detail);
       return;
     }
@@ -682,10 +678,10 @@ export function AdminSourcesPage() {
     }
   }
 
-  async function loadLists(operatorToken: string, resetDraft = false): Promise<[Site[], Source[]]> {
+  async function loadLists(resetDraft = false): Promise<[Site[], Source[]]> {
     const [nextSites, nextSources] = await Promise.all([
-      adminJson('/internal/sites', operatorToken, parseSites),
-      adminJson('/internal/sources', operatorToken, parseSources),
+      adminJson('/internal/sites', parseSites),
+      adminJson('/internal/sources', parseSources),
     ]);
     setSites(nextSites);
     setSources(nextSources);
@@ -702,37 +698,6 @@ export function AdminSourcesPage() {
       setSourceDraft(form => ({ ...form, siteId: nextSites[0]?.id ?? '' }));
     }
     return [nextSites, nextSources];
-  }
-
-  function connect(event: FormEvent) {
-    event.preventDefault();
-    void run('connect', async () => {
-      const [nextSites] = await loadLists(credential, true);
-      setSourceDraft(newSourceForm(nextSites));
-      setCreateDraft(newSourceForm(nextSites));
-      setToken(credential);
-      setCredential('');
-      setNotice('已连接管理接口。');
-    });
-  }
-
-  function disconnect() {
-    verificationIntent.current = null;
-    siteCreationIntent.current = null;
-    setValidationStatus('');
-    setToken('');
-    setCredential('');
-    setSites([]);
-    setSources([]);
-    setSiteForm(emptySiteForm());
-    setSourceDraft(newSourceForm([]));
-    setCreateDraft(newSourceForm([]));
-    setDraftTouched(false);
-    setEditingSiteId(null);
-    setSelectedSourceId(null);
-    setError('');
-    setErrorDetail('');
-    setNotice('');
   }
 
   function replaceSource(next: Source) {
@@ -752,7 +717,7 @@ export function AdminSourcesPage() {
       if (siteCreationIntent.current?.name !== payload.name || siteCreationIntent.current.origin !== payload.origin) {
         siteCreationIntent.current = { ...payload, requestId: crypto.randomUUID() };
       }
-      const site = await adminJson('/internal/sites', token, parseSiteResponse, {
+      const site = await adminJson('/internal/sites', parseSiteResponse, {
         method: 'POST',
         body: JSON.stringify(siteCreationIntent.current),
       });
@@ -767,7 +732,7 @@ export function AdminSourcesPage() {
   function saveSite(site: Site) {
     void run(`save-site:${site.id}`, async () => {
       const name = requiredText(siteNameDraft, '站点名称', 80);
-      const next = await adminJson(`/internal/sites/${encodeURIComponent(site.id)}`, token, parseSiteResponse, {
+      const next = await adminJson(`/internal/sites/${encodeURIComponent(site.id)}`, parseSiteResponse, {
         method: 'PATCH',
         body: JSON.stringify({ name }),
       });
@@ -780,7 +745,7 @@ export function AdminSourcesPage() {
 
   function toggleSite(site: Site) {
     void run(`toggle-site:${site.id}`, async () => {
-      const next = await adminJson(`/internal/sites/${encodeURIComponent(site.id)}`, token, parseSiteResponse, {
+      const next = await adminJson(`/internal/sites/${encodeURIComponent(site.id)}`, parseSiteResponse, {
         method: 'PATCH',
         body: JSON.stringify({ enabled: !site.enabled }),
       });
@@ -796,11 +761,11 @@ export function AdminSourcesPage() {
     event.preventDefault();
     void run('create-source', async () => {
       const payload = validateSourceForm(createDraft, sites);
-      const source = await adminJson('/internal/sources', token, parseSourceResponse, {
+      const source = await adminJson('/internal/sources', parseSourceResponse, {
         method: 'POST',
         body: JSON.stringify(payload),
       });
-      await loadLists(token, true);
+      await loadLists(true);
       replaceSource(source);
       setCreateDraft(newSourceForm(sites));
       setNotice('栏目配置已保存为草稿。请先执行服务端样本验证，再单独启用。');
@@ -811,7 +776,7 @@ export function AdminSourcesPage() {
     if (!selectedSource) return;
     void run(`save-source:${selectedSource.id}`, async () => {
       const payload = validateSourceForm(sourceDraft, sites);
-      const next = await adminJson(`/internal/sources/${encodeURIComponent(selectedSource.id)}`, token, parseSourceResponse, {
+      const next = await adminJson(`/internal/sources/${encodeURIComponent(selectedSource.id)}`, parseSourceResponse, {
         method: 'PATCH',
         body: JSON.stringify(payload),
       });
@@ -829,7 +794,7 @@ export function AdminSourcesPage() {
         verificationIntent.current = { sourceId: selectedSource.id, configVersion: selectedSource.configVersion, requestId: crypto.randomUUID() };
       }
       const result = await adminJson(
-        `/internal/sources/${encodeURIComponent(selectedSource.id)}/verify`, token, parseVerification,
+        `/internal/sources/${encodeURIComponent(selectedSource.id)}/verify`, parseVerification,
         { method: 'POST', body: JSON.stringify({ requestId: verificationIntent.current.requestId }) },
       );
       replaceSource(result.source);
@@ -842,7 +807,7 @@ export function AdminSourcesPage() {
     if (!selectedSource) return;
     if (enabled && selectedSource.validationState !== 'verified') return;
     void run(`toggle-source:${selectedSource.id}`, async () => {
-      const next = await adminJson(`/internal/sources/${encodeURIComponent(selectedSource.id)}`, token, parseSourceResponse, {
+      const next = await adminJson(`/internal/sources/${encodeURIComponent(selectedSource.id)}`, parseSourceResponse, {
         method: 'PATCH',
         body: JSON.stringify({ enabled }),
       });
@@ -852,22 +817,21 @@ export function AdminSourcesPage() {
   }
 
   return <div className="feed-standalone-page">
-    <StandaloneHeader actions={token ? (
+    <StandaloneHeader actions={
       <Button asChild variant="outline" size="sm" disabled={busy !== ''}>
         <Link to="/admin/tasks">采集任务</Link>
       </Button>
-    ) : undefined} />
+    } />
     <ContentContainer width="standard">
       <div className="feed-admin-content">
         <PageHeader
           title="来源配置管理"
           description="维护站点与栏目；配置保存后先由服务端验证列表、分页、正文和附件样本，再单独启用。"
-          actions={token ? <>
-            <Button type="button" variant="outline" disabled={busy !== ''} onClick={() => void run('refresh', async () => { await loadLists(token); })}>
+          actions={<>
+            <Button type="button" variant="outline" disabled={busy !== ''} onClick={() => void run('refresh', async () => { await loadLists(); })}>
               <RefreshCw aria-hidden="true" />刷新
             </Button>
-            <Button type="button" variant="outline" disabled={busy !== ''} onClick={disconnect}>退出管理</Button>
-          </> : undefined}
+          </>}
         />
         {error && (
           <Alert variant="destructive">
@@ -880,22 +844,7 @@ export function AdminSourcesPage() {
         )}
         {notice && <p role="status">{notice}</p>}
 
-        {!token ? (
-          <form className="feed-card feed-admin-form" onSubmit={connect}>
-            <Label htmlFor="sources-admin-token">管理员凭据</Label>
-            <Input
-              id="sources-admin-token"
-              type="password"
-              autoComplete="off"
-              value={credential}
-              onChange={event => setCredential(event.target.value)}
-              required
-              disabled={busy !== ''}
-            />
-            <p className="feed-admin-note">凭据仅在本页内存中暂存，不写入地址栏或浏览器存储；退出后立即清除。</p>
-            <Button type="submit" disabled={busy !== '' || !credential}>{busy ? '正在验证…' : '进入管理'}</Button>
-          </form>
-        ) : busy === 'connect' || busy === 'refresh' ? (
+        {busy === 'refresh' ? (
           <PageState state="loading" title="正在读取配置" description="正在读取站点和栏目，请稍候。" />
         ) : (
           <Tabs defaultValue="sources" className="feed-admin-tabs">
@@ -952,7 +901,6 @@ export function AdminSourcesPage() {
                     <BackfillControls
                       key={`${source.id}:${source.configVersion}:${source.backfill.runId ?? 'idle'}`}
                       source={source}
-                      token={token}
                       onReplace={replaceSource}
                       onError={reportError}
                     />

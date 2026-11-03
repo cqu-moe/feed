@@ -14,7 +14,7 @@ import {
 const now = Date.parse('2026-10-12T04:00:00.000Z');
 
 test('one event matches multiple subscriptions but creates one immediate user delivery with durable paging', async () => {
-  const { mf, login, setPolicy } = await subscriptionsFixture({ clock: now, notificationPageSize: 1 });
+  const { mf, login, setPolicy, admin } = await subscriptionsFixture({ clock: now, notificationPageSize: 1 });
   try {
     await setPolicy('matching-owner', { access: true, limit: { kind: 'limited', value: 10 } });
     const cookie = await login('matching-owner');
@@ -73,7 +73,7 @@ test('one event matches multiple subscriptions but creates one immediate user de
     assert.equal(digestView.body.subscription.notificationMatches[0].status, 'merged_immediate');
     assert.equal(digestView.body.subscription.notificationMatches[0].reason, '同一事件已被及时提醒占用');
 
-    const adminView = await adminRequest(mf, `/internal/notification-events/${eventId}`, undefined, { method: 'GET' });
+    const adminView = await adminRequest(mf, admin, `/internal/notification-events/${eventId}`, undefined, { method: 'GET' });
     assert.equal(adminView.status, 200, JSON.stringify(adminView));
     assert.equal(adminView.body.event.id, eventId);
     assert.deepEqual(adminView.body.matches.map(match => `${match.subscriptionName}:${match.reason}`), [
@@ -91,7 +91,7 @@ test('one event matches multiple subscriptions but creates one immediate user de
 });
 
 test('date verification records auditable evidence and rematches the same event', async () => {
-  const { mf, login, setPolicy } = await subscriptionsFixture({ clock: now, notificationPageSize: 1 });
+  const { mf, login, setPolicy, admin } = await subscriptionsFixture({ clock: now, notificationPageSize: 1 });
   try {
     await setPolicy('matching-owner', { access: true, limit: { kind: 'limited', value: 10 } });
     const cookie = await login('matching-owner');
@@ -131,10 +131,10 @@ test('date verification records auditable evidence and rematches the same event'
     assert.equal(verified.body.correction.generation, 1);
     assert.equal(verified.body.correction.eventId, eventId);
     assert.match(verified.body.correction.evidenceObjectHash, /^[a-f0-9]{64}$/);
-    const replay=await adminRequest(mf,`/internal/notification-events/${eventId}/date-verification`,verification);
+    const replay=await adminRequest(mf, admin,`/internal/notification-events/${eventId}/date-verification`,verification);
     assert.equal(replay.status,202);
     assert.deepEqual(replay.body,verified.body);
-    const conflict=await adminRequest(mf,`/internal/notification-events/${eventId}/date-verification`,{
+    const conflict=await adminRequest(mf, admin,`/internal/notification-events/${eventId}/date-verification`,{
       ...verification,publishedAt:new Date(now-60_000).toISOString(),
     });
     assert.equal(conflict.status,409,JSON.stringify(conflict));
@@ -145,13 +145,14 @@ test('date verification records auditable evidence and rematches the same event'
     assert.equal(ownerView.body.subscription.notificationMatches[0].status, 'pending_immediate');
     assert.equal(ownerView.body.subscription.notificationMatches[0].datePrecision, 'minute');
 
-    const adminView = await adminRequest(mf, `/internal/notification-events/${eventId}`, undefined, { method: 'GET' });
+    const adminView = await adminRequest(mf, admin, `/internal/notification-events/${eventId}`, undefined, { method: 'GET' });
     assert.equal(adminView.body.event.id, eventId);
     assert.equal(adminView.body.sources[0].firstSeenAt, new Date(now + 30_000).toISOString());
     assert.equal(adminView.body.sources[0].correctionGeneration, 1);
     assert.equal(adminView.body.delivery.state, 'pending');
     const evidence = await adminRequest(
       mf,
+      admin,
       `/internal/notification-events/${eventId}/sources/jwc/date-evidence/1`,
       undefined,
       { method: 'GET' },
@@ -165,7 +166,7 @@ test('date verification records auditable evidence and rematches the same event'
     });
     assert.equal(withdrawal.status,200,JSON.stringify(withdrawal));
     await notificationInvoke(mf,'replayMatchOutbox',10);
-    const withdrawn=await adminRequest(mf,`/internal/notification-events/${eventId}`,undefined,{method:'GET'});
+    const withdrawn=await adminRequest(mf, admin,`/internal/notification-events/${eventId}`,undefined,{method:'GET'});
     assert.equal(withdrawn.body.delivery.suppressionReason,'date_unverified');
     assert.equal(withdrawn.body.matches[0].eligibilityKind,'pending');
   } finally {
@@ -174,7 +175,7 @@ test('date verification records auditable evidence and rematches the same event'
 });
 
 test('a queued date generation superseded by verification becomes terminal on replay', async () => {
-  const {mf}=await subscriptionsFixture({clock:now});
+  const {mf,admin}=await subscriptionsFixture({clock:now});
   try{
     const eventId=await seedReadyEvent(mf,{
       id:'bbbbbbbbbbbbbbbbbbbb0020',sourceId:'jwc',firstSeenAt:now+30_000,
@@ -188,17 +189,17 @@ test('a queued date generation superseded by verification becomes terminal on re
     assert.equal(verified.status,200,JSON.stringify(verified));
     const replay=await feedJobsInvoke(mf,old.body.messages[0]);
     assert.deepEqual(replay.body.messages,[{acked:true,retried:false}]);
-    const details=await adminRequest(mf,`/internal/notification-events/${eventId}`,undefined,{method:'GET'});
+    const details=await adminRequest(mf, admin,`/internal/notification-events/${eventId}`,undefined,{method:'GET'});
     assert.equal(details.body.matchTasks.find(task=>task.id===old.body.messages[0].taskId).state,'cancelled');
     const drained=await notificationInvoke(mf,'replayMatchOutbox',100);
     assert.equal(drained.body.pendingPages,0);
-    const completed=await adminRequest(mf,`/internal/notification-events/${eventId}`,undefined,{method:'GET'});
+    const completed=await adminRequest(mf, admin,`/internal/notification-events/${eventId}`,undefined,{method:'GET'});
     assert.deepEqual(completed.body.matchTasks.map(task=>task.state).sort(),['cancelled','succeeded']);
   }finally{await mf.dispose();}
 });
 
 test('date precision and history rules explain eligible and suppressed candidates', async () => {
-  const { mf, login, setPolicy } = await subscriptionsFixture({ clock: now });
+  const { mf, login, setPolicy, admin } = await subscriptionsFixture({ clock: now });
   try {
     await setPolicy('matching-owner', { access: true, limit: { kind: 'limited', value: 10 } });
     const cookie = await login('matching-owner');
@@ -266,7 +267,7 @@ test('date precision and history rules explain eligible and suppressed candidate
 
 test('eligible notifications survive Auth failures, quota pauses and unverified mail as digest backlog', async () => {
   for(const blockedBy of ['auth_unavailable','quota_exceeded','email_unverified','paused']){
-    const {mf,login,setPolicy,setRecipient,setPolicyService}=await subscriptionsFixture({clock:now});
+    const {mf,admin,login,setPolicy,setRecipient,setPolicyService}=await subscriptionsFixture({clock:now});
     try{
       const cookie=await login('backlog-owner');
       const created=await subscriptionsInvoke(mf,'change',{id:'backlog-owner'}, {
@@ -289,7 +290,7 @@ test('eligible notifications survive Auth failures, quota pauses and unverified 
       await notificationInvoke(mf,'enqueueEvent',eventId);
       const drained=await notificationInvoke(mf,'replayMatchOutbox',100);
       assert.equal(drained.status,200,JSON.stringify(drained));
-      const details=await adminRequest(mf,`/internal/notification-events/${eventId}`,undefined,{method:'GET'});
+      const details=await adminRequest(mf, admin,`/internal/notification-events/${eventId}`,undefined,{method:'GET'});
       assert.equal(details.body.delivery?.state,'pending',`${blockedBy}: ${JSON.stringify(details.body)}`);
       assert.equal(details.body.delivery.kind,'daily_digest');
       assert.equal(details.body.delivery.suppressionReason,blockedBy);
@@ -307,14 +308,14 @@ test('eligible notifications survive Auth failures, quota pauses and unverified 
       });
       assert.equal(verification.status,200,JSON.stringify(verification));
       await notificationInvoke(mf,'replayMatchOutbox',100);
-      const rematched=await adminRequest(mf,`/internal/notification-events/${eventId}`,undefined,{method:'GET'});
+      const rematched=await adminRequest(mf, admin,`/internal/notification-events/${eventId}`,undefined,{method:'GET'});
       assert.equal(rematched.body.delivery.kind,'daily_digest',`${blockedBy}: ${JSON.stringify(rematched)}`);
     }finally{await mf.dispose();}
   }
 });
 
 test('current eligible reasons across sources select one candidate independently of match-page order',async()=>{
-  const {mf,login}=await subscriptionsFixture({clock:now,notificationPageSize:1});
+  const {mf,admin,login}=await subscriptionsFixture({clock:now,notificationPageSize:1});
   try{
     const cookie=await login('multi-source-owner'),subscriptions=[];
     for(const [sourceId,emailMode] of [['jwc','immediate'],['news','daily_digest']]){
@@ -329,7 +330,7 @@ test('current eligible reasons across sources select one candidate independently
     });
     const enqueued=await notificationInvoke(mf,'enqueueEvent',eventId);
     for(const message of enqueued.body.messages.toReversed())assert.deepEqual((await feedJobsInvoke(mf,message)).body.messages,[{acked:true,retried:false}]);
-    const read=async()=>(await adminRequest(mf,`/internal/notification-events/${eventId}`,undefined,{method:'GET'})).body;
+    const read=async()=>(await adminRequest(mf, admin,`/internal/notification-events/${eventId}`,undefined,{method:'GET'})).body;
     const initial=await read();
     assert.equal(initial.deliveries.length,1);assert.equal(initial.delivery.kind,'immediate');
     const correct=async(sourceId,precision)=>{
@@ -359,7 +360,7 @@ test('current eligible reasons across sources select one candidate independently
 });
 
 test('the Worker queue consumes match-source messages through the public task runtime', async () => {
-  const { mf, db, login, setPolicy } = await subscriptionsFixture({ clock: now });
+  const { mf, db, login, setPolicy, admin } = await subscriptionsFixture({ clock: now });
   try {
     await setPolicy('queue-owner', { access: true, limit: { kind: 'limited', value: 10 } });
     const cookie = await login('queue-owner');
@@ -387,7 +388,7 @@ test('the Worker queue consumes match-source messages through the public task ru
       BEGIN SELECT RAISE(ABORT,'injected candidate commit failure'); END`).run();
     const failed=await feedJobsInvoke(mf,enqueued.body.messages[0]);
     assert.deepEqual(failed.body.messages,[{acked:false,retried:true}]);
-    const rolledBack=await adminRequest(mf,`/internal/notification-events/${eventId}`,undefined,{method:'GET'});
+    const rolledBack=await adminRequest(mf, admin,`/internal/notification-events/${eventId}`,undefined,{method:'GET'});
     assert.equal(rolledBack.body.matches.length,0);
     assert.equal(rolledBack.body.delivery,null);
     assert.equal(rolledBack.body.matchTasks[0].pages,0);
@@ -398,7 +399,7 @@ test('the Worker queue consumes match-source messages through the public task ru
     const replayed=await feedJobsInvoke(mf,enqueued.body.messages[0]);
     assert.deepEqual(replayed.body.messages,[{acked:true,retried:false}]);
 
-    const adminView = await adminRequest(mf, `/internal/notification-events/${eventId}`, undefined, { method: 'GET' });
+    const adminView = await adminRequest(mf, admin, `/internal/notification-events/${eventId}`, undefined, { method: 'GET' });
     assert.equal(adminView.status, 200, JSON.stringify(adminView));
     assert.equal(adminView.body.matchTasks[0].state, 'succeeded', JSON.stringify(adminView.body));
     assert.equal(adminView.body.deliveries.length,1);

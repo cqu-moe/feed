@@ -37,7 +37,7 @@ export async function pdfOcrStatus(env,articleId){
   return {articleId,jobs:rows.results.map(job=>job.model===TEXTIN_MODEL?{...job,estimated_usd:null}:job)};
 }
 
-// Admin comparison output; all reads remain behind the existing ADMIN_TOKEN gate.
+// Admin comparison output; all reads remain behind the live Auth feed.admin gate.
 export async function pdfOcrResults(env,articleId,model){
   if(!validModel(model))throw new Error('Unsupported OCR model');
   const rows=await env.DB.prepare("SELECT result_key FROM pdf_ocr_jobs WHERE article_id=? AND model=? AND status='complete'").bind(articleId,model).all();

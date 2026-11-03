@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
+import { readFile } from 'node:fs/promises';
+import { loginAdmin, oauthProvider } from './helpers/oauth-provider.mjs';
 
 const endpoint = '/internal/operations/provider-usage';
 const workerModulesStub = {
@@ -21,7 +23,7 @@ const workerModulesStub = {
 };
 
 test('admin provider usage reports an allowlisted TextIn balance and ignores Firecrawl credentials', async () => {
-  const { mf } = await fixture(async (url) => {
+  const { mf, admin } = await fixture(async (url) => {
     if (url === 'https://api.textin.com/user/finance/balance') {
       return Response.json({
         code: 200,
@@ -60,7 +62,7 @@ test('admin provider usage reports an allowlisted TextIn balance and ignores Fir
 
   try {
     const response = await mf.dispatchFetch(`https://feed.test${endpoint}`, {
-      headers: { Authorization: 'Bearer test-admin-token' },
+      headers: admin.headers,
     });
     assert.equal(response.status, 200);
     assert.equal(response.headers.get('cache-control'), 'no-store');
@@ -98,7 +100,7 @@ test('admin provider usage reports an allowlisted TextIn balance and ignores Fir
       'https://api.textin.com/user/finance/balance',
       'https://api.textin.com/user/finance/package?api_path=https%3A%2F%2Fapi.textin.com%2Fai%2Fservice%2Fv1%2Fpdf_to_markdown&include_all=0',
     ]);
-    assert.deepEqual(await fixtureTimeouts(mf), [8000, 8000]);
+    assert.deepEqual(await fixtureTimeouts(mf), [10000, 8000, 8000]);
     for (const call of calls) {
       assert.equal(call.init.method, 'GET');
       assert.equal(call.init.redirect, 'manual');
@@ -115,7 +117,7 @@ test('admin provider usage reports an allowlisted TextIn balance and ignores Fir
 });
 
 test('provider usage requires an administrator and read-only GET', async () => {
-  const { mf } = await fixture(async () => {
+  const { mf, admin } = await fixture(async () => {
     throw new Error('provider must not be called');
   });
 
@@ -128,7 +130,7 @@ test('provider usage requires an administrator and read-only GET', async () => {
     assert.equal(invalid.status, 401);
     const mutation = await mf.dispatchFetch(`https://feed.test${endpoint}`, {
       method: 'POST',
-      headers: { Authorization: 'Bearer test-admin-token' },
+      headers: admin.headers,
     });
     assert.equal(mutation.status, 405);
     assert.deepEqual(await fixtureCalls(mf), []);
@@ -138,7 +140,7 @@ test('provider usage requires an administrator and read-only GET', async () => {
 });
 
 test('provider usage preserves available TextIn requests through partial failures and missing fields', async () => {
-  const { mf } = await fixture(async url => {
+  const { mf, admin } = await fixture(async url => {
     if (url === 'https://api.textin.com/user/finance/balance') {
       return Response.json({
         code: 200,
@@ -159,7 +161,7 @@ test('provider usage preserves available TextIn requests through partial failure
 
   try {
     const response = await mf.dispatchFetch(`https://feed.test${endpoint}`, {
-      headers: { Authorization: 'Bearer test-admin-token' },
+      headers: admin.headers,
     });
     assert.equal(response.status, 200);
     const body = await response.json();
@@ -187,7 +189,7 @@ test('provider usage preserves available TextIn requests through partial failure
 });
 
 test('provider usage accepts the remaining_count alias and rejects oversized responses without leaking them', async () => {
-  const { mf } = await fixture(async url => {
+  const { mf, admin } = await fixture(async url => {
     if (url === 'https://api.textin.com/user/finance/balance')
       return new Response('x'.repeat(256 * 1024 + 1), { status: 200 });
     if (url === 'https://api.textin.com/user/finance/package?api_path=https%3A%2F%2Fapi.textin.com%2Fai%2Fservice%2Fv1%2Fpdf_to_markdown&include_all=0') {
@@ -212,7 +214,7 @@ test('provider usage accepts the remaining_count alias and rejects oversized res
 
   try {
     const response = await mf.dispatchFetch(`https://feed.test${endpoint}`, {
-      headers: { Authorization: 'Bearer test-admin-token' },
+      headers: admin.headers,
     });
     assert.equal(response.status, 200);
     const body = await response.json();
@@ -233,7 +235,7 @@ test('provider usage accepts the remaining_count alias and rejects oversized res
 });
 
 test('provider usage does not call Firecrawl or TextIn without TextIn credentials', async () => {
-  const { mf } = await fixture(async () => {
+  const { mf, admin } = await fixture(async () => {
     throw new Error('provider must not be called');
   }, {
     FIRECRAWL_API_KEY: 'firecrawl-key',
@@ -243,7 +245,7 @@ test('provider usage does not call Firecrawl or TextIn without TextIn credential
 
   try {
     const response = await mf.dispatchFetch(`https://feed.test${endpoint}`, {
-      headers: { Authorization: 'Bearer test-admin-token' },
+      headers: admin.headers,
     });
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), {
@@ -258,9 +260,9 @@ test('provider usage does not call Firecrawl or TextIn without TextIn credential
 });
 
 test('provider redirects fail closed without sending credentials to the redirect target', async()=>{
-  const {mf}=await fixture(async()=>new Response('provider redirect',{status:302,headers:{Location:'https://untrusted.example/collect'}}));
+  const {mf,admin}=await fixture(async()=>new Response('provider redirect',{status:302,headers:{Location:'https://untrusted.example/collect'}}));
   try{
-    const response=await mf.dispatchFetch(`https://feed.test${endpoint}`,{headers:{Authorization:'Bearer test-admin-token'}});
+    const response=await mf.dispatchFetch(`https://feed.test${endpoint}`,{headers:admin.headers});
     const body=await response.json();
     assert.deepEqual(body.providers.textin.errors,{balance:{kind:'http',status:302},packages:{kind:'http',status:302}});
     const calls=await fixtureCalls(mf);
@@ -270,6 +272,7 @@ test('provider redirects fail closed without sending credentials to the redirect
 });
 
 async function fixture(providerFetch, bindings = {}) {
+  const provider = oauthProvider();
   const bundle = await build({
     stdin: {
       contents: `import worker from './worker/index.mjs';
@@ -313,21 +316,34 @@ async function fixture(providerFetch, bindings = {}) {
     plugins: [workerModulesStub],
     target: 'es2022',
   });
-  return {
-    mf: new Miniflare(convertV4MiniflareOptions({
+  const mf = new Miniflare(convertV4MiniflareOptions({
     modules: true,
     script: bundle.outputFiles[0].text,
     compatibilityDate: '2026-10-11',
     compatibilityFlags: ['nodejs_compat'],
     bindings: {
-      ADMIN_TOKEN: 'test-admin-token',
+      ...provider.bindings,
+      BASE_URL: 'https://feed.test',
       FIRECRAWL_API_KEY: 'firecrawl-key',
       TEXTIN_APP_ID: 'textin-app',
       TEXTIN_SECRET_CODE: 'textin-secret-code',
       ...bindings,
     },
-    })),
-  };
+    serviceBindings: {AUTH: request => provider.fetch(request)},
+    d1Databases: ['DB'],
+  }));
+  const db = await mf.getD1Database('DB');
+  await applyMigration(db, await readFile('migrations/0002_auth.sql', 'utf8'));
+  const admin = await loginAdmin(mf, provider);
+  return {mf, admin};
+}
+
+async function applyMigration(db, sql) {
+  for (const statement of sql.split(/;\s*\n(?=CREATE|ALTER|PRAGMA|INSERT|UPDATE|$)/)
+    .map(statement => statement.trim())
+    .filter(statement => statement && !/^PRAGMA\b/i.test(statement))) {
+    await db.prepare(statement).run();
+  }
 }
 
 async function fixtureCalls(mf) {

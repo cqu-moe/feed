@@ -63,7 +63,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: cqu-moe/auth
-          ref: d9bf0c5e6d5cc459029da6a345991b8d0f13f514
+          ref: 9cbfed93dcd73b626c6e9d7f0b663ce679c0d1bd
           path: .e2e/auth-checkout
           persist-credentials: false
       - uses: pnpm/action-setup@v4

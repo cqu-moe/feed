@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { expect } from './test-api';
-import { apiFetch, control, login } from './support';
+import { apiFetch, control, fulfillTurnstileScript, login } from './support';
 
 const webArticleId = 'e2e000000000000000000002';
 const webCurrentRevisionId = 'e2e000000000000000000022';
@@ -23,6 +23,7 @@ beforeEach(async ({ browser }) => {
   const auth = new URL(process.env.FEED_E2E_AUTH_URL!);
   await browser.route('**/*', async route => {
     const target = new URL(route.request.url);
+    if (await fulfillTurnstileScript(route, `${target.origin}${target.pathname}`)) return;
     if (target.origin !== feed.origin && target.origin !== auth.origin) {
       unexpected.push(target.origin);
       await route.abort();

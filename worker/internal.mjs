@@ -1,6 +1,7 @@
 import {createMail} from './notification-mail.mjs';
 import {Buffer} from 'node:buffer';
-import {json,equal} from './utils.mjs';
+import {json} from './utils.mjs';
+import {adminAuthorizationError} from './auth.mjs';
 import {createArchive} from './archive.mjs';
 import {createSources} from './sources.mjs';
 import {createTaskRuntime,ValidationError,requireCrawlRuntime} from './task-runtime.mjs';
@@ -13,7 +14,8 @@ import {readProviderUsage} from './provider-usage.mjs';
 
 export async function internalRoute(request,env,ctx){
   const url=new URL(request.url);
-  if(!await requireAdmin(request,env))return json({error:'Unauthorized'},401);
+  const authorizationError=await adminAuthorizationError(request,env);
+  if(authorizationError)return authorizationError;
   if(url.pathname==='/internal/operations/provider-usage'){
     if(request.method!=='GET')return json({error:'Method not allowed'},405);
     return json(await readProviderUsage(env));
@@ -322,8 +324,4 @@ function operationsResponse(error){
   if(error instanceof OperationsError||error instanceof ValidationError||error?.name==='ValidationError')
     return json({error:error.message},error.status??400);
   throw error;
-}
-
-export async function requireAdmin(request,env){
-  return Boolean(env.ADMIN_TOKEN&&await equal(request.headers.get('Authorization'),`Bearer ${env.ADMIN_TOKEN}`));
 }

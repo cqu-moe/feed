@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {build} from 'esbuild';
 import {Miniflare,convertV4MiniflareOptions} from 'miniflare';
+import {login,loginAdmin,oauthProvider} from './helpers/oauth-provider.mjs';
 
 const articleId='1234567890abcdef12345678';
 const articleUrl='https://jwc.cqu.edu.cn/info/1082/1.htm';
@@ -83,6 +84,7 @@ async function fixture({
   crawlEnabled=true,
   recheckRuntime=false,
 }={}){
+  const provider=oauthProvider();
   const bundle=await build({
     stdin:{
       contents:`
@@ -281,7 +283,7 @@ async function fixture({
     compatibilityDate:'2026-10-11',
     compatibilityFlags:['nodejs_compat'],
     bindings:{
-      ADMIN_TOKEN:'test-admin-token',
+      ...provider.bindings,
       BASE_URL:'https://feed.test',
       BRIDGE_SECRET:'test-bridge-secret',
       CRAWL_ENABLED:String(crawlEnabled),
@@ -289,13 +291,13 @@ async function fixture({
       TASK_RUNTIME_ENABLED:String(runtimeEnabled),
       ...(recheckRuntime?{ARCHIVE_VERSIONS_ENABLED:'true'}:{}),
     },
-    d1Databases:['DB'],
+    d1Databases:['DB'],serviceBindings:{AUTH:request=>provider.fetch(request)},
     r2Buckets:['ARCHIVE'],
     queueProducers:{FEED_JOBS:{queueName:'feed-jobs'}},
     queueConsumers:{'feed-jobs':{maxBatchSize:1,maxRetries:3,deadLetterQueue:'feed-jobs-dlq'}},
   }));
   const db=await mf.getD1Database('DB'),bucket=await mf.getR2Bucket('ARCHIVE');
-  for(const name of ['0001_feed.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql',
+  for(const name of ['0001_feed.sql','0002_auth.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql',
     ...(recheckRuntime?['0007_archive_versions.sql','0008_content_events.sql','0017_archive_recheck.sql']:[]),
     '0018_outbox_receipts.sql','0019_site_execution_leases.sql']){
     await applyMigration(db,await readFile(`migrations/${name}`,'utf8'));
@@ -304,15 +306,15 @@ async function fixture({
   await db.prepare("INSERT INTO sources(id,site_id,name,url,list_url) VALUES ('jwc','7fd03676e5751e9b6dd95ecb','教务处','https://jwc.cqu.edu.cn/','https://jwc.cqu.edu.cn/index/tzgg.htm')").run();
   await db.prepare("INSERT INTO articles(id,source_id,url,title,published_at,discovered_at,status,attempts,lease_until) VALUES (?,'jwc',?,'队列采集通知','2026-10-10','2026-10-11',?,?,?)")
     .bind(articleId,articleUrl,articleStatus,articleAttempts,leaseUntil).run();
-  return {mf,db,bucket};
+  return {mf,db,bucket,provider,admin:await loginAdmin(mf,provider)};
 }
 
 test('admin capture task survives queue handoff and archives one article for reading',async()=>{
-  const {mf,db,bucket}=await fixture();
+  const {mf,db,bucket,admin}=await fixture();
   try{
     const create=await mf.dispatchFetch('https://feed.test/internal/capture-tasks',{
       method:'POST',
-      headers:{Authorization:'Bearer test-admin-token','Content-Type':'application/json'},
+      headers:{...admin.headers,'Content-Type':'application/json'},
       body:JSON.stringify({articleId,requestId:'manual-20261012-1'}),
     });
     if(create.status!==202)assert.fail(await create.text());
@@ -323,7 +325,7 @@ test('admin capture task survives queue handoff and archives one article for rea
 
     const duplicate=await mf.dispatchFetch('https://feed.test/internal/capture-tasks',{
       method:'POST',
-      headers:{Authorization:'Bearer test-admin-token','Content-Type':'application/json'},
+      headers:{...admin.headers,'Content-Type':'application/json'},
       body:JSON.stringify({articleId,requestId:'manual-20261012-1'}),
     });
     assert.equal(duplicate.status,202);
@@ -345,7 +347,7 @@ test('admin capture task survives queue handoff and archives one article for rea
       assert.equal(current.state,'succeeded',JSON.stringify(current));
     });
     const status=await(await mf.dispatchFetch(`https://feed.test/internal/capture-tasks/${created.task.id}`,{
-      headers:{Authorization:'Bearer test-admin-token'},
+      headers:admin.headers,
     })).json();
     assert.equal(status.task.state,'succeeded');
     assert.equal(status.attempt.workflowInstanceId,`task-${created.task.id}-a1`);
@@ -373,21 +375,22 @@ test('admin capture task survives queue handoff and archives one article for rea
   }
 });
 
-test('admin capture task entrance rejects missing or invalid admin tokens independently of feed session',async()=>{
-  const {mf}=await fixture();
+test('admin capture task entrance rejects anonymous, ordinary-session, and legacy bearer credentials',async()=>{
+  const {mf,provider}=await fixture();
   try{
-    for(const headers of [
-      {'Content-Type':'application/json'},
-      {Authorization:'Bearer wrong-admin-token','Content-Type':'application/json'},
-      {Authorization:'Bearer wrong-admin-token','Content-Type':'application/json',Cookie:'__Host-feed_session=feed-reader-session'},
+    const ordinaryCookie=await login(mf,provider,'ordinary-user');
+    for(const [headers,status] of [
+      [{'Content-Type':'application/json'},401],
+      [{Authorization:'Bearer wrong-admin-token','Content-Type':'application/json'},401],
+      [{Cookie:ordinaryCookie,Origin:'https://feed.test','Content-Type':'application/json'},403],
     ]){
       const response=await mf.dispatchFetch('https://feed.test/internal/capture-tasks',{
         method:'POST',
         headers,
         body:JSON.stringify({articleId,requestId:'auth-check-1'}),
       });
-      assert.equal(response.status,401);
-      assert.equal((await response.json()).error,'Unauthorized');
+      assert.equal(response.status,status);
+      assert.equal((await response.json()).error,status===401?'请先登录':'需要 feed.admin 管理权限');
     }
   }finally{
     await mf.dispose();
@@ -395,11 +398,11 @@ test('admin capture task entrance rejects missing or invalid admin tokens indepe
 });
 
 test('capture task creation stays disabled by default while authenticated status reads remain available',async()=>{
-  const {mf,db}=await fixture({runtimeEnabled:false,crawlEnabled:false});
+  const {mf,db,admin}=await fixture({runtimeEnabled:false,crawlEnabled:false});
   try{
     const disabled=await mf.dispatchFetch('https://feed.test/internal/capture-tasks',{
       method:'POST',
-      headers:{Authorization:'Bearer test-admin-token','Content-Type':'application/json'},
+      headers:{...admin.headers,'Content-Type':'application/json'},
       body:JSON.stringify({articleId,requestId:'disabled-1'}),
     });
     assert.equal(disabled.status,503);
@@ -408,7 +411,7 @@ test('capture task creation stays disabled by default while authenticated status
     assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM outbox').first()).n,0);
 
     const list=await mf.dispatchFetch('https://feed.test/internal/capture-tasks',{
-      headers:{Authorization:'Bearer test-admin-token'},
+      headers:admin.headers,
     });
     assert.equal(list.status,200);
     assert.deepEqual(await list.json(),{tasks:[]});
@@ -418,7 +421,7 @@ test('capture task creation stays disabled by default while authenticated status
 });
 
 test('capture task committed before queue enrollment is recovered by dispatching the same outbox',async()=>{
-  const {mf,db}=await fixture();
+  const {mf,db,admin}=await fixture();
   try{
     const mode=await(await mf.dispatchFetch('https://feed.test/fixture/queue',{
       method:'POST',
@@ -428,7 +431,7 @@ test('capture task committed before queue enrollment is recovered by dispatching
     assert.equal(mode.mode,'fail');
     const create=await mf.dispatchFetch('https://feed.test/internal/capture-tasks',{
       method:'POST',
-      headers:{Authorization:'Bearer test-admin-token','Content-Type':'application/json'},
+      headers:{...admin.headers,'Content-Type':'application/json'},
       body:JSON.stringify({articleId,requestId:'outbox-commit-1'}),
     });
     assert.equal(create.status,202);
@@ -448,7 +451,7 @@ test('capture task committed before queue enrollment is recovered by dispatching
     });
     const recovered=await(await mf.dispatchFetch('https://feed.test/internal/capture-tasks/recover',{
       method:'POST',
-      headers:{Authorization:'Bearer test-admin-token'},
+      headers:admin.headers,
     })).json();
     assert.deepEqual(recovered.dispatched,[outbox.id]);
     await waitFor(async()=>{
@@ -465,7 +468,7 @@ test('capture task committed before queue enrollment is recovered by dispatching
 });
 
 test('outbox remains replayable when Queue accepts a message before its sent receipt is committed',async()=>{
-  const {mf,db}=await fixture();
+  const {mf,db,admin}=await fixture();
   try{
     await mf.dispatchFetch('https://feed.test/fixture/queue',{
       method:'POST',
@@ -479,7 +482,7 @@ test('outbox remains replayable when Queue accepts a message before its sent rec
     });
     const create=await mf.dispatchFetch('https://feed.test/internal/capture-tasks',{
       method:'POST',
-      headers:{Authorization:'Bearer test-admin-token','Content-Type':'application/json'},
+      headers:{...admin.headers,'Content-Type':'application/json'},
       body:JSON.stringify({articleId,requestId:'outbox-receipt-1'}),
     });
     assert.equal(create.status,202);
@@ -506,7 +509,7 @@ test('outbox remains replayable when Queue accepts a message before its sent rec
     await db.prepare('UPDATE outbox SET available_at=?,updated_at=? WHERE id=?').bind(due,due,outbox.id).run();
     const recovered=await(await mf.dispatchFetch('https://feed.test/internal/capture-tasks/recover',{
       method:'POST',
-      headers:{Authorization:'Bearer test-admin-token'},
+      headers:admin.headers,
     })).json();
     assert.deepEqual(recovered.dispatched,[outbox.id]);
     await waitFor(async()=>{
@@ -523,7 +526,7 @@ test('outbox remains replayable when Queue accepts a message before its sent rec
 });
 
 test('Workflow create receipt failure replays with the same instance instead of creating a random one',async()=>{
-  const {mf,db}=await fixture();
+  const {mf,db,admin}=await fixture();
   try{
     await mf.dispatchFetch('https://feed.test/fixture/workflow-mode',{
       method:'POST',
@@ -537,7 +540,7 @@ test('Workflow create receipt failure replays with the same instance instead of 
     });
     const create=await mf.dispatchFetch('https://feed.test/internal/capture-tasks',{
       method:'POST',
-      headers:{Authorization:'Bearer test-admin-token','Content-Type':'application/json'},
+      headers:{...admin.headers,'Content-Type':'application/json'},
       body:JSON.stringify({articleId,requestId:'workflow-receipt-1'}),
     });
     const created=await create.json();
@@ -591,7 +594,7 @@ test('Workflow create receipt failure replays with the same instance instead of 
 });
 
 test('unknown Workflow create outcome is resolved by getting the same instance id',async()=>{
-  const {mf,db}=await fixture();
+  const {mf,db,admin}=await fixture();
   try{
     await mf.dispatchFetch('https://feed.test/fixture/workflow-mode',{
       method:'POST',
@@ -610,7 +613,7 @@ test('unknown Workflow create outcome is resolved by getting the same instance i
     });
     const create=await mf.dispatchFetch('https://feed.test/internal/capture-tasks',{
       method:'POST',
-      headers:{Authorization:'Bearer test-admin-token','Content-Type':'application/json'},
+      headers:{...admin.headers,'Content-Type':'application/json'},
       body:JSON.stringify({articleId,requestId:'workflow-unknown-1'}),
     });
     const created=await create.json();
@@ -636,7 +639,7 @@ test('unknown Workflow create outcome is resolved by getting the same instance i
 });
 
 for(const [mode,errorCode] of [['rate-limit','rate_limited'],['network','browser_transient']])test(`${mode} captures a bounded deferred retry sequence and stops after three attempts`,async()=>{
-  const {mf,db}=await fixture();
+  const {mf,db,admin}=await fixture();
   try{
     await mf.dispatchFetch('https://feed.test/fixture/scrape-mode',{
       method:'POST',
@@ -645,7 +648,7 @@ for(const [mode,errorCode] of [['rate-limit','rate_limited'],['network','browser
     });
     const create=await mf.dispatchFetch('https://feed.test/internal/capture-tasks',{
       method:'POST',
-      headers:{Authorization:'Bearer test-admin-token','Content-Type':'application/json'},
+      headers:{...admin.headers,'Content-Type':'application/json'},
       body:JSON.stringify({articleId,requestId:'rate-limit-1'}),
     });
     const created=await create.json();
@@ -667,7 +670,7 @@ for(const [mode,errorCode] of [['rate-limit','rate_limited'],['network','browser
         .bind(Date.now()-1000,created.task.id,expectedAttempts-1).run();
       const recovery=await(await mf.dispatchFetch('https://feed.test/internal/capture-tasks/recover',{
         method:'POST',
-        headers:{Authorization:'Bearer test-admin-token'},
+        headers:admin.headers,
       })).json();
       assert.equal(recovery.recovered,1,JSON.stringify({
         recovery,
@@ -701,7 +704,7 @@ for(const [mode,errorCode] of [['rate-limit','rate_limited'],['network','browser
     await db.prepare('UPDATE tasks SET due_at=? WHERE id=?').bind(Date.now()-1000,created.task.id).run();
     await mf.dispatchFetch('https://feed.test/internal/capture-tasks/recover',{
       method:'POST',
-      headers:{Authorization:'Bearer test-admin-token'},
+      headers:admin.headers,
     });
     await waitFor(async()=>{
       assert.equal((await scrapes(mf)).calls.length,3);
@@ -712,11 +715,11 @@ for(const [mode,errorCode] of [['rate-limit','rate_limited'],['network','browser
 });
 
 test('a skipped Archive claim defers the task instead of reporting capture success',async()=>{
-  const {mf,db}=await fixture({articleStatus:'collecting',leaseUntil:Date.now()+10*60*1000});
+  const {mf,db,admin}=await fixture({articleStatus:'collecting',leaseUntil:Date.now()+10*60*1000});
   try{
     const create=await mf.dispatchFetch('https://feed.test/internal/capture-tasks',{
       method:'POST',
-      headers:{Authorization:'Bearer test-admin-token','Content-Type':'application/json'},
+      headers:{...admin.headers,'Content-Type':'application/json'},
       body:JSON.stringify({articleId,requestId:'archive-skip-1'}),
     });
     const created=await create.json();
@@ -730,7 +733,7 @@ test('a skipped Archive claim defers the task instead of reporting capture succe
     assert.equal(await attemptCode(db,created.task.id,1),'capture_busy');
     assert.equal((await scrapes(mf)).calls.length,0);
     const status=await(await mf.dispatchFetch(`https://feed.test/internal/capture-tasks/${created.task.id}`,{
-      headers:{Authorization:'Bearer test-admin-token'},
+      headers:admin.headers,
     })).json();
     assert.equal(status.task.state,'deferred');
     assert.equal(status.attempt.state,'deferred');
@@ -741,7 +744,7 @@ test('a skipped Archive claim defers the task instead of reporting capture succe
 });
 
 test('quota exhaustion becomes blocked instead of entering a paid retry loop',async()=>{
-  const {mf,db}=await fixture();
+  const {mf,db,admin}=await fixture();
   try{
     await mf.dispatchFetch('https://feed.test/fixture/scrape-mode',{
       method:'POST',
@@ -750,7 +753,7 @@ test('quota exhaustion becomes blocked instead of entering a paid retry loop',as
     });
     const create=await mf.dispatchFetch('https://feed.test/internal/capture-tasks',{
       method:'POST',
-      headers:{Authorization:'Bearer test-admin-token','Content-Type':'application/json'},
+      headers:{...admin.headers,'Content-Type':'application/json'},
       body:JSON.stringify({articleId,requestId:'quota-exhaustion-1'}),
     });
     if(create.status!==202)assert.fail(await create.text());
@@ -768,7 +771,7 @@ test('quota exhaustion becomes blocked instead of entering a paid retry loop',as
     await db.prepare('UPDATE tasks SET due_at=? WHERE id=?').bind(Date.now()-1000,created.task.id).run();
     await mf.dispatchFetch('https://feed.test/internal/capture-tasks/recover',{
       method:'POST',
-      headers:{Authorization:'Bearer test-admin-token'},
+      headers:admin.headers,
     });
     await waitFor(async()=>{
       assert.equal((await scrapes(mf)).calls.length,1);
@@ -779,7 +782,7 @@ test('quota exhaustion becomes blocked instead of entering a paid retry loop',as
 });
 
 test('start-job redelivery while running keeps the task running and the same capture in flight',async()=>{
-  const {mf,db}=await fixture();
+  const {mf,db,admin}=await fixture();
   try{
     await mf.dispatchFetch('https://feed.test/fixture/scrape-mode',{
       method:'POST',
@@ -788,7 +791,7 @@ test('start-job redelivery while running keeps the task running and the same cap
     });
     const create=await mf.dispatchFetch('https://feed.test/internal/capture-tasks',{
       method:'POST',
-      headers:{Authorization:'Bearer test-admin-token','Content-Type':'application/json'},
+      headers:{...admin.headers,'Content-Type':'application/json'},
       body:JSON.stringify({articleId,requestId:'running-replay-1'}),
     });
     const created=await create.json();
@@ -822,12 +825,12 @@ test('start-job redelivery while running keeps the task running and the same cap
 });
 
 test('provider Retry-After beyond the local backoff cap remains the earliest retry time',async()=>{
-  const {mf,db}=await fixture();
+  const {mf,db,admin}=await fixture();
   try{
     await mf.dispatchFetch('https://feed.test/fixture/scrape-mode',{method:'POST',body:JSON.stringify({mode:'long-rate-limit'})});
     const before=Date.now();
     const response=await mf.dispatchFetch('https://feed.test/internal/capture-tasks',{
-      method:'POST',headers:{Authorization:'Bearer test-admin-token','Content-Type':'application/json'},
+      method:'POST',headers:{...admin.headers,'Content-Type':'application/json'},
       body:JSON.stringify({articleId,requestId:'provider-minimum-delay'}),
     });
     assert.equal(response.status,202);
@@ -838,7 +841,7 @@ test('provider Retry-After beyond the local backoff cap remains the earliest ret
     });
     assert.ok((await task(db,created.task.id)).dueAt>=before+12*60*60*1000);
     const recovery=await mf.dispatchFetch(`https://feed.test/internal/operations/tasks/${created.task.id}/recover`,{
-      method:'POST',headers:{Authorization:'Bearer test-admin-token'},
+      method:'POST',headers:admin.headers,
     });
     assert.equal(recovery.status,202);
     assert.equal((await recovery.json()).recovered,0);
@@ -848,11 +851,11 @@ test('provider Retry-After beyond the local backoff cap remains the earliest ret
 });
 
 test('a scheduled recheck launches the existing CaptureWorkflow and records an immutable replay',async()=>{
-  const {mf,db}=await fixture({recheckRuntime:true});
+  const {mf,db,admin}=await fixture({recheckRuntime:true});
   try{
     const create=await mf.dispatchFetch('https://feed.test/internal/capture-tasks',{
       method:'POST',
-      headers:{Authorization:'Bearer test-admin-token','Content-Type':'application/json'},
+      headers:{...admin.headers,'Content-Type':'application/json'},
       body:JSON.stringify({articleId,requestId:'initial-before-recheck'}),
     });
     if(create.status!==202)assert.fail(await create.text());
@@ -870,7 +873,7 @@ test('a scheduled recheck launches the existing CaptureWorkflow and records an i
 
     const scheduled=await mf.dispatchFetch('https://feed.test/internal/rechecks',{
       method:'POST',
-      headers:{Authorization:'Bearer test-admin-token','Content-Type':'application/json'},
+      headers:{...admin.headers,'Content-Type':'application/json'},
       body:JSON.stringify({limit:1}),
     });
     if(scheduled.status!==202)assert.fail(await scheduled.text());
@@ -912,14 +915,14 @@ async function workflowStatus(mf,id){
 }
 
 test('same-site launch admission preserves task identity and attempts without a container call',async()=>{
-  const {mf,db}=await fixture();
+  const {mf,db,admin}=await fixture();
   try{
     await mf.dispatchFetch('https://feed.test/fixture/scrape-mode',{
       method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'hang'}),
     });
-    const first=await createCaptureTask(mf,'same-site-busy-first');
+    const first=await createCaptureTask(mf,admin,'same-site-busy-first');
     await waitFor(async()=>assert.equal((await task(db,first)).state,'running'));
-    const second=await createCaptureTask(mf,'same-site-busy-second');
+    const second=await createCaptureTask(mf,admin,'same-site-busy-second');
     const rows=await db.prepare('SELECT id,state,attempt_no AS attemptNo FROM tasks ORDER BY created_at').all();
     assert.deepEqual(rows.results.map(row=>[row.id,row.state,row.attemptNo]).at(-1),[second,'queued',1]);
     const lease=await db.prepare('SELECT owner_task_id FROM site_execution_leases').first();
@@ -935,12 +938,12 @@ test('same-site launch admission preserves task identity and attempts without a 
 });
 
 test('platform capacity keeps the exact task attempt alive and does not charge it twice',async()=>{
-  const {mf,db}=await fixture();
+  const {mf,db,admin}=await fixture();
   try{
     await mf.dispatchFetch('https://feed.test/fixture/scrape-mode',{
       method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'capacity'}),
     });
-    const created=await createCaptureTask(mf,'platform-capacity-wait');
+    const created=await createCaptureTask(mf,admin,'platform-capacity-wait');
     await waitFor(async()=>{
       const lease=await db.prepare('SELECT owner_task_id,lease_until FROM site_execution_leases').first();
       assert.ok(lease);assert.equal(lease.owner_task_id,null);assert.equal(lease.lease_until,0);
@@ -959,9 +962,9 @@ test('platform capacity keeps the exact task attempt alive and does not charge i
   }finally{await mf.dispose();}
 });
 
-async function createCaptureTask(mf,requestId){
+async function createCaptureTask(mf,admin,requestId){
   const response=await mf.dispatchFetch('https://feed.test/internal/capture-tasks',{
-    method:'POST',headers:{Authorization:'Bearer test-admin-token','Content-Type':'application/json'},
+    method:'POST',headers:{...admin.headers,'Content-Type':'application/json'},
     body:JSON.stringify({articleId,requestId}),
   });
   const body=await response.json();

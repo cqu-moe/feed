@@ -131,6 +131,29 @@ export function AccessDeniedState({ title = '没有访问权限' }: { title?: st
   );
 }
 
+export function AdminDeniedState() {
+  return (
+    <main className="feed-standalone-main">
+      <div className="feed-standalone-card">
+        <PageHeader
+          title="需要管理员权限"
+          description="当前账号没有 Feed 管理权限。"
+        />
+        <PageState
+          state="forbidden"
+          title="管理员未授权"
+          description="请先在统一账号中获得 Feed 管理授权；已保存的管理配置不会因此丢失。"
+          action={
+            <Button asChild variant="outline">
+              <Link to="/">返回通知</Link>
+            </Button>
+          }
+        />
+      </div>
+    </main>
+  );
+}
+
 export function LoginRequiredState() {
   return (
     <main className="feed-standalone-main">
@@ -142,7 +165,7 @@ export function LoginRequiredState() {
           description="当前会话已失效，已采集的通知和附件不会因此丢失。"
           action={
             <Button asChild>
-              <a href="/auth/login">
+              <a href={`/auth/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`}>
                 <ExternalLink aria-hidden="true" />
                 重新登录
               </a>

@@ -58,6 +58,7 @@ const workersStub = {
 let miniflare;
 let db;
 let authWorker;
+let admin;
 
 before(async () => {
   const app = await build({
@@ -369,6 +370,7 @@ before(async () => {
                 nonce: url.searchParams.get('nonce'),
                 challenge: url.searchParams.get('code_challenge'),
                 redirectUri: url.searchParams.get('redirect_uri'),
+                subject: state.codeCounter === 1 ? 'archive-admin' : 'user-uu',
               });
               const callback = new URL(url.searchParams.get('redirect_uri'));
               callback.searchParams.set('code', code);
@@ -381,13 +383,14 @@ before(async () => {
               if (!code) return json({ error: 'invalid_grant' }, 400);
               codes.delete(code);
               const accessToken = 'access-token-' + ++state.tokenCounter;
-              tokens.set(accessToken, { sub: 'user-uu', sid: 'central-session-' + state.tokenCounter });
+              const subject = code.subject ?? 'user-uu';
+              tokens.set(accessToken, { sub: subject, sid: 'central-session-' + state.tokenCounter });
               return json({
                 access_token: accessToken,
                 refresh_token: 'refresh-token-' + state.tokenCounter,
                 token_type: 'Bearer',
                 expires_in: 3600,
-                id_token: await idToken(code.nonce, 'user-uu'),
+                id_token: await idToken(code.nonce, subject),
               });
             }
             if (url.pathname === '/api/v1/auth/oauth2/userinfo' && request.method === 'GET') {
@@ -404,7 +407,7 @@ before(async () => {
                 sub: token.sub,
                 sid: token.sid,
                 exp: Math.floor(Date.now() / 1000) + 600,
-                caps: { feed: { access: true } },
+                caps: { feed: { access: true, admin: token.sub === 'archive-admin' } },
               });
             }
             return json({ error: 'not found' }, 404);
@@ -434,7 +437,6 @@ before(async () => {
           BASE_URL: feedOrigin,
           AUTH_BASE_URL: authOrigin,
           BRIDGE_SECRET: 'test-bridge-secret',
-          ADMIN_TOKEN: 'test-admin-token',
           TASK_RUNTIME_ENABLED: 'true',
           CRAWL_ENABLED: 'true',
           ARCHIVE_VERSIONS_ENABLED: 'true',
@@ -488,6 +490,7 @@ before(async () => {
       (?,'jwc',?,'提交失败重试通知','2026-01-04','2026-01-01','pending',0,0),
       (?,'jwc',?,'PDF 正文暂不可用通知','2026-01-05','2026-01-01','pending',0,0)`)
     .bind(articleId, articleUrl, retryArticleId, retryArticleUrl, pdfOnlyArticleId, pdfOnlyArticleUrl).run();
+  admin = await loginAdmin();
 });
 
 after(async () => {
@@ -730,7 +733,7 @@ test('legacy truncated titles are restored while new short titles and frozen arc
 async function submit(requestId, id = articleId) {
   const response = await miniflare.dispatchFetch(`${feedOrigin}/internal/capture-tasks`, {
     method: 'POST',
-    headers: { Authorization: 'Bearer test-admin-token', 'Content-Type': 'application/json' },
+    headers: { ...admin.headers, 'Content-Type': 'application/json' },
     body: JSON.stringify({ articleId: id, requestId }),
   });
   assert.equal(response.status, 202);
@@ -783,7 +786,7 @@ async function recover(advanceMs) {
 
 async function taskStatus(taskId) {
   const response = await miniflare.dispatchFetch(`${feedOrigin}/internal/capture-tasks/${taskId}`, {
-    headers: { Authorization: 'Bearer test-admin-token' },
+    headers: admin.headers,
   });
   if (!response.ok) assert.fail(await response.text());
   return response.json();
@@ -825,6 +828,18 @@ function cookie(response, name) {
   return response.headers.getSetCookie()
     .find(value => value.startsWith(`${name}=`))
     ?.split(';')[0]?.slice(name.length + 1);
+}
+
+async function loginAdmin() {
+  const login = await miniflare.dispatchFetch(`${feedOrigin}/auth/login`, { redirect: 'manual' });
+  const loginCookie = cookie(login, '__Host-feed_login');
+  const authorization = await authWorker.fetch(login.headers.get('Location'), { redirect: 'manual' });
+  const callback = await miniflare.dispatchFetch(authorization.headers.get('Location'), {
+    redirect: 'manual',
+    headers: { Cookie: `__Host-feed_login=${loginCookie}` },
+  });
+  const sessionCookie = cookie(callback, '__Host-feed_session');
+  return { headers: { Cookie: `__Host-feed_session=${sessionCookie}`, Origin: feedOrigin } };
 }
 
 async function json(responsePromise) {

@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { build } from 'esbuild';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 
-import { login, oauthProvider } from './oauth-provider.mjs';
+import { login, loginAdmin, oauthProvider } from './oauth-provider.mjs';
 
 export const feedOrigin = 'https://feed.test';
 const policyOrigin = 'https://policy.test';
@@ -273,7 +273,7 @@ export async function subscriptionsFixture({
         script: app.outputFiles[0].text,
         compatibilityDate: '2026-10-11',
         compatibilityFlags: ['nodejs_compat'],
-        bindings: { ...(mailHarness?{MAIL_ENABLED:'true',MAIL_FROM:'CQU Feed <noreply@feed.cqu.moe>',RESEND_API_KEY:'test-key',RESEND_WEBHOOK_SECRET:'whsec_dGVzdC1zaWduaW5nLWtleQ==',...mailHarness.bindings}:{}),...provider.bindings, ADMIN_TOKEN: 'test-admin-token', BASE_URL: feedOrigin, SOURCE_MANAGEMENT_ENABLED: 'true', FEED_AUTH_RPC_CLIENT_ID: 'feed-rpc-client', FEED_AUTH_RPC_CLIENT_SECRET: 'feed-rpc-secret', ...(notificationPageSize === undefined ? {} : { NOTIFICATION_MATCH_PAGE_SIZE: notificationPageSize }), ...(recheckMigration ? { ARCHIVE_VERSIONS_ENABLED: 'true', ARCHIVE_READS_ENABLED: 'true', TASK_RUNTIME_ENABLED: 'true', CRAWL_ENABLED: 'true', BRIDGE_SECRET: 'test-bridge-secret', ...recheckVars } : {}) },
+        bindings: { ...(mailHarness?{MAIL_ENABLED:'true',MAIL_FROM:'CQU Feed <noreply@feed.cqu.moe>',RESEND_API_KEY:'test-key',RESEND_WEBHOOK_SECRET:'whsec_dGVzdC1zaWduaW5nLWtleQ==',...mailHarness.bindings}:{}),...provider.bindings, BASE_URL: feedOrigin, SOURCE_MANAGEMENT_ENABLED: 'true', FEED_AUTH_RPC_CLIENT_ID: 'feed-rpc-client', FEED_AUTH_RPC_CLIENT_SECRET: 'feed-rpc-secret', ...(notificationPageSize === undefined ? {} : { NOTIFICATION_MATCH_PAGE_SIZE: notificationPageSize }), ...(recheckMigration ? { ARCHIVE_VERSIONS_ENABLED: 'true', ARCHIVE_READS_ENABLED: 'true', TASK_RUNTIME_ENABLED: 'true', CRAWL_ENABLED: 'true', BRIDGE_SECRET: 'test-bridge-secret', ...recheckVars } : {}) },
         ...(mailHarness?{outboundService:request=>mailHarness.fetch(request)}:{}),
         d1Databases: ['DB'],
         r2Buckets: ['ARCHIVE'],
@@ -300,8 +300,10 @@ export async function subscriptionsFixture({
     await applyMigration(db, await readFile(`migrations/${name}`, 'utf8'));
   }
   const policyWorker = await mf.getWorker('policy');
+  const admin = await loginAdmin(mf, provider, 'subscriptions-admin');
   return {
     mf,
+    admin,
     db,
     async mail(method,...args){const res=await mf.dispatchFetch(feedOrigin+'/__test/mail',{method:'POST',body:JSON.stringify({method,args})});return res.json();},
     async mailClock(at){const res=await mf.dispatchFetch(feedOrigin+'/__test/mail',{method:'POST',body:JSON.stringify({method:'clock',at})});return res.json();},
@@ -333,10 +335,10 @@ export async function subscriptionsInvoke(mf, method, actor, ...args) {
   return { status: response.status, body: await response.json() };
 }
 
-export async function adminRequest(mf, path, body, { method = 'POST' } = {}) {
+export async function adminRequest(mf, admin, path, body, { method = 'POST' } = {}) {
   const response = await mf.dispatchFetch(feedOrigin + path, {
     method,
-    headers: { Authorization: 'Bearer test-admin-token', 'Content-Type': 'application/json' },
+    headers: { ...admin.headers, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
   return { status: response.status, body: await response.json() };
