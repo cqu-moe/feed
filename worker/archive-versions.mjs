@@ -28,8 +28,10 @@ export async function commitCaptureRevision(env,capture,context){
   }
   const previous=await env.DB.prepare(`SELECT id,state,raw_fingerprint,semantic_fingerprint FROM article_revisions
     WHERE article_id=? AND revision_no<? ORDER BY revision_no DESC LIMIT 1`).bind(capture.articleId,capture.revisionNo).first();
-  const previousReady=await env.DB.prepare(`SELECT semantic_fingerprint,fingerprint_version FROM article_revisions
-    WHERE article_id=? AND revision_no<? AND state='ready' ORDER BY revision_no DESC LIMIT 1`).bind(capture.articleId,capture.revisionNo).first();
+  const previousReady=await env.DB.prepare(`SELECT r.semantic_fingerprint,r.fingerprint_version,r.title,
+      ${readingTitleSql('r.title','a.title','r.observed_at')} AS reading_title
+    FROM article_revisions r JOIN articles a ON a.id=r.article_id
+    WHERE r.article_id=? AND r.revision_no<? AND r.state='ready' ORDER BY r.revision_no DESC LIMIT 1`).bind(capture.articleId,capture.revisionNo).first();
   // An incomplete observation keeps its original inventory. A fresh capture may
   // form a complete candidate, but may not fill unknown old bytes with new files.
   const unchanged=previous?.state==='ready'&&previous.raw_fingerprint===capture.rawFingerprint;
@@ -40,6 +42,9 @@ export async function commitCaptureRevision(env,capture,context){
   const comparableFingerprints=previousReady?.fingerprint_version==='migration-body-files-v1'
     ?await migrationComparisonFingerprints(env,capture,fileIdentity)
     :new Set([capture.semanticFingerprint]);
+  if(previousReady&&previousReady.title!==previousReady.reading_title&&capture.title===previousReady.reading_title){
+    comparableFingerprints.add(await fingerprintContent({title:previousReady.title,body:await savedRawBody(env,capture),files:fileIdentity}));
+  }
   const changeKind=!previousReady?'baseline':comparableFingerprints.has(previousReady.semantic_fingerprint)
     ?'presentation_only':'substantive';
   const blocked=requirements.some(row=>row.required&&row.state==='failed');

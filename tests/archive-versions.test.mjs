@@ -119,7 +119,7 @@ before(async () => {
           return {
             bodyRecognized: true,
             page: { url: ${JSON.stringify(articleUrl)} },
-            heading: variant.startsWith('truncated-title') ? '关于开展重庆大学2026—2027学' : undefined,
+            heading: providerState.heading ?? (variant.startsWith('truncated-title') ? '关于开展重庆大学2026—2027学' : undefined),
             bodyText: body,
             errors: [],
             artifacts,
@@ -690,11 +690,13 @@ test('legacy truncated titles are restored while new short titles and frozen arc
   const title = '关于开展重庆大学2026—2027学年第一学期“阳光60分”健康行活动的通知';
   const cookie = await login();
   await provider({ hold: false, failAfterCapture: false, failNextD1: false });
-  for (const [id, variant, state, observedAt, expected] of [
+  for (const [id, variant, state, observedAt, expected, nextVariant = variant] of [
     ['222222222222222222222222', 'truncated-title', 'ready', '2026-11-02T00:00:00Z', title],
     ['333333333333333333333333', 'truncated-title-incomplete', 'blocked', '2026-11-02T00:00:00Z', title],
     ['444444444444444444444444', 'truncated-title', 'ready', '2026-11-04T00:00:00Z', title.slice(0, 18)],
+    ['555555555555555555555555', 'truncated-title', 'ready', '2026-11-02T00:00:00Z', title, 'changed-body'],
   ]) {
+    await provider({ heading: null });
     await db.prepare(`INSERT INTO articles(id,source_id,url,title,published_at,discovered_at,status)
       VALUES (?,'jwc',?,?,'2026-10-30','2026-10-30','pending')`)
       .bind(id, `https://jwc.cqu.edu.cn/info/1082/${id}.htm`, title).run();
@@ -712,6 +714,15 @@ test('legacy truncated titles are restored while new short titles and frozen arc
         headers: { Cookie: cookie },
       }));
       assert.equal(listing.articles.find(row => row.id === id)?.title, !q || expected === title ? expected : undefined);
+    }
+    if (state === 'ready' && expected === title) {
+      const countEvents = () => db.prepare('SELECT COUNT(*) AS n FROM content_events WHERE article_id=?').bind(id).first();
+      const before = await countEvents();
+      await provider({ heading: title });
+      await capture(`restore-${id}`, nextVariant, id, Date.parse('2026-11-04T00:00:00Z'));
+      const contentChanged = nextVariant !== variant;
+      assert.equal((await detail(id, undefined, cookie)).revision.changeKind, contentChanged ? 'substantive' : 'presentation_only');
+      assert.equal((await countEvents()).n, before.n + Number(contentChanged));
     }
   }
 });
