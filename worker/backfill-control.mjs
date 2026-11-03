@@ -23,11 +23,11 @@ export async function readBackfillControl(env,source,runId){
 // cannot spend it twice. Concurrent dispatchers share one atomic lane counter.
 export async function admitDiscovery(env,taskId,attempt,at){
   const task=await env.DB.prepare('SELECT kind,payload_json FROM tasks WHERE id=?').bind(taskId).first();
-  if(!task||!['discover','backfill'].includes(task.kind)||JSON.parse(task.payload_json).mode==='validate')return true;
+  if(!task||task.kind!=='backfill')return true;
   const interval=bounded(env.DISCOVERY_ADMISSION_INTERVAL_SEC,60,60,3600)*1000;
   const slot=Math.floor(at/interval)*interval;
-  const limit=task.kind==='backfill'?bounded(env.MAX_BACKFILL_TASKS_PER_RUN,5,0,100):bounded(env.MAX_LIVE_DISCOVERY_TASKS_PER_RUN,20,0,100);
-  const guard=task.kind==='backfill'?` AND ${backfillTaskSql()}`:'';
+  const limit=bounded(env.MAX_BACKFILL_TASKS_PER_RUN,5,0,100);
+  const guard=` AND ${backfillTaskSql()}`;
   await env.DB.prepare(`INSERT INTO discovery_admissions(task_id,attempt_no,lane,slot,admitted_at)
     SELECT t.id,t.attempt_no,t.kind,?,? FROM tasks t WHERE t.id=? AND t.attempt_no=?
       AND t.state IN ('queued','starting','running')${guard}

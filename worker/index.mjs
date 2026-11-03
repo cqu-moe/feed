@@ -27,9 +27,11 @@ export default {
     if(controller.cron==='0 0 * * *'){
       jobs.push(archive.resumeExtract());
     }
-    if(controller.cron==='*/5 * * * *'&&env.TASK_RUNTIME_ENABLED==='true'){
+    if(controller.cron==='0 * * * *'&&env.TASK_RUNTIME_ENABLED==='true'){
       jobs.push(sources.scheduleDue());
       if(env.ARCHIVE_VERSIONS_ENABLED==='true')jobs.push(createArchiveRecheck(env).scheduleDue());
+    }
+    if(controller.cron==='*/5 * * * *'&&env.TASK_RUNTIME_ENABLED==='true'){
       jobs.push(createTaskRuntime(env).recover());
       jobs.push(captureFeedPipelineSummaries(env,ctx).catch(()=>{}));
     }

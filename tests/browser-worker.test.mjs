@@ -1,10 +1,11 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {build} from 'esbuild';
+import {cloudflareEntrypointPlugin} from './helpers/cloudflare-entrypoint-plugin.ts';
 import {readFile} from 'node:fs/promises';
 import {DatabaseSync} from 'node:sqlite';
 import {claimSiteExecution} from '../worker/site-scheduler.mjs';
-const adapter=await build({entryPoints:['worker/browser-scrape.mjs'],bundle:true,write:false,format:'esm',platform:'node'});
+const adapter=await build({entryPoints:['worker/browser-scrape.mjs'],bundle:true,write:false,format:'esm',platform:'node',plugins:[cloudflareEntrypointPlugin]});
 const {scrape}=await import(`data:text/javascript;base64,${Buffer.from(adapter.outputFiles[0].text).toString('base64')}`);
 
 const job={url:'https://jwc.cqu.edu.cn/info/1080/6203.htm',siteId:'site-7fd03676e5751e9b6dd95ecb',jobId:'11111111-2222-3333-4444-555555555555',generation:1,
@@ -114,7 +115,7 @@ test('capture adapter uses the existing Worker namespace and stops only after re
   assert.equal(instance.proxyEvents.filter(event=>event.stoppedAt).length,1);
 });
 
-test('warm handoff skips an unadmitted discovery task and waits for the ready task result',async()=>{
+test('warm handoff admits live discovery and skips unadmitted backfill',async()=>{
   const binding={
     calls:[],
     getByName(){
@@ -166,10 +167,14 @@ test('warm handoff skips an unadmitted discovery task and waits for the ready ta
     formats:[],
   });
   assert.equal(result.metadata.statusCode,200);
-  assert.equal((await env.DB.prepare(`SELECT state FROM outbox WHERE id='111111111111111111111111'`).bind().first()).state,'queued');
+  assert.equal((await env.DB.prepare(`SELECT state FROM outbox WHERE id='111111111111111111111111'`).bind().first()).state,'sent');
   assert.equal((await env.DB.prepare(`SELECT state FROM outbox WHERE id='141414141414141414141414'`).bind().first()).state,'queued');
+  assert.equal((await env.DB.prepare(`SELECT state FROM outbox WHERE id='222222222222222222222222'`).bind().first()).state,'queued');
+  const discovery=await claimSiteExecution(env,{id:'333333333333333333333333',kind:'discover',attempt_no:1});
+  assert.equal(discovery.admitted,true);
+  await scrape(env,'https://jwc.cqu.edu.cn/list.htm',{source:snapshot,siteAdmission:discovery,formats:[]});
   assert.equal((await env.DB.prepare(`SELECT state FROM outbox WHERE id='222222222222222222222222'`).bind().first()).state,'sent');
-  assert.deepEqual(binding.calls.filter(call=>call.path==='/scrape-complete').map(call=>call.body.stop),[false]);
+  assert.deepEqual(binding.calls.filter(call=>call.path==='/scrape-complete').map(call=>call.body.stop),[false,false]);
   const capture=await claimSiteExecution(env,{id:'444444444444444444444444',kind:'capture',attempt_no:1});
   assert.equal(capture.admitted,true);
   await scrape(env,'https://jwc.cqu.edu.cn/info/1082/2.htm',{

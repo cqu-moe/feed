@@ -100,6 +100,7 @@ async function fixture({
         };
 
         globalThis.TASK_RUNTIME_QUEUE_BODIES=[];
+        globalThis.TASK_RUNTIME_QUEUE_ACKED=[];
         globalThis.TASK_RUNTIME_WORKFLOW_CALLS=[];
         globalThis.TASK_RUNTIME_QUEUE_SENDS=[];
         globalThis.TASK_RUNTIME_QUEUE_MODE='real';
@@ -108,6 +109,7 @@ async function fixture({
         globalThis.TASK_RUNTIME_PLATFORM_STATUS='business';
         globalThis.TASK_RUNTIME_WORKFLOW_MODE='run';
         globalThis.TASK_RUNTIME_ACTIVE_WORKFLOWS=[];
+        globalThis.TASK_RUNTIME_EXECUTION_MODE='queue';
         const instances=new Map();
         const instance=id=>{
           if(!instances.has(id))throw new Error('Workflow instance not found');
@@ -185,6 +187,11 @@ async function fixture({
           const env={...rawEnv,DB:instrumentDb(rawEnv.DB),CAPTURE:workflow,FEED_JOBS:{
             async send(body,options){
               if(globalThis.TASK_RUNTIME_QUEUE_MODE==='fail')throw new Error('Injected queue send failure');
+              if(globalThis.TASK_RUNTIME_EXECUTION_MODE==='legacy'){
+                await rawEnv.DB.prepare(\`INSERT INTO task_attempts(task_id,attempt_no,workflow_instance_id,state,started_at)
+                  VALUES (?,?,?,'starting',?) ON CONFLICT DO NOTHING\`)
+                  .bind(body.taskId,body.attempt,'task-'+body.taskId+'-a'+body.attempt,Date.now()).run();
+              }
               globalThis.TASK_RUNTIME_QUEUE_SENDS.push(body);
               if(globalThis.TASK_RUNTIME_QUEUE_MODE==='hold')return;
               return await actualQueue.send(body,options);
@@ -203,6 +210,7 @@ async function fixture({
             return Response.json({
               mode:globalThis.TASK_RUNTIME_QUEUE_MODE,
               messages:globalThis.TASK_RUNTIME_QUEUE_BODIES,
+              acked:globalThis.TASK_RUNTIME_QUEUE_ACKED,
               sends:globalThis.TASK_RUNTIME_QUEUE_SENDS,
             });
           }
@@ -220,6 +228,11 @@ async function fixture({
             const body=await request.json();
             globalThis.TASK_RUNTIME_WORKFLOW_MODE=body.mode;
             return Response.json({mode:globalThis.TASK_RUNTIME_WORKFLOW_MODE});
+          }
+          if(url.pathname==='/fixture/execution-mode'){
+            const body=await request.json();
+            globalThis.TASK_RUNTIME_EXECUTION_MODE=body.mode;
+            return Response.json({mode:globalThis.TASK_RUNTIME_EXECUTION_MODE});
           }
           if(url.pathname==='/fixture/create-failures'){
             const body=await request.json();
@@ -262,7 +275,11 @@ async function fixture({
           async queue(batch,rawEnv){
             const env=prepareEnv(rawEnv);
             for(const message of batch.messages)globalThis.TASK_RUNTIME_QUEUE_BODIES.push(message.body);
-            await handleFeedJobs(batch,env,{workflow});
+            const observed={...batch,messages:batch.messages.map(message=>({body:message.body,attempts:message.attempts,
+              ack(){globalThis.TASK_RUNTIME_QUEUE_ACKED.push(message.body.taskId);message.ack();},
+              retry(options){message.retry(options);},
+            }))};
+            await handleFeedJobs(observed,env,{workflow});
             await Promise.all(globalThis.TASK_RUNTIME_ACTIVE_WORKFLOWS.splice(0));
           },
         };
@@ -350,7 +367,7 @@ test('admin capture task survives queue handoff and archives one article for rea
       headers:admin.headers,
     })).json();
     assert.equal(status.task.state,'succeeded');
-    assert.equal(status.attempt.workflowInstanceId,`task-${created.task.id}-a1`);
+    assert.equal(status.attempt.workflowInstanceId,`queue-${created.task.id}-a1`);
     assert.equal(status.attempt.state,'succeeded');
     assert.equal(status.article.status,'complete');
 
@@ -359,7 +376,7 @@ test('admin capture task survives queue handoff and archives one article for rea
     const scrapes=await(await mf.dispatchFetch('https://feed.test/fixture/scrapes')).json();
     assert.deepEqual(scrapes.calls,[articleUrl]);
     const workflows=await(await mf.dispatchFetch('https://feed.test/fixture/workflows')).json();
-    assert.deepEqual(workflows.calls,[{op:'create',id:`task-${created.task.id}-a1`}]);
+    assert.deepEqual(workflows.calls,[]);
 
     const reading=await(await mf.dispatchFetch('https://feed.test/api/articles?q='+encodeURIComponent('中文正文'))).json();
     assert.deepEqual(reading.articles.map(row=>row.id),[articleId]);
@@ -528,6 +545,9 @@ test('outbox remains replayable when Queue accepts a message before its sent rec
 test('Workflow create receipt failure replays with the same instance instead of creating a random one',async()=>{
   const {mf,db,admin}=await fixture();
   try{
+    await mf.dispatchFetch('https://feed.test/fixture/execution-mode',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'legacy'}),
+    });
     await mf.dispatchFetch('https://feed.test/fixture/workflow-mode',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
@@ -596,6 +616,9 @@ test('Workflow create receipt failure replays with the same instance instead of 
 test('unknown Workflow create outcome is resolved by getting the same instance id',async()=>{
   const {mf,db,admin}=await fixture();
   try{
+    await mf.dispatchFetch('https://feed.test/fixture/execution-mode',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'legacy'}),
+    });
     await mf.dispatchFetch('https://feed.test/fixture/workflow-mode',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
@@ -655,9 +678,6 @@ for(const [mode,errorCode] of [['rate-limit','rate_limited'],['network','browser
     await waitFor(async()=>{
       assert.equal((await task(db,created.task.id)).state,'deferred');
     });
-    await waitFor(async()=>{
-      assert.equal(await workflowStatus(mf,`task-${created.task.id}-a1`),'complete');
-    });
     let current=await task(db,created.task.id);
     assert.equal(current.attemptNo,1);
     assert.ok(current.dueAt>Date.now()+14*60*1000,current.dueAt);
@@ -675,15 +695,11 @@ for(const [mode,errorCode] of [['rate-limit','rate_limited'],['network','browser
       assert.equal(recovery.recovered,1,JSON.stringify({
         recovery,
         task:await task(db,created.task.id),
-        workflow:await workflowStatus(mf,`task-${created.task.id}-a${expectedAttempts-1}`),
       }));
       await waitFor(async()=>{
         const row=await task(db,created.task.id);
         assert.equal(row.attemptNo,expectedAttempts);
         assert.equal(row.state,expectedAttempts===3?'blocked':'deferred');
-      });
-      await waitFor(async()=>{
-        assert.equal(await workflowStatus(mf,`task-${created.task.id}-a${expectedAttempts}`),'complete');
       });
       assert.equal((await scrapes(mf)).calls.length,expectedAttempts);
       if(expectedAttempts===2){
@@ -798,6 +814,7 @@ test('start-job redelivery while running keeps the task running and the same cap
     await waitFor(async()=>{
       assert.equal((await task(db,created.task.id)).state,'running');
     });
+    assert.equal((await(await mf.dispatchFetch('https://feed.test/fixture/queue')).json()).acked.includes(created.task.id),false);
     const payload=(await(await mf.dispatchFetch('https://feed.test/fixture/queue')).json()).sends[0];
     const replay=await(await mf.dispatchFetch('https://feed.test/fixture/replay',{
       method:'POST',
@@ -818,7 +835,8 @@ test('start-job redelivery while running keeps the task running and the same cap
     });
     assert.equal((await scrapes(mf)).calls.length,1);
     const workflows=await(await mf.dispatchFetch('https://feed.test/fixture/workflows')).json();
-    assert.equal(workflows.calls.filter(call=>call.op==='create').length,1);
+    assert.equal(workflows.calls.length,0);
+    await waitFor(async()=>assert.ok((await(await mf.dispatchFetch('https://feed.test/fixture/queue')).json()).acked.includes(created.task.id)));
   }finally{
     await mf.dispose();
   }
@@ -837,7 +855,6 @@ test('provider Retry-After beyond the local backoff cap remains the earliest ret
     const created=await response.json();
     await waitFor(async()=>{
       assert.equal((await task(db,created.task.id)).state,'deferred');
-      assert.equal(await workflowStatus(mf,`task-${created.task.id}-a1`),'complete');
     });
     assert.ok((await task(db,created.task.id)).dueAt>=before+12*60*60*1000);
     const recovery=await mf.dispatchFetch(`https://feed.test/internal/operations/tasks/${created.task.id}/recover`,{
@@ -850,7 +867,7 @@ test('provider Retry-After beyond the local backoff cap remains the earliest ret
   }finally{await mf.dispose();}
 });
 
-test('a scheduled recheck launches the existing CaptureWorkflow and records an immutable replay',async()=>{
+test('a scheduled recheck executes in Queue and records an immutable replay',async()=>{
   const {mf,db,admin}=await fixture({recheckRuntime:true});
   try{
     const create=await mf.dispatchFetch('https://feed.test/internal/capture-tasks',{
@@ -885,7 +902,7 @@ test('a scheduled recheck launches the existing CaptureWorkflow and records an i
     assert.match(runtimeTask.business_key,new RegExp(`recheck:${articleId}:0$`));
     const attempt=await db.prepare(`SELECT workflow_instance_id,state,result_json FROM task_attempts WHERE task_id=?`)
       .bind(recheck.scheduled[0]).first();
-    assert.equal(attempt.workflow_instance_id,`task-${recheck.scheduled[0]}-a1`);
+    assert.equal(attempt.workflow_instance_id,`queue-${recheck.scheduled[0]}-a1`);
     assert.equal(attempt.state,'succeeded');
     assert.equal(JSON.parse(attempt.result_json).outcome,'unchanged');
     assert.equal((await scrapes(mf)).calls.length,2);
@@ -937,7 +954,7 @@ test('same-site launch admission preserves task identity and attempts without a 
   }finally{await mf.dispose();}
 });
 
-test('platform capacity keeps the exact task attempt alive and does not charge it twice',async()=>{
+test('Queue capacity defers the exact attempt without charging a source retry',async()=>{
   const {mf,db,admin}=await fixture();
   try{
     await mf.dispatchFetch('https://feed.test/fixture/scrape-mode',{
@@ -949,16 +966,59 @@ test('platform capacity keeps the exact task attempt alive and does not charge i
       assert.ok(lease);assert.equal(lease.owner_task_id,null);assert.equal(lease.lease_until,0);
     });
     assert.equal((await task(db,created)).attemptNo,1);
-    assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM task_attempts WHERE task_id=?').bind(created).first()).n,1);
+    const attempt=await db.prepare(`SELECT workflow_instance_id AS id,state FROM task_attempts WHERE task_id=?`).bind(created).first();
+    assert.equal(attempt.id,`queue-${created}-a1`);
+    assert.equal(attempt.state,'deferred');
     assert.equal((await db.prepare('SELECT attempts FROM articles WHERE id=?').bind(articleId).first()).attempts,0);
-    const workflows=await(await mf.dispatchFetch('https://feed.test/fixture/workflows')).json();
-    assert.deepEqual(workflows.sleeps,[{name:'capture-capacity-wait-0',duration:30000}]);
-    assert.equal(workflows.instances.find(instance=>instance.id===`task-${created}-a1`)?.status,'running');
     const scrapes=await(await mf.dispatchFetch('https://feed.test/fixture/scrapes')).json();
     assert.equal(scrapes.calls.length,1);
     await mf.dispatchFetch('https://feed.test/fixture/scrape-mode',{
       method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'success'}),
     });
+    await db.prepare('UPDATE tasks SET due_at=0 WHERE id=?').bind(created).run();
+    await db.prepare("UPDATE outbox SET available_at=0 WHERE dedupe_key=?").bind(`start:${created}:a1`).run();
+    await mf.dispatchFetch('https://feed.test/fixture/recover');
+    await waitFor(async()=>assert.equal((await task(db,created)).state,'succeeded'));
+    assert.equal((await task(db,created)).attemptNo,1);
+    assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM task_attempts WHERE task_id=?').bind(created).first()).n,1);
+    assert.equal((await db.prepare('SELECT attempts FROM articles WHERE id=?').bind(articleId).first()).attempts,1);
+  }finally{await mf.dispose();}
+});
+
+test('Queue crash recovery waits for expiry, preserves backoff and stops after three attempts',async()=>{
+  const {mf,db,admin}=await fixture();
+  try{
+    await mf.dispatchFetch('https://feed.test/fixture/queue',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'hold'}),
+    });
+    const taskId=await createCaptureTask(mf,admin,'queue-crash-recovery');
+    for(const attempt of [1,2,3]){
+      const started=Date.now()-14*60*1000;
+      await db.prepare(`INSERT INTO task_attempts(task_id,attempt_no,workflow_instance_id,state,started_at,handed_off_at)
+        VALUES (?,?,?,'running',?,?)`).bind(taskId,attempt,`queue-${taskId}-a${attempt}`,started,started).run();
+      await db.prepare("UPDATE tasks SET state='running' WHERE id=?").bind(taskId).run();
+      await mf.dispatchFetch('https://feed.test/fixture/recover');
+      assert.equal((await task(db,taskId)).state,'running','a live Queue invocation keeps its attempt');
+      await db.prepare('UPDATE task_attempts SET started_at=? WHERE task_id=? AND attempt_no=?')
+        .bind(Date.now()-16*60*1000,taskId,attempt).run();
+      await mf.dispatchFetch('https://feed.test/fixture/recover');
+      const expired=await task(db,taskId);
+      assert.equal(expired.state,attempt===3?'blocked':'deferred');
+      assert.equal(expired.attemptNo,attempt);
+      assert.equal(await attemptCode(db,taskId,attempt),'queue_execution_timeout');
+      if(attempt<3){
+        assert.ok(expired.dueAt>Date.now());
+        await mf.dispatchFetch('https://feed.test/fixture/recover');
+        assert.equal((await task(db,taskId)).attemptNo,attempt,'timeout recovery honors backoff');
+        await db.prepare('UPDATE tasks SET due_at=0 WHERE id=?').bind(taskId).run();
+        await mf.dispatchFetch('https://feed.test/fixture/recover');
+        assert.equal((await task(db,taskId)).state,'queued');
+        assert.equal((await task(db,taskId)).attemptNo,attempt+1);
+      }
+    }
+    await mf.dispatchFetch('https://feed.test/fixture/recover');
+    assert.equal((await task(db,taskId)).attemptNo,3);
+    assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM task_attempts WHERE task_id=?').bind(taskId).first()).n,3);
   }finally{await mf.dispose();}
 });
 

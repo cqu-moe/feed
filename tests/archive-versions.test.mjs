@@ -64,7 +64,7 @@ before(async () => {
   const app = await build({
     stdin: {
       contents: `
-        import FeedWorker, { CaptureWorkflow } from './worker/index.mjs';
+        import FeedWorker from './worker/index.mjs';
         import { createTaskRuntime, handleFeedJobs } from './worker/task-runtime.mjs';
 
         const providerState = {
@@ -77,7 +77,6 @@ before(async () => {
         const patchedDatabases = new WeakSet();
         const installedRuntimes = new WeakSet();
         const runtimeState = {
-          instances: new Map(),
           queuedJobs: [],
           allJobs: [],
           clock: Date.now(),
@@ -167,53 +166,10 @@ before(async () => {
               runtimeState.allJobs.push(body);
             },
           };
-          const workflow = {
-            async create({ id, params }) {
-              const record = { id, status: 'queued', error: null, result: null, promise: null, start: null };
-              runtimeState.instances.set(id, record);
-              record.start = () => {
-                if (record.promise) return;
-                record.status = 'running';
-                record.promise = Promise.resolve()
-                  .then(() => new CaptureWorkflow(env).run({ instanceId: id, payload: params }, step))
-                  .then(result => {
-                    record.status = 'complete';
-                    record.result = result;
-                    return result;
-                  })
-                  .catch(error => {
-                    record.status = 'errored';
-                    record.error = error instanceof Error ? error : new Error(String(error));
-                    throw error;
-                  });
-              };
-              return {
-                async status() {
-                  return { status: record.status, error: record.error };
-                },
-              };
-            },
-            async get(id) {
-              const record = runtimeState.instances.get(id);
-              if (!record) throw new Error(\`Unknown workflow instance \${id}\`);
-              return {
-                async status() {
-                  return { status: record.status, error: record.error };
-                },
-              };
-            },
-          };
-          env.CAPTURE = workflow;
+          env.CAPTURE = {create(){throw new Error('Capture must execute in Queue');},get(){throw new Error('No legacy Workflow in this fixture');}};
           env.FEED_JOBS = queue;
           env.FEED_EVENTS = queue;
         }
-
-        const step = {
-          async do(_name, config, fn) {
-            return (typeof config === 'function' ? config : fn)();
-          },
-          async sleep() {},
-        };
 
         export default {
           async fetch(request, env, ctx) {
@@ -243,6 +199,7 @@ before(async () => {
               await handleFeedJobs({ messages }, env, {
                 queue: env.FEED_JOBS,
                 workflow: env.CAPTURE,
+                now: () => Math.max(Date.now(),runtimeState.clock),
               });
               return Response.json({ handled: messages.length });
             }
@@ -253,28 +210,9 @@ before(async () => {
               await handleFeedJobs({ messages: [{ body, ack() {}, retry() {} }] }, env, {
                 queue: env.FEED_JOBS,
                 workflow: env.CAPTURE,
+                now: () => Math.max(Date.now(),runtimeState.clock),
               });
               return Response.json({ replayed: true });
-            }
-            if (url.pathname === '/__test/workflows') {
-              const records = [...runtimeState.instances.values()];
-              for (const record of records) record.start();
-              ctx?.waitUntil?.(Promise.allSettled(records.map(record => record.promise)));
-              const waitMs = Number(url.searchParams.get('waitMs') ?? '2000');
-              if (Number.isSafeInteger(waitMs) && waitMs > 0) {
-                await Promise.race([
-                  Promise.allSettled([...runtimeState.instances.values()].map(record => record.promise)),
-                  new Promise(resolve => setTimeout(resolve, waitMs)),
-                ]);
-              }
-              return Response.json({
-                instances: [...runtimeState.instances.values()].map(({ id, status, error, result }) => ({
-                  id,
-                  status,
-                  error: error?.message ?? null,
-                  result,
-                })),
-              });
             }
             if (url.pathname === '/__test/recover' && request.method === 'POST') {
               const advance = Number(url.searchParams.get('advanceMs') ?? '0');
@@ -282,6 +220,7 @@ before(async () => {
               const result = await createTaskRuntime(env, {
                 queue: env.FEED_JOBS,
                 workflow: env.CAPTURE,
+                now: () => Math.max(Date.now(),runtimeState.clock),
                 now: () => runtimeState.clock,
               }).recover();
               return Response.json(result);
@@ -630,14 +569,11 @@ test('a stale fence cannot add an observation after the current capture moves on
   await provider({ hold: true });
   const usageBefore = await browserCalls();
   const created = await submit('request-stale-fence');
-  await handleJobs();
-  const held = await waitWorkflows(0);
-  assert.equal(held.instances.at(-1)?.status, 'running');
+  const consuming = handleJobs();
   await waitFor(async () => assert.equal(await browserCalls(), usageBefore + 1));
   await db.prepare('UPDATE articles SET capture_fence=capture_fence+1 WHERE id=?').bind(articleId).run();
   await provider({ hold: false });
-  const outcome = await waitWorkflows(5000);
-  assert.equal(outcome.instances.at(-1)?.status, 'complete');
+  await consuming;
   const stale = await taskStatus(created.task.id);
   assert.equal(stale.task.state, 'failed');
   assert.match(stale.task.lastError ?? '', /Capture fence expired/);
@@ -653,8 +589,6 @@ test('R2 success followed by D1 failure reuses the captured observation on retry
   const usageBefore = await browserCalls();
   const created = await submit('request-r2-d1-retry', retryArticleId);
   await handleJobs();
-  const firstAttempt = await waitWorkflows();
-  assert.equal(firstAttempt.instances.at(-1)?.status, 'complete');
   const deferred = await taskStatus(created.task.id);
   assert.equal(deferred.task.state, 'deferred');
   assert.match(deferred.task.lastError ?? '', /injected D1 unavailable after R2 writes/);
@@ -664,13 +598,8 @@ test('R2 success followed by D1 failure reuses the captured observation on retry
   const recovery = await recover(25 * 60 * 1000);
   assert.equal(recovery.recovered, 1, JSON.stringify(recovery));
   assert.equal((await handleJobs()).handled, 1);
-  const recovered = await waitWorkflows();
   await handleJobs();
-  const retryWorkflow = recovered.instances.at(-1);
-  assert.ok(
-    retryWorkflow?.status === 'complete' && !retryWorkflow.result?.error,
-    `Captured observation should be reusable on retry, got ${JSON.stringify(retryWorkflow)}`,
-  );
+  assert.equal((await taskStatus(created.task.id)).task.state,'succeeded');
   assert.equal(await browserCalls(), usageBefore + 1);
   const retryRevisions = await revisions(retryArticleId, cookie);
   assert.deepEqual(retryRevisions.revisions.map(({ revisionNo, state }) => ({ revisionNo, state })), [
@@ -744,34 +673,26 @@ async function capture(requestId, variant, id = articleId, observedAt) {
   await provider({ variant });
   const created = await submit(requestId, id);
   await handleJobs();
-  const outcome = await waitWorkflows();
   if (observedAt !== undefined) {
     // Seed historical observation metadata before the revision becomes immutable.
     await db.prepare('UPDATE article_revisions SET observed_at=? WHERE capture_task_id=?')
       .bind(observedAt, created.task.id).run();
   }
   await handleJobs();
-  const workflow = outcome.instances.at(-1);
-  if (workflow?.status !== 'complete') assert.fail(JSON.stringify(workflow));
-  return { ...created.task, ...workflow.result, taskId: created.task.id };
+  const attempt=await db.prepare('SELECT state,result_json FROM task_attempts WHERE task_id=? ORDER BY attempt_no DESC LIMIT 1').bind(created.task.id).first();
+  assert.equal(attempt.state,'succeeded',attempt.result_json);
+  return { ...created.task, ...JSON.parse(attempt.result_json), taskId: created.task.id };
 }
 
 async function replaySameTask(taskId) {
   const usageBefore = await browserCalls();
   const response = await miniflare.dispatchFetch(`${feedOrigin}/__test/replay-job?index=0`, { method: 'POST' });
   if (!response.ok) assert.fail(await response.text());
-  await waitWorkflows();
   assert.equal(await browserCalls(), usageBefore);
 }
 
 async function handleJobs() {
   const response = await miniflare.dispatchFetch(`${feedOrigin}/__test/handle-jobs`, { method: 'POST' });
-  if (!response.ok) assert.fail(await response.text());
-  return response.json();
-}
-
-async function waitWorkflows(waitMs = 2000) {
-  const response = await miniflare.dispatchFetch(`${feedOrigin}/__test/workflows?waitMs=${waitMs}`);
   if (!response.ok) assert.fail(await response.text());
   return response.json();
 }

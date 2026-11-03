@@ -94,10 +94,10 @@ const topicLabels: Record<QueueDeadLetter['topic'], string> = {
 
 const kindLabels: Record<string, string> = {
   queue_handoff: 'Queue 交接失败或结果不明',
-  workflow_failure: 'Workflow 执行失败',
-  workflow_deferred: 'Workflow 已延期',
-  workflow_blocked: 'Workflow 等待处理',
-  workflow_stale: 'Workflow 状态待核对',
+  workflow_failure: '采集任务执行失败',
+  workflow_deferred: '采集任务已延期',
+  workflow_blocked: '采集任务等待处理',
+  workflow_stale: '采集任务状态待核对',
   matching_pending: '订阅匹配未完成',
   missing_requirement: '版本必要内容缺项',
   mail_unknown: '邮件提交结果不明',

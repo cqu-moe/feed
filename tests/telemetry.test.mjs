@@ -245,6 +245,11 @@ test('scheduled collection telemetry sends persisted attempts and whole backlog 
       'Browser Origin did not become ready (HTTP 200)',?)`).bind(windowEnd - 7_200_000).run();
   await db.prepare(`INSERT INTO sources(id,site_id,name,url,enabled,validation_state,next_discovery_at)
     VALUES ('intex','1922681dab068aba5ab31dd8','国际处','https://intex.cqu.edu.cn/',0,'failed',0)`).run();
+  for (const [id, enabled, age] of [['stale', 1, 32 * 3_600_000], ['fresh', 1, 86_400_000 + 65 * 60_000], ['paused', 0, 32 * 3_600_000]]) {
+    await db.prepare(`INSERT INTO sources(id,site_id,name,url,enabled,validation_state,refresh_interval_sec,next_discovery_at,last_run_at)
+      VALUES (?,'7fd03676e5751e9b6dd95ecb',?,'https://jwc.cqu.edu.cn/',?,'verified',86400,?,?)`)
+      .bind(id, id, enabled, windowEnd + 3_600_000, new Date(windowEnd - age).toISOString()).run();
+  }
   const taskId = 'e55555555555555555555555';
   for (const [id, state, attempt, age] of [
     [taskId, 'failed', 3, 86_400_000],
@@ -293,9 +298,9 @@ test('scheduled collection telemetry sends persisted attempts and whole backlog 
   assert.equal(snapshot.failed_count, 1);
   assert.equal(snapshot.deferred_count, 1);
   assert.equal(snapshot.active_count, 1);
-  assert.equal(snapshot.enabled_source_count, 1);
+  assert.equal(snapshot.enabled_source_count, 3);
   assert.equal(snapshot.failed_source_count, 1);
-  assert.equal(snapshot.overdue_source_count, 1);
+  assert.equal(snapshot.overdue_source_count, 2, 'a future schedule must not hide stale successful checks');
   assert.equal(snapshot.oldest_active_age_ms, 7_200_000);
   assert.equal(snapshot.oldest_deferred_age_ms, 3_600_000);
   assert.equal(events.find(event => event.event === 'feed_pipeline_summary').properties.failure_count, 1);

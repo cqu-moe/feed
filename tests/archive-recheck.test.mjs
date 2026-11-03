@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {build} from 'esbuild';
+import {cloudflareEntrypointPlugin} from './helpers/cloudflare-entrypoint-plugin.ts';
 
 import {
   adminRequest,
@@ -28,8 +29,22 @@ test('global crawl pause blocks new archive rechecks through the actual Cron ent
   const f=await subscriptionsFixture({recheckMigration:true,recheckVars:{CRAWL_ENABLED:'false'}});
   try{
     await seedDue(f,'101010101010101010101010');
-    assert.equal((await f.mf.dispatchFetch('https://feed.test/__test/scheduled')).status,200);
+    assert.equal((await f.mf.dispatchFetch('https://feed.test/__test/scheduled?cron='+encodeURIComponent('0 * * * *'))).status,200);
     assert.deepEqual(await recheckFacts(f.db),{tasks:0,outboxes:0,advanced:0});
+  }finally{await f.mf.dispose();}
+});
+
+test('only the hourly Cron creates due collection tasks',async()=>{
+  const f=await subscriptionsFixture({recheckMigration:true});
+  try{
+    await seedDue(f,'414141414141414141414141');
+    await f.db.prepare("UPDATE sources SET enabled=1,validation_state='verified',next_discovery_at=0 WHERE id='jwc'").run();
+    for(const cron of ['*/5 * * * *','0 * * * *']){
+      const response=await f.mf.dispatchFetch('https://feed.test/__test/scheduled?cron='+encodeURIComponent(cron));
+      assert.equal(response.status,200);
+      const kinds=(await f.db.prepare("SELECT kind FROM tasks WHERE source_id='jwc' AND kind IN ('discover','recheck') ORDER BY kind").all()).results.map(row=>row.kind);
+      assert.deepEqual(kinds,cron==='0 * * * *'?['discover','recheck']:[]);
+    }
   }finally{await f.mf.dispose();}
 });
 
@@ -48,7 +63,7 @@ test('incompatible old archives cannot keep later eligible archives outside ever
 });
 
 test('a pause or configuration change before atomic admission creates no recheck and does not advance its due date',async()=>{
-  const bundle=await build({entryPoints:['worker/archive-recheck.mjs'],bundle:true,write:false,format:'esm',platform:'node'});
+  const bundle=await build({entryPoints:['worker/archive-recheck.mjs'],bundle:true,write:false,format:'esm',platform:'node',plugins:[cloudflareEntrypointPlugin]});
   const {createArchiveRecheck}=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text+'\n//# sourceURL=recheck-admission-test.mjs').toString('base64'));
   for(const change of ['pause','reconfigure']){
     const f=await subscriptionsFixture({recheckMigration:true});

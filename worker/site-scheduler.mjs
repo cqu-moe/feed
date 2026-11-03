@@ -85,10 +85,7 @@ export async function handoffOrReleaseSiteExecution(env,admission,now=Date.now()
       AND t.state='queued' AND t.attempt_no=json_extract(o.payload_json,'$.attempt')
       AND (
         t.kind IN ('capture','recheck')
-        OR t.kind='discover' AND (
-          json_extract(t.payload_json,'$.mode')='validate'
-          OR EXISTS(SELECT 1 FROM discovery_admissions a
-            WHERE a.task_id=t.id AND a.attempt_no=t.attempt_no AND a.lane=t.kind))
+        OR t.kind='discover'
         OR t.kind='backfill' AND EXISTS(SELECT 1 FROM discovery_admissions a
           WHERE a.task_id=t.id AND a.attempt_no=t.attempt_no AND a.lane=t.kind)
           AND ${backfillTaskSql()}

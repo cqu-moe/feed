@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { build } from 'esbuild';
 import { test, expect } from '@playwright/test';
+import { cloudflareEntrypointPlugin } from '../helpers/cloudflare-entrypoint-plugin';
 
 // Reduced from the public XGB list fetched on 2026-11-02. Both link forms
 // occur in the same list; the first article uses the dynamic JSP route.
@@ -18,7 +19,7 @@ const listHtml = `<meta charset="utf-8"><main>
 
 test('XGB discovers dynamic and static article links with dates and pagination', async ({ page }) => {
   const bundle = await build({ entryPoints: ['worker/discovery.mjs'], bundle: true, write: false,
-    platform: 'node', format: 'esm', external: ['cloudflare:workers'] });
+    platform: 'node', format: 'esm', plugins: [cloudflareEntrypointPlugin] });
   const { discoverList } = await import('data:text/javascript;base64,' + Buffer.from(bundle.outputFiles[0].text).toString('base64'));
   const source = JSON.parse(await readFile('worker/sources.json', 'utf8')).find((s: { id: string }) => s.id === 'xgb');
   await page.route('**/*', route => route.fulfill({ contentType: 'text/html', body: listHtml }));
@@ -43,7 +44,7 @@ test('SEE discovers dates split across time elements', async ({ page }) => {
     </li>
   </ul></div></div></main>`;
   const bundle = await build({ entryPoints: ['worker/discovery.mjs'], bundle: true, write: false,
-    platform: 'node', format: 'esm', external: ['cloudflare:workers'] });
+    platform: 'node', format: 'esm', plugins: [cloudflareEntrypointPlugin] });
   const { discoverList } = await import('data:text/javascript;base64,' + Buffer.from(bundle.outputFiles[0].text).toString('base64'));
   const source = {
     id: 'see',
@@ -84,7 +85,7 @@ test('CS ignores navigation links and uses card headings for wrapped article lin
     </ul></div>
   </main>`;
   const bundle = await build({ entryPoints: ['worker/discovery.mjs'], bundle: true, write: false,
-    platform: 'node', format: 'esm', external: ['cloudflare:workers'] });
+    platform: 'node', format: 'esm', plugins: [cloudflareEntrypointPlugin] });
   const { discoverList } = await import('data:text/javascript;base64,' + Buffer.from(bundle.outputFiles[0].text).toString('base64'));
   const source = {
     id: 'cs',
@@ -118,7 +119,7 @@ test('explicit datetime preserves minute precision and timezone', async ({ page 
     <a href="info/1024/5809.htm">招聘信息汇总</a>
   </li></main>`;
   const bundle = await build({ entryPoints: ['worker/discovery.mjs'], bundle: true, write: false,
-    platform: 'node', format: 'esm', external: ['cloudflare:workers'] });
+    platform: 'node', format: 'esm', plugins: [cloudflareEntrypointPlugin] });
   const { discoverList } = await import('data:text/javascript;base64,' + Buffer.from(bundle.outputFiles[0].text).toString('base64'));
   const source = {
     id: 'sci',
@@ -144,7 +145,7 @@ test('explicit datetime preserves minute precision and timezone', async ({ page 
 
 test('dated WeChat cards are skipped only on continuation pages, while empty/error pages still fail', async ({ page }) => {
   const bundle = await build({ entryPoints: ['worker/discovery.mjs'], bundle: true, write: false,
-    platform: 'node', format: 'esm', external: ['cloudflare:workers'] });
+    platform: 'node', format: 'esm', plugins: [cloudflareEntrypointPlugin] });
   const { discoverList } = await import('data:text/javascript;base64,' + Buffer.from(bundle.outputFiles[0].text).toString('base64'));
   const source = { url: 'https://youth.cqu.edu.cn/', articlePattern: '^/info/\\d+/\\d+\\.htm$' };
   let html = '<ul><li><span>2026-10-20</span><a href="https://mp.weixin.qq.com/s/public-article">公众号文章</a></li></ul><a href="/index/zdqn/1.htm">下一页</a>';
@@ -172,7 +173,7 @@ test('dated WeChat cards are skipped only on continuation pages, while empty/err
 
 test('explicitly empty VSB lists succeed, but blank or challenge pages still fail', async ({ page }) => {
   const bundle = await build({ entryPoints: ['worker/discovery.mjs'], bundle: true, write: false,
-    platform: 'node', format: 'esm', external: ['cloudflare:workers'] });
+    platform: 'node', format: 'esm', plugins: [cloudflareEntrypointPlugin] });
   const { discoverList } = await import('data:text/javascript;base64,' + Buffer.from(bundle.outputFiles[0].text).toString('base64'));
   const source = { url: 'https://jwc.cqu.edu.cn/', articlePattern: '^/info/\\d+/\\d+\\.htm$' };
   let html = '<meta charset="utf-8"><main><ul></ul><div class="pb_sys_common"><span class="p_t">共0条</span><span class="p_t">0/0</span></div></main>';

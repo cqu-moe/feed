@@ -151,7 +151,7 @@ export async function subscriptionsFixture({
         }
         if(new URL(request.url).pathname==='/__test/scheduled'){
           const pending=[];
-          await worker.scheduled({cron:'*/5 * * * *'},env,{waitUntil(promise){pending.push(promise);}});
+          await worker.scheduled({cron:new URL(request.url).searchParams.get('cron')??'*/5 * * * *'},env,{waitUntil(promise){pending.push(promise);}});
           await Promise.all(pending);
           return Response.json({completed:true});
         }
