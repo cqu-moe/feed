@@ -35,7 +35,7 @@ async function collectArticle(env,source,article,dependencies,captureContext){
   const runId=crypto.randomUUID(),prefix=`articles/${article.id}/${runId}`;
   const grant=await issueGrant(env,source,runId,article.id);
   const bridgeURL=new URL('/internal/bridge',env.BRIDGE_BASE_URL??env.BASE_URL);bridgeURL.searchParams.set('grant',grant.token);
-  const input={id:article.id,url:article.url,title:article.title.replace(/^[●•·\s]+|[…]+$/g,'').slice(0,18),bridgeURL:bridgeURL.href,bridgeOrigin:bridgeURL.origin,channel:grant.channel,bundle,options:{...options,selfExtractingArchive:false,maxResourceSize:3,maxResourceSizeEnabled:true,networkTimeout:8000,insertMetaCSP:false}};
+  const input={id:article.id,url:article.url,title:article.title.replace(/^[●•·\s]+|[…]+$/g,''),bridgeURL:bridgeURL.href,bridgeOrigin:bridgeURL.origin,channel:grant.channel,bundle,options:{...options,selfExtractingArchive:false,maxResourceSize:3,maxResourceSizeEnabled:true,networkTimeout:8000,insertMetaCSP:false}};
   if(!source.siteId){
     // Legacy source rows predate sites.site_id. Recover the configured identity
     // from a unique site origin; hostname itself never becomes container identity.

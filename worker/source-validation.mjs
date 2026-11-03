@@ -40,7 +40,7 @@ async function collectEvidence(env,source,scrapeDependency,siteAdmission){
   const bridgeURL=new URL('/internal/bridge',env.BRIDGE_BASE_URL??env.BASE_URL);bridgeURL.searchParams.set('grant',grant.token);
   const title=first.articles.find(row=>row.url===sample.href)?.title;
   const input={
-    id:sampleArticleId,url:sample.href,title:title?.slice(0,18)??null,bridgeURL:bridgeURL.href,
+    id:sampleArticleId,url:sample.href,title:title??null,bridgeURL:bridgeURL.href,
     bridgeOrigin:bridgeURL.origin,channel:grant.channel,bundle:singleFileBundle,
     options:{...singleFileOptions,selfExtractingArchive:false,maxResourceSize:3,maxResourceSizeEnabled:true,networkTimeout:8000,insertMetaCSP:false},
   };

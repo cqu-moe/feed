@@ -173,6 +173,17 @@ test('a long title without attachments remains usable across reading widths', as
     { width: 1440, height: 900 },
   ]) {
     await page.setViewportSize(size);
+    await page.goto('/');
+    const title = page.getByRole('link', { name: detail.article.title, exact: true });
+    await expect(title).toBeVisible();
+    expect(await title.evaluate(link => {
+      const range = document.createRange();
+      range.selectNodeContents(link);
+      const box = link.getBoundingClientRect();
+      return [...range.getClientRects()].every(line => line.left >= box.left - 1 && line.right <= box.right + 1
+        && line.top >= box.top - 1 && line.bottom <= box.bottom + 1);
+    })).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await page.goto(`/articles/${articleId}`);
     await expect(page.getByRole('heading', { level: 1, name: detail.article.title })).toBeVisible();
     await expect(page.getByText('请根据学校要求开展优异生培养工作。')).toBeVisible();
