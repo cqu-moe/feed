@@ -5,7 +5,7 @@ const articleId=process.env.FEED_ARTICLE_ID||'4ffc0415b5f4ba168a847f01';
 const models=['textin-xparse-auto','mistral-ocr-2512','mistral-ocr-4-1'];
 if(!['start','status','results','publish'].includes(action)||(['start','results','publish'].includes(action)&&!models.includes(model)))throw new Error('Usage: compare-ocr.mjs status | start|results|publish <model>');
 const cookie=await readAdminSession();
-const base=process.env.FEED_URL||'https://cqu-feed.user-unauthorized.workers.dev';
+const base=process.env.FEED_URL||'https://feed.cqu.moe';
 const url=new URL(`/internal/pdf-ocr/${articleId}`,base);
 if(action==='results')url.searchParams.set('model',model);
 const post=['start','publish'].includes(action);
