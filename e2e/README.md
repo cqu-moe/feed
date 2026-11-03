@@ -286,11 +286,12 @@ inventing a completed message. An in-window retry reuses the original key and
 bytes. Outside the safe window, recovery leaves manual reconciliation pending.
 
 A test-only entry module forwards the compiled product exports and handlers.
-It advances **Feed `Date.now()`** for digest cutoffs and application retry
-windows, and can delay a native mail batch before forwarding it unchanged.
+It advances **Feed and Auth `Date` / `Date.now()` together** for digest cutoffs,
+application retry windows and genuine OAuth session refresh, and can delay a
+native mail batch before forwarding it unchanged.
 It does not replace Queue consumers, Workflows, Auth RPC, mail assessment,
-rendering, storage or receipt application. Auth and platform timers retain real
-time. Explicit clock readbacks are exported; this does not prove remote Cron
+rendering, storage or receipt application. Platform timers retain real time.
+Both Worker clock readbacks are exported; this does not prove remote Cron
 scheduling or the passage of a real day. The shared synthetic school's publication dates
 use its declared Asia/Shanghai calendar day, including the UTC midnight boundary.
 

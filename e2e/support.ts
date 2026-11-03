@@ -84,13 +84,14 @@ export async function control(action: string, input: Record<string, unknown> = {
 }
 
 export async function login(app: AppSurface, screen: Screen, browser: Browser, role: 'OWNER' | 'OTHER' | 'ADMIN') {
-  await app.open('/subscriptions');
+  const target = role === 'ADMIN' ? '/admin/tasks' : '/subscriptions';
+  await app.open(role === 'ADMIN' ? `/login?next=${encodeURIComponent(target)}` : target);
   await screen.getByRole('link', '登录并开始阅读').first().click();
   await expect(browser).toHaveURL(new RegExp(`^${escapeOrigin(new URL(process.env.FEED_E2E_AUTH_URL!).origin)}/login`));
   await screen.getByLabel('邮箱').fill(credentials.user(role.toLowerCase()).username);
   await browser.locator('#password').fill(credentials.user(role.toLowerCase()).password);
   await screen.getByRole('button', '登录', { exact: true }).click();
-  await expect(browser).toHaveURL(/\/subscriptions$/);
+  await expect(browser).toHaveURL(new RegExp(`${escapeOrigin(target)}$`));
 }
 
 export function escapeOrigin(origin: string) {

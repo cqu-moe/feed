@@ -33,16 +33,20 @@ export function createMailFixture() {
     // original batch unchanged to the product consumer. It never acknowledges it.
     async queueGate() { if (gate) await gate; return new Response('released'); },
     release() { release?.(); release = null; gate = null; },
-    module(productPath, controlSecret) {
+    module(productPath, controlSecret, gateMailQueue = true) {
       return `import product from ${JSON.stringify(productPath)};
 export * from ${JSON.stringify(productPath)};
-const realNow=Date.now.bind(Date);let offset=${offset};Date.now=()=>realNow()+offset;
+const RealDate=Date;let offset=${offset};
+globalThis.Date=class extends RealDate{
+ constructor(...args){super(...(args.length?args:[RealDate.now()+offset]));}
+ static now(){return RealDate.now()+offset;}
+};
 export default {...product,async fetch(request,env,ctx){
  if(new URL(request.url).pathname==='/__e2e-clock'){
   if(request.headers.get('authorization')!==${JSON.stringify(`Bearer ${controlSecret}`)})return new Response('',{status:403});
   offset=(await request.json()).offset;return Response.json({now:Date.now(),offset});
  }return product.fetch(request,env,ctx);
-},async queue(batch,env,ctx){if(batch.messages.some(m=>m.body?.type==='send-mail'))await env.MAIL_E2E_GATE.fetch('https://gate.test/');return product.queue(batch,env,ctx);}};`;
+}${gateMailQueue ? ",async queue(batch,env,ctx){if(batch.messages.some(m=>m.body?.type==='send-mail'))await env.MAIL_E2E_GATE.fetch('https://gate.test/');return product.queue(batch,env,ctx);}" : ''}};`;
     },
     async outbound(request, mf) {
       const url = new URL(request.url);
@@ -80,9 +84,17 @@ export default {...product,async fetch(request,env,ctx){
       if (input.action === 'mail-clock') {
         if (!Number.isSafeInteger(input.advanceMs) || input.advanceMs < 0 || input.advanceMs > 2 * 86400000) throw new Error('Clock advance out of bounds');
         offset += input.advanceMs;
-        const response = await mf.dispatchFetch('https://feed.local/__e2e-clock', { method: 'POST',
-          headers: { authorization: `Bearer ${controlSecret}` }, body: JSON.stringify({ offset }) });
-        const result = await response.json(); if (!response.ok || result.offset !== offset) throw new Error('Clock readback failed');
+        // Session expiry, JWT issuance and business deadlines share one timeline.
+        // Moving Feed alone makes valid freshly issued Auth tokens look expired.
+        const readbacks = await Promise.all(['auth', 'feed'].map(async name => {
+          const worker = await mf.getWorker(name);
+          const response = await worker.fetch('https://fixture.local/__e2e-clock', { method: 'POST',
+            headers: { authorization: `Bearer ${controlSecret}` }, body: JSON.stringify({ offset }) });
+          const result = await response.json();
+          if (!response.ok || result.offset !== offset) throw new Error(`${name} clock readback failed`);
+          return { worker: name, ...result };
+        }));
+        const result = { offset, readbacks };
         clock.push(result); return result;
       }
       if (input.action === 'mail-recipient') {

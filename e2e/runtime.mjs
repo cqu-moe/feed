@@ -315,7 +315,7 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir, ingestion 
       ...(ingest ? [ingest.deadLetterObserver, ingest.browserWorker] : []),
       {
         name: 'auth',
-        modules: [{ type: 'ESModule', path: join(buildDir, 'auth', 'index.js'), contents: authBundle }],
+        modules: [...(mailFixture ? [{ type: 'ESModule', path: join(buildDir, 'auth', 'mail-entry.mjs'), contents: mailFixture.module('./index.js', controlSecret, false) }] : []), { type: 'ESModule', path: join(buildDir, 'auth', 'index.js'), contents: authBundle }],
         compatibilityDate: '2026-05-01',
         compatibilityFlags: ['nodejs_compat'],
         unsafeDirectSockets: [{ host: '127.0.0.1', port: authPort, entrypoint: 'default' }],
