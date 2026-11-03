@@ -115,6 +115,25 @@ test('capture adapter uses the existing Worker namespace and stops only after re
   assert.equal(instance.proxyEvents.filter(event=>event.stoppedAt).length,1);
 });
 
+test('Youth public notices use the official content endpoint without changing other source URLs',async()=>{
+  for(const [url,expected] of [
+    ['https://youth.cqu.edu.cn/info/1009/25310.htm','https://youth.cqu.edu.cn/content.jsp?urltype=news.NewsContentUrl&wbtreeid=1009&wbnewsid=25310'],
+    ['https://youth.cqu.edu.cn/info/1009/25311.htm','https://youth.cqu.edu.cn/content.jsp?urltype=news.NewsContentUrl&wbtreeid=1009&wbnewsid=25311'],
+    ['https://youth.cqu.edu.cn/index/xxgs.htm','https://youth.cqu.edu.cn/index/xxgs.htm'],
+    ['https://youth.cqu.edu.cn/info/1008/25310.htm','https://youth.cqu.edu.cn/info/1008/25310.htm'],
+    [job.url,job.url],
+  ]){
+    const calls=[];
+    await scrape({BROWSER:{getByName(siteId){
+      assert.equal(siteId,'site-youth');
+      return {async fetch(request){calls.push(await request.json());return new Response(successBody);}};
+    }}},url,{source:{siteId:'youth'},actions:job.actions,formats:[]});
+    assert.equal(calls.length,1);
+    assert.equal(calls[0].url,expected);
+    assert.deepEqual(calls[0].actions,job.actions);
+  }
+});
+
 test('warm handoff admits live discovery and skips unadmitted backfill',async()=>{
   const binding={
     calls:[],

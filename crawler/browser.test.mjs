@@ -92,6 +92,60 @@ test('the signed CAPTCHA bridge can open without transient user activation',asyn
   }finally{await browser.close();}
 });
 
+test('HTTP and JavaScript redirects keep the main document status separate from a denied PDF frame',async()=>{
+  let frameRequests=0;
+  const server=createServer((request,response)=>{
+    if(request.url==='/info/1009/25310.htm'){
+      response.writeHead(302,{location:'/redirect.htm'});
+      return response.end();
+    }
+    response.setHeader('content-type','text/html; charset=utf-8');
+    if(request.url==='/redirect.htm')return response.end('<script>location.replace("/content.jsp?urltype=news.NewsContentUrl&wbtreeid=1009&wbnewsid=25310")</script>');
+    if(request.url==='/denied.pdf'){
+      frameRequests++;
+      response.statusCode=403;
+      return response.end('Denied PDF');
+    }
+    if(request.url.startsWith('/content.jsp?'))return response.end('<article>Public notice</article><iframe src="/denied.pdf" onload="window.frameLoaded=true"></iframe>');
+    response.statusCode=404;response.end();
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  try{
+    const result=await scrapePage({
+      url:`http://127.0.0.1:${server.address().port}/info/1009/25310.htm`,formats:[],
+      actions:[{type:'executeJavascript',script:`(async()=>{
+        while(!window.frameLoaded)await new Promise(resolve=>setTimeout(resolve,20));
+        return {path:location.pathname,tree:new URL(location.href).searchParams.get('wbtreeid'),body:document.querySelector('article')?.textContent};
+      })()`}],
+    },AbortSignal.timeout(15000));
+    assert.deepEqual(result.actions.javascriptReturns[0].value,{path:'/content.jsp',tree:'1009',body:'Public notice'});
+    assert.equal(result.metadata.statusCode,200);
+    assert.equal(frameRequests,1);
+  }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
+});
+
+test('origin errors identify the final main document without leaking query values or fragments',async()=>{
+  const server=createServer((request,response)=>{
+    response.setHeader('content-type','text/html; charset=utf-8');
+    if(request.url==='/info/1009/25310.htm')return response.end('<script>location.replace("/content.jsp?token=private-value#private-fragment")</script>');
+    response.statusCode=404;response.end('<article>Missing notice</article>');
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  try{
+    await assert.rejects(scrapePage({
+      url:`http://127.0.0.1:${server.address().port}/info/1009/25310.htm`,formats:[],
+      actions:[{type:'executeJavascript',script:'({unexpected:true})'}],
+    },AbortSignal.timeout(15000)),error=>{
+      assert.equal(error.code,'origin_http');
+      assert.equal(error.httpStatus,404);
+      assert.match(error.message,/path \/content\.jsp/);
+      assert.match(error.message,/main 200>404/);
+      assert.doesNotMatch(error.message,/private-|token=|https?:\/\//);
+      return true;
+    });
+  }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
+});
+
 test('list probes skip the stalled CS carousel while captures retain it',async()=>{
   let carouselRequests=0;
   const server=createServer((request,response)=>{
