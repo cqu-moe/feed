@@ -45,7 +45,7 @@ test('FEED04 real mail Queue, signed callbacks, policy and unknown recovery', as
       articlePattern: '^/info/2026/\\d+\\.htm$', sampleArticleUrl: `${school}/info/2026/1001.htm`, refreshIntervalSec: 86400, timezone: 'Asia/Shanghai' }, 201)).source;
     sources.push(source.id);
     const task = (await ok(`/internal/sources/${source.id}/verify`, 'POST', { requestId: `feed04-verify-${lane}` }, 202)).task;
-    await until('real validation Workflow', async () => (await ok(`/internal/capture-tasks/${task.id}`)).task.state === 'succeeded');
+    await until('real Queue validation', async () => (await ok(`/internal/capture-tasks/${task.id}`)).task.state === 'succeeded');
     await ok(`/internal/sources/${source.id}`, 'PATCH', { enabled: true });
   }
   await app.clearState();
@@ -67,7 +67,7 @@ test('FEED04 real mail Queue, signed callbacks, policy and unknown recovery', as
   expect((await control('read-subscriptions', { userId: process.env.FEED_E2E_OWNER_ID })).length).toBe(2);
   await control('mail-hold', { enabled: true });
   await ok('/internal/sources/schedule', 'POST', {}, 202);
-  await until('two ready articles and prepared mail from native Workflows/matching', async () => {
+  await until('two ready articles and prepared mail from native Queue/matching', async () => {
     await pump(); const s = await state(); return s.mail_messages.length === 2 && s.mail_messages.every((r: Row) => r.state === 'prepared');
   });
   let s = await state(), ing = await ingestion();
@@ -75,7 +75,10 @@ test('FEED04 real mail Queue, signed callbacks, policy and unknown recovery', as
   expect(s.user_deliveries).toHaveLength(2);
   for (const event of ing.events) expect(s.user_deliveries.filter((r: Row) => r.event_id === event.id)).toHaveLength(1);
   expect(s.notification_matches.filter((r: Row) => ['new', 'update'].includes(r.eligibility_kind)).length).toBeGreaterThanOrEqual(4);
-  expect(ing.attempts.every((r: Row) => r.workflow_instance_id === `task-${r.task_id}-a${r.attempt_no}` && r.handed_off_at !== null)).toBe(true);
+  expect(ing.attempts.every((r: Row) => {
+    const prefix = ing.tasks.find((task: Row) => task.id === r.task_id)?.kind === 'ocr' ? 'task' : 'queue';
+    return r.workflow_instance_id === `${prefix}-${r.task_id}-a${r.attempt_no}` && r.handed_off_at !== null;
+  })).toBe(true);
   const mainId = ing.articles.find((r: Row) => r.url.endsWith('/1001.htm')).id;
   const initialRevision = ing.articles.find((r: Row) => r.id === mainId).latest_ready_revision_id;
   await control('mail-hold', { enabled: false });
@@ -121,7 +124,7 @@ test('FEED04 real mail Queue, signed callbacks, policy and unknown recovery', as
 
   // Historical backfill creates genuine archived events, never mail candidates.
   await ok(`/internal/sources/${sources[0]}/backfill`, 'POST', { requestId: 'feed04-history-run', windowDays: 30 }, 202);
-  await until('history archived via Workflow', async () => { await pump(); return (await ingestion()).events.some((r: Row) => r.history_only === 1); });
+  await until('history archived via Queue', async () => { await pump(); return (await ingestion()).events.some((r: Row) => r.history_only === 1); });
   ing = await ingestion(); s = await state();
   for (const historical of ing.events.filter((r: Row) => r.history_only === 1)) expect(s.user_deliveries.some((r: Row) => r.event_id === historical.id)).toBe(false);
   expect(posts(s)).toHaveLength(count);
@@ -304,7 +307,7 @@ async function receipt(key: string, type: string, receiptId?: string) { expect((
 async function captureUpdate(articleId: string) {
   generation++; await control('ingestion-content', { generation });
   const task = (await ok('/internal/capture-tasks', 'POST', { articleId, requestId: `feed04-content-${generation}` }, 202)).task;
-  await until('new content captured in native Workflow', async () => { await pump(); return (await ok(`/internal/capture-tasks/${task.id}`)).task.state === 'succeeded'; });
+  await until('new content captured in native Queue', async () => { await pump(); return (await ok(`/internal/capture-tasks/${task.id}`)).task.state === 'succeeded'; });
   await until('new revision content event and matching complete', async () => { await pump(); const s = await ingestion(); return s.events.length >= generation + 3 && !s.tasks.some((r: Row) => r.kind === 'match-event' && r.state !== 'succeeded'); });
 }
 async function prepareUpdate(articleId: string): Promise<Row> {
