@@ -101,46 +101,18 @@ async function fixture({versioned=false,notifications=false,discoveryPages=2,env
         import {createSources} from './worker/sources.mjs';
         import {createTaskRuntime,handleFeedJobs} from './worker/task-runtime.mjs';
         import {replayMatchOutbox} from './tests/helpers/notification-replay.mjs';
-        import {CaptureWorkflow} from './worker/capture-workflow.mjs';
-        import {DiscoveryWorkflow} from './worker/discovery-workflow.mjs';
         import {issueGrant} from './worker/bridge.mjs';
-        import {workflowStep as step} from './tests/helpers/workflow-step.mjs';
 
         const nativeNow=Date.now;
         let fixedNow=null;
         Date.now=()=>fixedNow??nativeNow();
-        globalThis.SOURCES_WORKFLOW_CALLS=[];
         globalThis.SOURCES_SENT=[];
-        globalThis.SOURCES_WORKFLOW_MODE='run';
-        const instances=new Map();
         let clockOffset=0;
         const runtimeNow=()=>Date.now()+clockOffset;
         const notificationsEnabled=${notifications};
-        const instance=id=>{
-          if(!instances.has(id))throw new Error('Workflow instance not found');
-          return {id,status:async()=>({status:instances.get(id).status,error:instances.get(id).error})};
-        };
         const workflow={
-          async create({id,params}){
-            globalThis.SOURCES_WORKFLOW_CALLS.push({op:'create',id});
-            if(instances.has(id))throw new Error('Workflow instance already exists');
-            if(globalThis.SOURCES_WORKFLOW_MODE==='platform'){
-              instances.set(id,{status:'running',error:null});
-              return instance(id);
-            }
-            const task=await globalThis.SOURCES_ENV.DB.prepare('SELECT kind FROM tasks WHERE id=?').bind(params.taskId).first();
-            const Workflow=['discover','backfill'].includes(task?.kind)?DiscoveryWorkflow:CaptureWorkflow;
-            const execution=globalThis.SOURCES_ENV.TEST_GATE.fetch('https://gate.test/?url=workflow-'+params.taskId)
-              .then(()=>new Workflow(globalThis.SOURCES_ENV).run({instanceId:id,payload:params},step));
-            instances.set(id,{status:'running',error:null,execution});
-            execution.then(()=>{instances.get(id).status='complete';})
-              .catch(error=>{instances.get(id).status='errored';instances.get(id).error=error;});
-            return instance(id);
-          },
-          async get(id){
-            globalThis.SOURCES_WORKFLOW_CALLS.push({op:'get',id});
-            return instance(id);
-          },
+          async create(){throw new Error('Collection must execute inside the Queue consumer');},
+          async get(){throw new Error('New Queue attempts must not query a Workflow');},
         };
         function prepareEnv(rawEnv){
           const actualQueue=rawEnv.FEED_JOBS;
@@ -196,7 +168,6 @@ async function fixture({versioned=false,notifications=false,discoveryPages=2,env
               return Response.json({listUrl:globalThis.SOURCES_FAIL_LIST});
             }
             if(url.pathname==='/fixture/scrapes')return Response.json({calls:globalThis.SOURCES_SCRAPES});
-            if(url.pathname==='/fixture/workflows')return Response.json({calls:globalThis.SOURCES_WORKFLOW_CALLS});
             if(url.pathname==='/fixture/replay-associations'){
               const {sourceId}=await request.json();
               const rows=await env.DB.prepare("SELECT payload_json FROM outbox WHERE topic='feed-events' AND json_extract(payload_json,'$.type')='source-associated' AND json_extract(payload_json,'$.sourceId')=?").bind(sourceId).all();
@@ -229,11 +200,9 @@ async function fixture({versioned=false,notifications=false,discoveryPages=2,env
           },
           async queue(batch,rawEnv){
             const env=prepareEnv(rawEnv);
-            await handleFeedJobs(batch,env,{workflow,now:runtimeNow});
-            const started=batch.messages.filter(message=>message.body.type==='start-job')
-              .map(message=>instances.get('task-'+message.body.taskId+'-a'+message.body.attempt)?.execution)
-              .filter(Boolean);
-            await Promise.allSettled(started);
+            for(const message of batch.messages)if(message.body.type==='start-job')
+              await env.TEST_GATE.fetch('https://gate.test/?url=queue-'+message.body.taskId);
+            await handleFeedJobs(batch,env,{now:runtimeNow});
           },
         }
       `,
@@ -405,6 +374,8 @@ test('two discovered columns share one notification and capture while all finite
     const sources=(await request(mf,admin,'/internal/sources')).data.sources;
     assert.equal(sources.find(source=>source.id===a).articleCount,1);
     assert.equal(sources.find(source=>source.id===b).articleCount,1);
+    for(const source of sources.filter(source=>[a,b].includes(source.id)))
+      assert.equal(source.nextDiscoveryAt,Date.parse(source.lastRunAt)+source.refreshIntervalSec*1000);
     assert.equal((await mf.dispatchFetch('https://feed.test/api/articles')).status,401);
     provider.setAccess(false);
     assert.equal((await read('/api/articles')).status,403);
@@ -519,7 +490,7 @@ test('current source and site controls fence history before fetching and during 
       const site=await request(mf,admin,'/internal/sites',{method:'POST',body:{name:'控制围栏',origin:'https://a.test'}});
       const sourceId=await createHistorySource(mf,admin,site.data.site.id,'https://a.test/list.htm');
       const submitted=await control(mf,'submit-backfill',{sourceId,requestId:'control-fence-run'});
-      gate.url=phase==='before-fetch'?'workflow-'+submitted.task.id:'https://a.test/list.htm';
+      gate.url=phase==='before-fetch'?'queue-'+submitted.task.id:'https://a.test/list.htm';
       await control(mf,'dispatch',{});
       await waitFor(async()=>assert.equal(gate.held,true));
       const path=target==='source'?`/internal/sources/${sourceId}`:`/internal/sites/${site.data.site.id}`;
@@ -796,20 +767,30 @@ test('live tasks dispatch first while admin starts and continuation pages share 
   }finally{await mf.dispose();}
 });
 
-test('exhausted live admission does not starve history with its own available budget',async()=>{
-  const {mf,admin}=await fixture({versioned:true,env:{liveBudget:0,backfillBudget:1}});
+test('due scans enqueue all eligible columns once and keep active retries in their original cycle',async()=>{
+  const {mf,db,admin}=await fixture({versioned:true,env:{liveBudget:1}});
   try{
-    const site=await request(mf,admin,'/internal/sites',{method:'POST',body:{name:'独立调度预算',origin:'https://a.test'}});
-    await createVerifiedSource(mf,admin,site.data.site.id,'https://a.test/list-a.htm');
-    const history=await createHistorySource(mf,admin,site.data.site.id,'https://a.test/list-b.htm');
-    await control(mf,'schedule-only',{});
-    await control(mf,'submit-backfill',{sourceId:history,requestId:'independent-budget'});
-    const before=(await control(mf,'sent',{})).length;
-    await control(mf,'dispatch',{limit:1});
-    const sent=(await control(mf,'sent',{})).slice(before);
-    assert.ok(sent.some(message=>message.kind==='backfill'&&message.sourceId===history),JSON.stringify(sent));
-    assert.equal(sent.filter(message=>message.kind==='discover').length,0);
-    await waitFor(async()=>assert.equal((await request(mf,admin,`/internal/sources/${history}`)).data.source.backfill.seenPages,1));
+    const site=await request(mf,admin,'/internal/sites',{method:'POST',body:{name:'按间隔调度',origin:'https://a.test'}});
+    const a=await createVerifiedSource(mf,admin,site.data.site.id,'https://a.test/list-a.htm');
+    const b=await createVerifiedSource(mf,admin,site.data.site.id,'https://a.test/list-b.htm');
+    const paused=await createVerifiedSource(mf,admin,site.data.site.id,'https://a.test/list.htm');
+    await request(mf,admin,`/internal/sources/${paused}`,{method:'PATCH',body:{enabled:false}});
+    const now=Date.parse('2026-11-03T11:00:00Z');
+    await control(mf,'clock',{now});
+    await db.prepare('UPDATE sources SET last_run_at=?,next_discovery_at=?')
+      .bind(new Date(now-32*3_600_000).toISOString(),now-32*3_600_000+7*60_000).run();
+    assert.equal((await control(mf,'schedule-only',{})).scheduled.length,2);
+    const scans=await Promise.all([control(mf,'schedule-only',{}),control(mf,'schedule-only',{})]);
+    assert.equal(scans.flatMap(scan=>scan.scheduled).length,0);
+    const queued=(await db.prepare("SELECT source_id FROM tasks WHERE state='queued' AND kind='discover'").all()).results;
+    assert.deepEqual(queued.map(row=>row.source_id).sort(),[a,b].sort());
+    const sources=(await db.prepare('SELECT id,next_discovery_at FROM sources WHERE id IN (?,?)').bind(a,b).all()).results;
+    assert.ok(sources.every(source=>source.next_discovery_at===now+1_800_000),
+      'the next cycle is an interval from this check, not an old fixed site slot');
+    await db.prepare("UPDATE tasks SET state='deferred' WHERE source_id=? AND state='queued'").bind(b).run();
+    await control(mf,'clock',{now:now+2*86_400_000});
+    assert.deepEqual((await control(mf,'schedule-only',{})).scheduled,[],
+      'queued work and deferred retries must not create another live cycle');
   }finally{await mf.dispose();}
 });
 
@@ -894,7 +875,7 @@ test('a later column association fans out an already ready shared event',async()
     assert.equal(verified.status,202,JSON.stringify(verified));
     const pending=(await request(mf,admin,`/internal/notification-events/${eventId}`)).data;
     assert.equal(pending.matchTasks.length,3,JSON.stringify(pending.matchTasks));
-    // A discovery Workflow can dispatch this outbox before this explicit drain.
+    // A discovery task can dispatch this outbox before this explicit drain.
     await control(mf,'dispatch',{});
     await waitFor(async()=>assert.equal(commitGate('match').held,true));
 

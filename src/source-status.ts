@@ -8,7 +8,8 @@ export type SourceStatus = {
   timeLabel: string;
 };
 
-const CRON_TOLERANCE_MS = 10 * 60 * 1000;
+// Wait for the next hourly scan, then allow ten minutes for Queue processing.
+const CRON_TOLERANCE_MS = 70 * 60 * 1000;
 
 function parseTime(value: string | null): number | null {
   if (!value) return null;

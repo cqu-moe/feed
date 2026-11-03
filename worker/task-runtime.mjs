@@ -6,7 +6,7 @@ import {reconcileRevision} from './archive-reconcile.mjs';
 import {launchDedupeKey,launchOutboxId,launchOutboxStatement} from './task-statements.mjs';
 import {createNotifications} from './notifications.mjs';
 import {captureFailure} from './capture-error.mjs';
-import {browserTaskKind,claimSiteExecution,delayBusyLaunch} from './site-scheduler.mjs';
+import {browserTaskKind,claimSiteExecution,delayBusyLaunch,releaseOwnedSiteExecution} from './site-scheduler.mjs';
 
 const activeStates=['queued','starting','running'];
 const platformStates=new Set(['queued','running','paused','waiting','waitingForPause','rollingBack']);
@@ -92,7 +92,16 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
       if(message.attempt!==task.attempt_no)throw new SchemaError('Future task attempt');
       if(!activeStates.includes(task.state))return {state:task.state,acked:'terminal'};
       if(!['capture','recheck','discover','backfill','ocr'].includes(task.kind))throw new SchemaError('Unsupported workflow kind');
-      const instanceId=workflowInstanceId(task.id,message.attempt),timestamp=now();
+      const priorAttempt=await env.DB.prepare('SELECT * FROM task_attempts WHERE task_id=? AND attempt_no=?')
+        .bind(task.id,message.attempt).first();
+      if(browserTaskKind(task.kind)){
+        if(!priorAttempt)return runtime.runJobInQueue(message,task);
+        if(isQueueInstance(priorAttempt.workflow_instance_id)){
+          if(task.state==='queued')return runtime.runJobInQueue(message,task);
+          return {state:task.state,acked:'running'};
+        }
+      }
+      const instanceId=priorAttempt?.workflow_instance_id??workflowInstanceId(task.id,message.attempt),timestamp=now();
       const workflowBinding=selectWorkflow(env,{workflow,workflows},task.kind);
       let siteClaim=null;
       if(browserTaskKind(task.kind)){
@@ -123,6 +132,57 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
       return {state:(await runtime.status(task.id)).state,workflowInstanceId:instanceId,platformStatus:status.status};
     },
 
+    async runJobInQueue(message,task){
+      if(task.due_at>now())return {state:task.state,acked:'not-due'};
+      const siteClaim=await claimSiteExecution(env,{...task,attempt_no:message.attempt},now());
+      if(!siteClaim.admitted){
+        await delayBusyLaunch(env,task.id,message.attempt,now());
+        return {state:task.state,acked:'site-busy'};
+      }
+      const instanceId=queueInstanceId(task.id,message.attempt),timestamp=now();
+      const claimed=await env.DB.batch([
+        env.DB.prepare(`UPDATE tasks SET state='running',updated_at=?
+          WHERE id=? AND attempt_no=? AND state='queued' RETURNING id`)
+          .bind(timestamp,task.id,message.attempt),
+        env.DB.prepare(`INSERT INTO task_attempts(task_id,attempt_no,workflow_instance_id,state,started_at,handed_off_at)
+          SELECT ?,?,?,'running',?,? WHERE changes()>0
+          ON CONFLICT(task_id,attempt_no) DO UPDATE SET state='running',started_at=excluded.started_at,
+            handed_off_at=excluded.handed_off_at,ended_at=NULL
+          WHERE task_attempts.workflow_instance_id=excluded.workflow_instance_id
+            AND task_attempts.state='deferred' AND task_attempts.result_json IS NULL`)
+          .bind(task.id,message.attempt,instanceId,timestamp,timestamp),
+      ]);
+      if(!claimed[0].results?.length){
+        return {state:(await runtime.status(task.id)).state,acked:'running'};
+      }
+      const claimedAttempt=await env.DB.prepare(`SELECT workflow_instance_id,state FROM task_attempts
+        WHERE task_id=? AND attempt_no=?`).bind(task.id,message.attempt).first();
+      if(claimedAttempt?.workflow_instance_id!==instanceId||claimedAttempt.state!=='running')
+        throw new Error('Queue attempt ledger is missing');
+      try{
+        const result=task.kind==='discover'||task.kind==='backfill'
+          ?await createSources(env,{now}).discover(task.id,message.attempt)
+          :await (await import('./archive.mjs')).createArchive(env).captureTask(task.id,message.attempt,{siteAdmission:siteClaim});
+        if(result?.capacity){
+          await deferQueueCapacity(env,{taskId:task.id,attemptNo:message.attempt,timestamp:now(),retryAfterMs:result.retryAfterMs});
+          return result;
+        }
+        await finishTask(env,task.kind,task.id,message.attempt,result,now);
+        await runtime.dispatchDueOutbox().catch(()=>{});
+        return result;
+      }catch(error){
+        const failure=captureFailure(error);
+        if(failure.capacity){
+          await deferQueueCapacity(env,{taskId:task.id,attemptNo:message.attempt,timestamp:now(),retryAfterMs:failure.retryAfterMs??30_000});
+          return failure;
+        }
+        await failTask(env,task.kind,task.id,message.attempt,error,now);
+        return {error:cleanError(error)};
+      }finally{
+        await releaseOwnedSiteExecution(env,task.id,message.attempt,now()).catch(()=>{});
+      }
+    },
+
     async recover({limit=20}={}){
       const timestamp=now(),pageSize=boundedInteger(limit,20,1,100);
       if(env.SOURCE_MANAGEMENT_ENABLED==='true')await retainDiscoveryAdmissions(env,timestamp);
@@ -150,7 +210,7 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
             .bind(timestamp,timestamp,row.outbox_id).run();
         }
       }
-      const rows=await env.DB.prepare(`SELECT t.*,a.workflow_instance_id,a.result_json FROM tasks t
+      const rows=await env.DB.prepare(`SELECT t.*,a.workflow_instance_id,a.result_json,a.started_at FROM tasks t
         JOIN task_attempts a ON a.task_id=t.id AND a.attempt_no=t.attempt_no
         WHERE t.state IN ('starting','running') OR (t.state='deferred' AND t.due_at<=?
           ${env.SOURCE_MANAGEMENT_ENABLED==='true'?`AND (t.kind<>'backfill' OR ${backfillTaskSql()})`:''})
@@ -158,12 +218,19 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
       let recovered=0;
       for(const task of rows.results){
         try{
-          const instance=await selectWorkflow(env,{workflow,workflows},task.kind).get(task.workflow_instance_id),status=await instance.status();
-          if(task.state!=='deferred'){
-            await persistWorkflowStatus(env,{taskId:task.id,attemptNo:task.attempt_no,status,now});
-            continue;
+          if(isQueueInstance(task.workflow_instance_id)){
+            if(task.state!=='deferred'){
+              await recoverStalledQueueAttempt(env,task,timestamp);
+              continue;
+            }
+          }else{
+            const instance=await selectWorkflow(env,{workflow,workflows},task.kind).get(task.workflow_instance_id),status=await instance.status();
+            if(task.state!=='deferred'){
+              await persistWorkflowStatus(env,{taskId:task.id,attemptNo:task.attempt_no,status,now});
+              continue;
+            }
+            if(!terminalPlatformStates.has(status.status))continue;
           }
-          if(!terminalPlatformStates.has(status.status))continue;
           if(task.attempt_no>=1000||task.attempt_no-(task.kind==='backfill'?task.backfill_retry_from:1)+1>=maxAttempts){
             await env.DB.batch([env.DB.prepare("UPDATE tasks SET state='blocked',last_error=COALESCE(last_error,'retry_limit_reached'),updated_at=? WHERE id=? AND attempt_no=? AND state='deferred'")
               .bind(timestamp,task.id,task.attempt_no),...(task.kind==='backfill'?[backfillFailureStatement(env,task.id,task.attempt_no,timestamp)]:[])]);continue;
@@ -187,7 +254,7 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
 
     async recoverTask(taskId){
       if(!idPattern.test(taskId??''))throw new ValidationError('taskId must be a 24-character lowercase hex id');
-      let task=await env.DB.prepare(`SELECT t.*,a.workflow_instance_id,a.handed_off_at,a.result_json
+      let task=await env.DB.prepare(`SELECT t.*,a.workflow_instance_id,a.handed_off_at,a.result_json,a.started_at
         FROM tasks t LEFT JOIN task_attempts a ON a.task_id=t.id AND a.attempt_no=t.attempt_no
         WHERE t.id=?`).bind(taskId).first();
       if(!task)return null;
@@ -202,22 +269,25 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
       if(task.workflow_instance_id&&(activeStates.includes(task.state)||task.state==='failed'
         ||task.state==='deferred'&&task.due_at<=now())){
         const observedAttempt=task.attempt_no,observedInstance=task.workflow_instance_id;
-        const instance=await selectWorkflow(env,{workflow,workflows},task.kind).get(task.workflow_instance_id);
-        const status=await instance.status();
-        workflowStatus=status.status;
-        await persistWorkflowStatus(env,{taskId:task.id,attemptNo:task.attempt_no,status,now});
-        task=await env.DB.prepare(`SELECT t.*,a.workflow_instance_id,a.handed_off_at
+        if(isQueueInstance(observedInstance)){
+          if(activeStates.includes(task.state))await recoverStalledQueueAttempt(env,task,now());
+        }else{
+          const instance=await selectWorkflow(env,{workflow,workflows},task.kind).get(observedInstance),status=await instance.status();
+          workflowStatus=status.status;
+          await persistWorkflowStatus(env,{taskId:task.id,attemptNo:observedAttempt,status,now});
+        }
+        task=await env.DB.prepare(`SELECT t.*,a.workflow_instance_id,a.handed_off_at,a.started_at
           FROM tasks t LEFT JOIN task_attempts a ON a.task_id=t.id AND a.attempt_no=t.attempt_no
           WHERE t.id=?`).bind(taskId).first();
-        // A status observation authorizes only the attempt that was actually queried.
         if(task.attempt_no!==observedAttempt||task.workflow_instance_id!==observedInstance
-          ||!terminalPlatformStates.has(workflowStatus)||activeStates.includes(task.state))
+          ||(!isQueueInstance(observedInstance)&&!terminalPlatformStates.has(workflowStatus))||activeStates.includes(task.state))
           return {id:task.id,state:task.state,recovered:0,workflowStatus};
       }
       const due=task.state==='deferred'&&task.due_at<=now();
       if(!['failed','deferred'].includes(task.state)||!due&&task.state==='deferred')
         return {id:task.id,state:task.state,recovered:0,workflowStatus};
-      if(task.handed_off_at===null||!terminalPlatformStates.has(workflowStatus))
+      if(task.handed_off_at===null
+        ||(!isQueueInstance(task.workflow_instance_id)&&!terminalPlatformStates.has(workflowStatus)))
         return {id:task.id,state:task.state,recovered:0,workflowStatus};
       if(task.attempt_no>=maxAttempts){
         await env.DB.prepare(`UPDATE tasks SET state='blocked',last_error='retry_limit_reached',updated_at=?
@@ -325,6 +395,31 @@ export async function handleFeedJobs(batch,env,dependencies={}){
       message.retry({delaySeconds:Math.min(300,30*2**Math.max(0,(message.attempts??1)-1))});
     }
   }
+}
+
+function queueInstanceId(taskId,attemptNo){return `queue-${taskId}-a${attemptNo}`;}
+
+function isQueueInstance(id){return typeof id==='string'&&id.startsWith('queue-');}
+
+async function deferQueueCapacity(env,{taskId,attemptNo,timestamp,retryAfterMs}){
+  const jitter=(parseInt(taskId.slice(0,6),16)%15)*1000;
+  await env.DB.batch([
+    env.DB.prepare(`UPDATE tasks SET state='queued',due_at=?,updated_at=? WHERE id=? AND attempt_no=? AND state='running'`)
+      .bind(timestamp+Math.max(30_000,Number(retryAfterMs)||30_000)+jitter,timestamp,taskId,attemptNo),
+    env.DB.prepare(`UPDATE task_attempts SET state='deferred',ended_at=NULL
+      WHERE task_id=? AND attempt_no=? AND state='running'`)
+      .bind(taskId,attemptNo),
+    env.DB.prepare(`UPDATE outbox SET state='queued',available_at=?,updated_at=?
+      WHERE topic='feed-jobs' AND dedupe_key=? AND state IN ('queued','sent')`)
+      .bind(timestamp+Math.max(30_000,Number(retryAfterMs)||30_000)+jitter,timestamp,`start:${taskId}:a${attemptNo}`),
+  ]);
+}
+
+async function recoverStalledQueueAttempt(env,{id,attempt_no,kind,started_at},timestamp){
+  // A queue invocation has a 15-minute platform lifetime; allow receipt propagation.
+  if(!Number.isFinite(started_at)||started_at+15*60*1000+30_000>timestamp)return;
+  const timeout=Object.assign(new Error('Queue execution timeout'),{code:'queue_execution_timeout',retryable:true});
+  await failTask(env,kind,id,attempt_no,timeout,()=>timestamp);
 }
 
 async function recordOutboxReceipt(env,payload,state,timestamp,error=null){

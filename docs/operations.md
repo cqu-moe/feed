@@ -17,7 +17,7 @@
 | Workflow | binding `INGEST`，class `FeedIngest`；binding `PDF_OCR`，class `PdfOcrWorkflow` |
 | Workflow | binding `CAPTURE`，class `CaptureWorkflow`，执行单篇采集任务 |
 | Queue | producer/consumer 覆盖 `feed-jobs`、`feed-events`、`feed-mail` 三条业务队列，consumer 分别指向同名 `-dlq` |
-| Cron | 正式仅 `*/5 * * * *`，按来源持久到期时间发现、分级复查并恢复任务/邮件；旧 MVP 每日 Cron 已停 |
+| Cron | `0 * * * *` 扫描到期栏目与存档复查；`*/5 * * * *` 恢复已有任务/邮件并记录监控；旧 MVP 每日 Cron 已停 |
 
 非敏感变量：
 
@@ -144,7 +144,7 @@ pnpm exec wrangler d1 migrations apply cqu-feed-mvp --local
 
 ## 4. T03 单篇采集任务运行时
 
-T03 使用 `tasks`、`task_attempts` 和 `outbox` 保存单篇采集意图、每次 Workflow 交接和启动消息。Queue payload 只包含 `v/type/outboxId/taskId/attempt`；来源与文章 URL 始终从 D1 权威上下文读取，不接受消息或管理请求中的任意 URL。
+当前使用 `tasks`、`task_attempts` 和 `outbox` 保存单篇采集意图、每次执行与启动消息。新采集直接在 Queue 消费者内执行；旧 Workflow 尝试保留恢复兼容，见[采集调度](queue-collection.md)。Queue payload 只包含 `v/type/outboxId/taskId/attempt`；来源与文章 URL 始终从 D1 权威上下文读取，不接受消息或管理请求中的任意 URL。
 
 上线前置条件：
 
@@ -167,7 +167,7 @@ T03 使用 `tasks`、`task_attempts` 和 `outbox` 保存单篇采集意图、每
 任务状态含义：
 
 - `queued`：任务和启动 outbox 已持久化，等待 Queue。
-- `starting`/`running`：指定 Workflow instance 已接手或采集步骤已开始。
+- `starting`/`running`：队列消费者或旧 Workflow 已接手，采集步骤正在执行。
 - `succeeded`：这次采集已结束并保存结果；文章可能仍为 partial，不能据此认定版本已完整或允许推送。
 - `deferred`：429、采集占用等暂态原因等待恢复。
 - `blocked`：402/预算耗尽、尝试上限或启动投递耗尽，需要人工处理外部条件。
@@ -306,7 +306,7 @@ node scripts/manage.mjs auth-check
 
 ## 6. 旧版采集 Workflow（兼容入口）
 
-下述每日 `FeedIngest` 流程仅保留给旧版兼容入口；当前生产使用每五分钟到期调度的 `DiscoveryWorkflow` / `CaptureWorkflow`。新增来源与故障排查见 [来源维护](source-maintenance.md)，不要依据旧版五来源清单判断当前生产范围。
+下述每日 `FeedIngest` 流程仅保留给旧版兼容入口；当前生产使用每小时到期扫描和 Queue 直接消费，见[采集调度](queue-collection.md)。新增来源与故障排查见 [来源维护](source-maintenance.md)，不要依据旧版五来源清单判断当前生产范围。
 
 Cron 每天采集的 5 个来源来自 `worker/sources.json`：
 
@@ -320,7 +320,7 @@ Cron 每天采集的 5 个来源来自 `worker/sources.json`：
 
 这些路径均相对于各自站点 origin；正文链接必须匹配对应 `articlePattern` 且保持同源。
 
-当前 `*/5 * * * *` Cron 只为启用、验证通过且到期的栏目写入任务和 outbox；DiscoveryWorkflow 与 CaptureWorkflow 执行浏览器工作。站点对应一个稳定 Container 身份，同站任务串行，排队和长退避留在 Worker。详见 [按站采集设计](container-collection-rollout.md)。
+当前 `0 * * * *` Cron 只为启用、验证通过且到期的栏目写入任务和 outbox；Queue 消费者执行浏览器工作。站点对应一个稳定 Container 身份，同站任务串行，排队和长退避留在 Worker。详见 [按站采集设计](container-collection-rollout.md)。
 
 旧 `FeedIngest` 保留平台类供历史实例结束，但调用只返回 retired，不再读取来源或抓取通知。管理入口 `/internal/run` 只调度当前到期栏目并派发既有任务，不补跑历史失败任务、不启动旧 Workflow。
 
@@ -493,15 +493,15 @@ node scripts/compare-ocr.mjs publish textin-xparse-auto
 
 样本验证通过 `POST /internal/sources/:id/verify` 提交 `{requestId}`，立即返回 HTTP 202 和持久任务 ID。相同配置版本与 requestId 的重试复用原任务；服务端检查列表、最多一页分页、正文、附件文件签名与原貌快照。无分页的列表明确记录 `paginationMode=absent`。旧配置的验证结果不能批准新配置；验证成功后仍须管理员单独启用。页面会轮询状态，离开页面不取消任务。
 
-每五分钟扫描到期栏目，将配置快照与启动 outbox 同批持久化。一个 DiscoveryWorkflow 处理一页，先将列表原始报告与解析结果保存为任务独占的 R2 日志，再在同一事务中记录来源关联、单篇采集任务、下一页任务与执行回执。每轮默认最多两页（`MAX_DISCOVERY_PAGES_PER_RUN` 可配置 1–10），完整历史补抓由 T14 独立负责。数据库提交前失败会持久延期并复用 R2 日志；提交响应丢失时从回执及 outbox 恢复，已保存页面不重新调用抓取，首次发现时间仍使用原列表结果时间。不同栏目遇到同 canonical URL 时共享通知身份及首次采集任务，但保留各自发现证据；不同 URL 不按标题合并。
+每小时扫描到期栏目，将配置快照与启动 outbox 同批持久化。一个 Queue 消费任务处理一页，先将列表原始报告与解析结果保存为任务独占的 R2 日志，再在同一事务中记录来源关联、单篇采集任务、下一页任务与执行回执。每轮默认最多两页（`MAX_DISCOVERY_PAGES_PER_RUN` 可配置 1–10），完整历史补抓由 T14 独立负责。数据库提交前失败会持久延期并复用 R2 日志；提交响应丢失时从回执及 outbox 恢复，已保存页面不重新调用抓取，首次发现时间仍使用原列表结果时间。不同栏目遇到同 canonical URL 时共享通知身份及首次采集任务，但保留各自发现证据；不同 URL 不按标题合并。
 
 `GET /internal/sources/:id/discoveries` 返回该栏目最近 100 条发现证据：首次/最近发现、live/backfill/migrated 分类、日期精度、原站日历日期、准确时间与时区。日级日期不补成零点，未知日期不补成当前日期；明确分钟时间按来源时区转换，夏令时歧义降为日级证据。后续推送仍要经过日期资格与版本完整性检查。
 
 验证并启用后的栏目可用 `POST /internal/sources/:id/backfill` 启动历史补抓，请求带 8–100 字符 `requestId`，可选 1–3650 天 `windowDays`。未提供时优先使用该栏目已保存的天数，再使用 `DEFAULT_BACKFILL_WINDOW_DAYS`（默认 365，范围 1–3650）；管理页面显示服务端默认值，未修改时不覆盖它。运行窗口固定为启动时来源时区的当天及之前 N 个日历日，跨夏令时不会多减一天，也不接收未来日级日期。未知日期保留待核实，历史基线及后来核实的历史内容不补发邮件。
 
-一个 backfill Workflow 只处理一页。游标、通知发现、去重计数、下一页任务、outbox 与页回执同批提交；文章去重存 `backfill_seen_articles`，不将所有文章 ID 复制进后续 payload。`MAX_BACKFILL_PAGES_PER_RUN` 默认 100，上限 1000；到达页数上限且还有后续页时保存游标并进入 `paused`，不会显示完成。可通过 `/backfill/resume` 显式提交 `{ "maxPages": 200 }` 增加本次总页数上限；最大 1000，仍有后续页时需人工检查分页配置。此时游标与 R2 列表原件保留，页面显示人工检查提示，但不留下无法执行的 page 1001 任务或 outbox。游标 JSON 上限 128 KiB，超出进入可见失败并保留原 R2 列表回执，不截断后假报完成。
+一个 backfill 任务只处理一页。游标、通知发现、去重计数、下一页任务、outbox 与页回执同批提交；文章去重存 `backfill_seen_articles`，不将所有文章 ID 复制进后续 payload。`MAX_BACKFILL_PAGES_PER_RUN` 默认 100，上限 1000；到达页数上限且还有后续页时保存游标并进入 `paused`，不会显示完成。可通过 `/backfill/resume` 显式提交 `{ "maxPages": 200 }` 增加本次总页数上限；最大 1000，仍有后续页时需人工检查分页配置。此时游标与 R2 列表原件保留，页面显示人工检查提示，但不留下无法执行的 page 1001 任务或 outbox。游标 JSON 上限 128 KiB，超出进入可见失败并保留原 R2 列表回执，不截断后假报完成。
 
-`MAX_LIVE_DISCOVERY_TASKS_PER_RUN`（默认 20）和 `MAX_BACKFILL_TASKS_PER_RUN`（默认 5）是持久调度准入窗口内两个独立的页任务 attempt 配额，范围 0–100；0 暂停该通道的新准入。`DISCOVERY_ADMISSION_INTERVAL_SEC` 默认 60，范围 60–3600。D1 的 `discovery_admissions` 以 task/attempt 唯一占用配额；管理员启动、分页继续、自动/人工重试和并发 outbox 派发均经过同一限制，重复消息复用原准入。派发历史前先安排到期 live，dispatch 将 live 排在历史前；历史配额不足时原任务/outbox 保持待处理并显示下次准入时间。不得依赖 Queue 的实际完成顺序保证优先级。
+日常发现不再使用旧 `MAX_LIVE_DISCOVERY_TASKS_PER_RUN` 每分钟配额；到期栏目直接排队，由 `feed-jobs` 每批一条、最大并发两个限制实际执行。历史补抓保留 `MAX_BACKFILL_TASKS_PER_RUN`（默认 5，范围 0–100，0 暂停新准入），避免历史任务挤占日常采集；`DISCOVERY_ADMISSION_INTERVAL_SEC` 默认 60，范围 60–3600。历史页的管理员启动、分页继续和重试复用 `discovery_admissions` 中的 task/attempt 准入，配额不足时保留原任务与 outbox。派发前优先安排到期 live，不依赖 Queue 完成顺序保证优先级。
 
 五分钟恢复任务会清理过期的 discovery permit：`DISCOVERY_ADMISSION_RETENTION_MS` 默认 7 天，范围 1 小时–30 天。只有超过保留期，且任务已 `succeeded`/`cancelled`，或 permit 所属 attempt 已被任务当前更大的 attempt 取代时才会删除；活跃 attempt 以及仍可能用于人工恢复的 failed/blocked/deferred 同 attempt permit 保留。每次恢复最多清理 100 条，剩余记录由后续轮次继续处理。
 
@@ -533,7 +533,7 @@ node scripts/compare-ocr.mjs publish textin-xparse-auto
 
 ### 已存档通知的分级复查
 
-`GET /internal/rechecks` 返回就绪、到期和复查任务计数；`POST /internal/rechecks` 可提交一次有界调度（`limit` 默认20，范围1–100）。五分钟 Cron 复用同一调度器；新增任务必须同时开启 `CRAWL_ENABLED`、`TASK_RUNTIME_ENABLED` 和 `ARCHIVE_VERSIONS_ENABLED`。暂停不删除已有存档和已发生的任务事实。
+`GET /internal/rechecks` 返回就绪、到期和复查任务计数；`POST /internal/rechecks` 可提交一次有界调度（`limit` 默认20，范围1–100）。每小时 Cron 复用同一调度器；新增任务必须同时开启 `CRAWL_ENABLED`、`TASK_RUNTIME_ENABLED` 和 `ARCHIVE_VERSIONS_ENABLED`。暂停不删除已有存档和已发生的任务事实。
 
 默认按冻结的源站发布日期区分30天内近期通知与旧通知，日期不可用才回退观察时间；近期每7天、旧通知每30天复查。首次完整归档 ready 时初始化下一次复查时间，避免数分钟后立即重抓；已有显式排期和旧存档仍按原到期扫描推进。三个秒级参数分别为 `RECHECK_RECENT_AFTER_SEC`、`RECHECK_RECENT_INTERVAL_SEC`、`RECHECK_OLD_INTERVAL_SEC`。这些默认值不是已批准的生产容量或费用参数，上线前仍需按实测预算确认。
 

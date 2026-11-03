@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { build } from 'esbuild';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { test, expect } from '@playwright/test';
+import { cloudflareEntrypointPlugin } from '../helpers/cloudflare-entrypoint-plugin';
 
 // Real browser page actions, signed bridge, AI adapter, D1 slots and R2 uploads.
 // Only the public school responses and the external model response are fixtures.
@@ -21,7 +22,7 @@ test('historical samples preserve CAPTCHA sessions, large originals and reject c
     await db.prepare('CREATE TABLE ocr_slots(run_id TEXT,slot INTEGER,result TEXT,created_at TEXT,PRIMARY KEY(run_id,slot))').run();
     const archive=await mf.getR2Bucket('ARCHIVE');
     const bundle=await build({entryPoints:['worker/source-validation.mjs'],bundle:true,write:false,
-      platform:'node',format:'esm',external:['cloudflare:workers']});
+      platform:'node',format:'esm',plugins:[cloudflareEntrypointPlugin]});
     const {verifySource}=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
     const source={id:'sample',url:'https://jwc.cqu.edu.cn/',listUrl:'https://jwc.cqu.edu.cn/list.htm',
       configVersion:1,enabled:false,validationTaskId:'test-validation',timezone:'Asia/Shanghai',

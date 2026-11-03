@@ -399,10 +399,12 @@ export async function captureFeedPipelineSummaries(env, lifecycle, now = Date.no
         AND state IN ('failed','blocked','deferred','queued','starting','running')`).first(),
     env.DB.prepare(`SELECT COUNT(*) AS enabled_count,
         SUM(CASE WHEN s.validation_state='failed' OR s.error IS NOT NULL AND TRIM(s.error)<>'' THEN 1 ELSE 0 END) AS failed_count,
-        SUM(CASE WHEN s.validation_state='verified' AND s.next_discovery_at>0 AND s.next_discovery_at<=?
+        SUM(CASE WHEN s.validation_state='verified' AND (
+          (s.next_discovery_at>0 AND s.next_discovery_at<=?) OR
+          CAST(strftime('%s',s.last_run_at) AS INTEGER)*1000+s.refresh_interval_sec*1000+4200000<?)
           THEN 1 ELSE 0 END) AS overdue_count
       FROM sources s JOIN sites st ON st.id=s.site_id
-      WHERE s.enabled=1 AND st.enabled=1`).bind(windowEnd - 3_600_000).first(),
+      WHERE s.enabled=1 AND st.enabled=1`).bind(windowEnd - 4_200_000, windowEnd).first(),
   ]);
   const messages = [];
   for (const properties of buildFeedPipelineSummaries(summaryRows.results ?? [], windowStart, windowDurationMs)) {

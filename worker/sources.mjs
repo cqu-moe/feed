@@ -287,13 +287,14 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
         .bind(JSON.stringify({error:cleanError(error)}),timestamp(),id,configVersion,taskId,taskId,attemptNo).run();
     },
 
-    async scheduleDue({limit=20}={}){
+    async scheduleDue({limit=100}={}){
       if(env.CRAWL_ENABLED!=='true'||env.TASK_RUNTIME_ENABLED!=='true'||env.SOURCE_MANAGEMENT_ENABLED!=='true')return {scheduled:[]};
-      const at=timestamp(),size=boundedInteger(limit,20,1,100);
-      const liveBudget=Math.min(size,boundedInteger(env.MAX_LIVE_DISCOVERY_TASKS_PER_RUN,20,1,100));
+      const at=timestamp(),size=boundedInteger(limit,100,1,100);
       const rows=await env.DB.prepare(`${sourceSelect}
         WHERE s.enabled=1 AND st.enabled=1 AND s.validation_state='verified' AND s.next_discovery_at<=?
-        ORDER BY s.next_discovery_at,s.id LIMIT ?`).bind(at,liveBudget).all();
+          AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.source_id=s.id AND t.kind='discover'
+            AND t.state IN ('queued','starting','running','deferred'))
+        ORDER BY s.next_discovery_at,s.id LIMIT ?`).bind(at,size).all();
       const scheduled=[];const scheduledIds=[];
       for(const row of rows.results){
         try{
@@ -449,8 +450,8 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
             hardPageLimitReached?'Backfill hard page limit reached; source pagination requires manual inspection'
               :pageLimitReached?'Backfill page limit reached; raise maxPages explicitly to continue':null,
             at,source.id,source.configVersion,...activeTask.args)
-        :env.DB.prepare(`UPDATE sources SET last_run_at=?,error=NULL,updated_at=? WHERE id=? AND config_version=? AND ${activeTask.sql}`)
-          .bind(new Date(at).toISOString(),at,source.id,source.configVersion,...activeTask.args));
+        :env.DB.prepare(`UPDATE sources SET last_run_at=?,next_discovery_at=?,error=NULL,updated_at=? WHERE id=? AND config_version=? AND ${activeTask.sql}`)
+          .bind(new Date(at).toISOString(),at+source.refreshIntervalSec*1000,at,source.id,source.configVersion,...activeTask.args));
       let committed;
       try{committed=await env.DB.batch(statements);}
       catch(error){
@@ -477,8 +478,7 @@ async function discoveryTaskStatements(env,source,context,{timestamp,advanceSour
   const businessKey=`discover:${source.id}:${source.configVersion}:${context.scheduledSlot}:p${context.page}`;
   const taskId=(await sha(businessKey)).slice(0,24);
   const payload={source,checkpoint:context.checkpoint,page:context.page,scheduledSlot:context.scheduledSlot};
-  const previous=Number(context.scheduledSlot)||timestamp,interval=source.refreshIntervalSec*1000;
-  const nextDue=previous+(Math.floor(Math.max(0,timestamp-previous)/interval)+1)*interval;
+  const nextDue=timestamp+source.refreshIntervalSec*1000;
   const statements=[];
   const sourceGuard=advanceSource
     ?'enabled=1 AND validation_state=\'verified\' AND next_discovery_at=?'

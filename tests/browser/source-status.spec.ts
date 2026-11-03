@@ -42,6 +42,12 @@ test('source status reflects overdue, validation and legacy API states', async (
         lastRunAt: new Date(Date.now() - 864012000).toISOString(), articleCount: 8, error: null,
       },
       {
+        id: 'waiting', siteId: 'news-site', name: '待整点扫描', url: 'https://news.example.edu/',
+        listUrl: 'https://news.example.edu/list.htm', enabled: true, siteEnabled: true,
+        validationState: 'verified', refreshIntervalSec: 86400, nextDiscoveryAt: Date.now() - 65 * 60_000,
+        lastRunAt: new Date(Date.now() - 86400_000 - 65 * 60_000).toISOString(), articleCount: 8, error: null,
+      },
+      {
         id: 'new', siteId: 'news-site', name: '新栏目', url: 'https://news.example.edu/',
         listUrl: 'https://news.example.edu/new.htm', enabled: true, siteEnabled: true,
         validationState: 'draft', refreshIntervalSec: 3600, nextDiscoveryAt: 0,
@@ -58,6 +64,7 @@ test('source status reflects overdue, validation and legacy API states', async (
   const news = page.locator('article', { has: page.getByRole('heading', { level: 2, name: '新闻网' }) });
   await expect(news).toContainText('检查已超期');
   await expect(news).toContainText('最近成功检查');
+  await expect(page.locator('article', { has: page.getByRole('heading', { level: 2, name: '待整点扫描' }) })).toContainText('运行正常');
   const draft = page.locator('article', { has: page.getByRole('heading', { level: 2, name: '新栏目' }) });
   await expect(draft).toContainText('配置待验证');
   const legacy = page.locator('article', { has: page.getByRole('heading', { level: 2, name: '旧接口' }) });

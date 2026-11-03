@@ -424,23 +424,23 @@ test('failed and due deferred recovery requires a confirmed terminal platform in
   }
 });
 
-test('targeted dispatch and operations replay share the durable discovery admission budget',async()=>{
+test('live discovery replay uses Queue capacity instead of the retired admission budget',async()=>{
   const {mf,db,admin}=await fixture({bindings:{
     SOURCE_MANAGEMENT_ENABLED:'true',
     MAX_LIVE_DISCOVERY_TASKS_PER_RUN:'0',
   }});
   try{
     const replay=await adminPost(mf,admin,'/internal/operations/replay',{outboxId:ids.jobOutbox,topic:'feed-jobs'});
-    assert.equal(replay.status,409);
+    assert.equal(replay.status,202);
 
     const recovered=await adminPost(mf,admin,`/internal/operations/tasks/${ids.launchTask}/recover`);
     assert.equal(recovered.status,202);
     assert.deepEqual(await recovered.json(),{
-      id:ids.launchTask,state:'queued',recovered:0,workflowStatus:null,
+      id:ids.launchTask,state:'queued',recovered:1,workflowStatus:null,
     });
-    assert.deepEqual((await getSends(mf)).FEED_JOBS??[],[]);
+    assert.deepEqual((await getSends(mf)).FEED_JOBS.map(message=>message.taskId).sort(),[ids.discoverTask,ids.launchTask].sort());
     assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM discovery_admissions').first()).n,0);
-    assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM outbox_receipts WHERE outbox_id=?').bind(ids.jobOutbox).first()).n,0);
+    assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM outbox_receipts WHERE outbox_id=?').bind(ids.jobOutbox).first()).n,1);
   }finally{
     await mf.dispose();
   }

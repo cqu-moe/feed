@@ -65,9 +65,10 @@ test('0010 migrates existing owner subscriptions into versions and the active qu
   }
 });
 
-test('0020 migrates existing sources to staggered daily schedules', async () => {
+test('daily schedule transition replaces site slots with successful-check deadlines', async () => {
   const { mf, db } = await subscriptionsFixture();
   try {
+    const lastSuccess = Date.now() - 32 * 3_600_000;
     await db.batch([
       db.prepare(`INSERT INTO sources(id,site_id,name,url,list_url,config_json,config_version,enabled,
         refresh_interval_sec,next_discovery_at,validation_state,source_timezone,created_at,updated_at)
@@ -76,6 +77,8 @@ test('0020 migrates existing sources to staggered daily schedules', async () => 
         refresh_interval_sec,next_discovery_at,validation_state,validation_json,source_timezone,created_at,updated_at)
         VALUES ('b','9076295fe7a44c01dabe3c33','B','https://news.cqu.edu.cn/b/','https://news.cqu.edu.cn/b/list.htm','{}',3,0,86400,1,'draft','{}','UTC',13,14)`),
     ]);
+    await db.prepare("UPDATE sources SET last_run_at=? WHERE id IN ('a','b','jwc')")
+      .bind(new Date(lastSuccess).toISOString()).run();
     await db.batch([
       db.prepare(`INSERT INTO tasks(id,kind,business_key,source_id,payload_json,state,due_at,attempt_no,created_at,updated_at)
         VALUES ('t1','discover','pre-migration-succeeded','a','{}','succeeded',1,1,1,1)`),
@@ -83,6 +86,8 @@ test('0020 migrates existing sources to staggered daily schedules', async () => 
         VALUES ('t2','capture','pre-migration-failed','b','{}','failed',2,1,2,2)`),
       db.prepare(`INSERT INTO tasks(id,kind,business_key,source_id,payload_json,state,due_at,attempt_no,created_at,updated_at)
         VALUES ('t3','recheck','pre-migration-cancelled','a','{}','cancelled',3,1,3,3)`),
+      db.prepare(`INSERT INTO tasks(id,kind,business_key,source_id,payload_json,state,due_at,attempt_no,created_at,updated_at)
+        VALUES ('t4','discover','pre-migration-running','jwc','{}','running',4,1,4,4)`),
     ]);
     const beforeMigration = Object.fromEntries((await db.prepare(`SELECT id,enabled,config_json,config_version,
       validation_state,validation_json,source_timezone,created_at,updated_at FROM sources`).all()).results
@@ -120,7 +125,21 @@ test('0020 migrates existing sources to staggered daily schedules', async () => 
       validation_json: '{}', source_timezone: 'UTC', created_at: 13, updated_at: 14,
     });
     assert.deepEqual(preserved.intex, beforeMigration.intex);
+    const repair = await readFile('migrations/0021_source_schedule_transition.sql', 'utf8');
+    await applyMigration(db, repair);
+    const repairedRows = (await db.prepare('SELECT * FROM sources ORDER BY id').all()).results;
+    await applyMigration(db, repair);
+    assert.deepEqual((await db.prepare('SELECT * FROM sources ORDER BY id').all()).results, repairedRows);
     assert.deepEqual((await db.prepare('SELECT * FROM tasks ORDER BY id').all()).results, beforeTasks);
+    const repaired = await db.prepare("SELECT next_discovery_at FROM sources WHERE id='a'").first();
+    assert.ok(repaired.next_discovery_at <= lastSuccess + 86_400_000,
+      'switching to daily checks must not postpone the first check beyond the previous success plus one day');
+    assert.equal(repaired.next_discovery_at, Math.floor(lastSuccess / 1000) * 1000 + 86_400_000);
+    for (const row of repairedRows) {
+      assert.equal(row.last_run_at, ['a', 'b', 'jwc'].includes(row.id) ? new Date(lastSuccess).toISOString() : null);
+      if (row.id !== 'a') assert.equal(row.next_discovery_at, byId[row.id].next_discovery_at,
+        'paused, never-checked, and already-running sources retain their schedules');
+    }
   } finally {
     await mf.dispose();
   }
