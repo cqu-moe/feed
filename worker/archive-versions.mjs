@@ -133,7 +133,7 @@ async function savedRawBody(env,capture){
   return stored.text();
 }
 
-const revisionColumns=`r.id,r.article_id AS articleId,r.revision_no AS revisionNo,${readingTitleSql('r.title','a.title')} AS title,r.state,r.observed_at AS observedAt,
+const revisionColumns=`r.id,r.article_id AS articleId,r.revision_no AS revisionNo,${readingTitleSql('r.title','a.title','r.observed_at')} AS title,r.state,r.observed_at AS observedAt,
   r.ready_at AS readyAt,r.change_kind AS changeKind,
   (SELECT COUNT(*) FROM revision_requirements q WHERE q.revision_id=r.id AND q.required=1 AND q.state<>'fulfilled') AS missingCount`;
 const iso=value=>value===null?null:new Date(value).toISOString();

@@ -41,7 +41,7 @@ async function versionedList(env,url){
   const query=(url.searchParams.get('q')??'').trim().slice(0,100),source=url.searchParams.get('source')??'';
   const page=Math.min(500,Math.max(1,parseInt(url.searchParams.get('page')??'1')||1)),pageSize=20;
   const clauses=[],bindings=[];
-  const storedTitle='COALESCE(m.title,observed.title,a.title)',title=readingTitleSql(storedTitle,'a.title');
+  const storedTitle='COALESCE(m.title,observed.title,a.title)',title=readingTitleSql(storedTitle,'a.title','COALESCE(r.observed_at,observed.observed_at)');
   if(source){
     const configured=await createSources(env).all();
     if(!configured.some(row=>row.id===source))return json({error:'未知来源'},400);

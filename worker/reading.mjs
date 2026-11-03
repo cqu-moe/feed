@@ -17,6 +17,6 @@ export function readingText(value) {
 }
 export const readingExcerpt = value => readingText(value).replace(/\s+/g, ' ').slice(0,180);
 
-// Older captures saved the 18-character page-match hint; keep the archive frozen and read the intact discovery title.
-export const readingTitleSql = (title, original) =>
-  `CASE WHEN length(${title})=18 AND substr(${original},1,18)=${title} THEN ${original} ELSE ${title} END`;
+// Restore the known pre-fix captures (before 2026-11-03 04:45 UTC), without changing frozen archives or later title edits.
+export const readingTitleSql = (title, original, observedAt) =>
+  `CASE WHEN ${observedAt}<1793681100000 AND length(${title})=18 AND substr(${original},1,18)=${title} THEN ${original} ELSE ${title} END`;
