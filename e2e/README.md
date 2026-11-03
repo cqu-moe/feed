@@ -30,9 +30,17 @@ manifest records the actual HEAD, dirty state, source digest and both bundles.
 Auth must be the exact clean pinned commit. An existing output directory is an
 error, protecting earlier evidence.
 
-Only the external verification-mail provider is substituted. The browser OAuth
-client is administrator-approved (`skipConsent=1`, subsystem `feed`), matching
-Auth's capability-disclosure contract. The rejection case switches to a separate
+This pinned Auth commit predates `feed.admin`. The migration-ready E2E code
+expects the parent to replace `AUTH_E2E_COMMIT` (and the checkout command above)
+with the exact clean Auth commit that exposes `feed.admin` to OAuth
+introspection and inherits it for `admin`/`superAdmin`; until then, run
+`tsc --project e2e/tsconfig.json` locally and do not bypass the runner's pin.
+
+Only the external verification-mail provider and Turnstile browser script are
+substituted; the browser still performs Auth's real authorization flow and the
+backend still verifies the one-use token. The browser OAuth client is
+administrator-approved (`skipConsent=1`, subsystem `feed`), matching Auth's
+capability-disclosure contract. The rejection case switches to a separate
 unapproved client. The backend RPC client is separate and has no browser grants.
 All client seed fields are independently read back before login. No internal
 session or business response is fulfilled by browser routes.
@@ -91,7 +99,15 @@ FEED_E2E_AUTH_CHECKOUT=.e2e/auth-checkout pnpm test:e2e:ingestion
 This selects `ingestion.e2e.ts` instead of the preloaded reader suite. Each
 viewport starts empty articles/tasks/revisions/events/derived outputs and R2,
 with all migrations applied. Existing catalogue sources are disabled. The
-existing administrator HTTP routes create a synthetic `school.example.test`
+administrator signs up normally, receives the Auth `admin` role prerequisite,
+then completes the same real OAuth login that creates the Feed BFF cookie;
+`/internal/*` calls reuse that local-only cookie. Coverage checks `/api/session`
+reports `admin: true` even when `feed.access` is false, verifies the OAuth
+callback preserves `next=/admin/tasks`, revokes a redundant explicit
+`feed.admin`, downgrades the role, and grants `feed.admin` explicitly to the
+normal reader, rechecking the BFF cookie after each Auth-side fact changes. No
+auth session is inserted and `ADMIN_TOKEN` is not configured.
+The existing administrator HTTP routes create a synthetic `school.example.test`
 site, verify two columns, enable and schedule discovery, capture, backfill,
 recover failed attempts, recheck versions and replay Queue handoffs. Native
 Miniflare consumers start the unmodified `DiscoveryWorkflow`, `CaptureWorkflow`

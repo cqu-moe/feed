@@ -31,6 +31,7 @@ export type SessionAccount = AvailableSessionAccount | UnavailableSessionAccount
 export type Session = {
   authenticated: boolean;
   entitled: boolean;
+  admin: boolean;
   user?: SessionUser;
   account?: SessionAccount;
 };
@@ -223,6 +224,13 @@ export async function requestJson<T>(
   }
 }
 
+export function adminRequestMessage(status: number, action: string, message?: string): string {
+  if (status === 401) return '登录已过期，请重新登录后继续本次管理操作。';
+  if (status === 403) return '当前账号的 Feed 管理权限已被收回，请重新进入。';
+  if (status === 503) return message || `${action}暂时不可用，请稍后重试；已保存内容会保留。`;
+  return message || `${action}失败（HTTP ${status}）。`;
+}
+
 function parseUser(value: unknown): SessionUser | undefined {
   if (value === undefined || value === null) return undefined;
   if (!isRecord(value)) throw new Error('用户信息结构不匹配。');
@@ -242,6 +250,7 @@ export function parseSession(value: unknown): Session {
   return {
     authenticated: value.authenticated,
     entitled: value.entitled,
+    admin: value.admin === true,
     user: parseUser(value.user),
     account: value.account === undefined ? undefined : parseAccount(value.account),
   };

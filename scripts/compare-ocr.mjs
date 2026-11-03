@@ -1,14 +1,15 @@
-import {readFile,mkdir,writeFile} from 'node:fs/promises';
+import {mkdir,writeFile} from 'node:fs/promises';
+import {adminHeaders,readAdminSession} from './admin-session.mjs';
 const [action='status',model]=process.argv.slice(2);
 const articleId=process.env.FEED_ARTICLE_ID||'4ffc0415b5f4ba168a847f01';
 const models=['textin-xparse-auto','mistral-ocr-2512','mistral-ocr-4-1'];
 if(!['start','status','results','publish'].includes(action)||(['start','results','publish'].includes(action)&&!models.includes(model)))throw new Error('Usage: compare-ocr.mjs status | start|results|publish <model>');
-const secrets=process.env.FEED_ADMIN_TOKEN?{ADMIN_TOKEN:process.env.FEED_ADMIN_TOKEN}:JSON.parse(await readFile('.private/production-secrets.json','utf8'));
+const cookie=await readAdminSession();
 const base=process.env.FEED_URL||'https://cqu-feed.user-unauthorized.workers.dev';
 const url=new URL(`/internal/pdf-ocr/${articleId}`,base);
 if(action==='results')url.searchParams.set('model',model);
 const post=['start','publish'].includes(action);
-const response=await fetch(url,{method:post?'POST':'GET',headers:{Authorization:`Bearer ${secrets.ADMIN_TOKEN}`,'Content-Type':'application/json'},body:post?JSON.stringify({model,publish:action==='publish'}):undefined,signal:AbortSignal.timeout(30000)});
+const response=await fetch(url,{method:post?'POST':'GET',headers:{...adminHeaders(base,cookie),'Content-Type':'application/json'},body:post?JSON.stringify({model,publish:action==='publish'}):undefined,redirect:'error',signal:AbortSignal.timeout(30000)});
 if(!response.ok)throw new Error(`OCR admin HTTP ${response.status}`);
 const result=await response.json();
 if(action==='results'){

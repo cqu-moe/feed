@@ -62,7 +62,6 @@ Workers secrets：
 | `BRIDGE_SECRET` | 给 Container 源站页面签发 10 分钟源站 origin 绑定 HMAC capability，与既有采集租约对齐 |
 | `TEXTIN_APP_ID` / `TEXTIN_SECRET_CODE` | 默认 TextIn xParse PDF OCR 凭据 |
 | `MISTRAL_API_KEY` | 可选，仅显式历史对比；默认采集不调用 |
-| `ADMIN_TOKEN` | `/internal/*` 管理 Bearer token |
 | `FEED_AUTH_CLIENT_ID` | auth.cqu.moe 机密 OAuth client ID |
 | `FEED_AUTH_CLIENT_SECRET` | auth.cqu.moe 机密 OAuth client secret |
 | `FEED_SESSION_ENCRYPTION_KEY` | 加密 OAuth transaction 和 BFF 会话 payload |
@@ -73,7 +72,6 @@ Workers secrets：
 pnpm exec wrangler secret put TEXTIN_APP_ID --name cqu-feed
 pnpm exec wrangler secret put TEXTIN_SECRET_CODE --name cqu-feed
 pnpm exec wrangler secret put BRIDGE_SECRET --name cqu-feed
-pnpm exec wrangler secret put ADMIN_TOKEN --name cqu-feed
 pnpm exec wrangler secret put FEED_AUTH_CLIENT_ID --name cqu-feed
 pnpm exec wrangler secret put FEED_AUTH_CLIENT_SECRET --name cqu-feed
 pnpm exec wrangler secret put FEED_SESSION_ENCRYPTION_KEY --name cqu-feed
@@ -155,7 +153,7 @@ T03 使用 `tasks`、`task_attempts` 和 `outbox` 保存单篇采集意图、每
 3. 确认 Worker 具有 `FEED_JOBS` producer/consumer 与 `CAPTURE` Workflow binding。
 4. 显式把 `TASK_RUNTIME_ENABLED` 与 `CRAWL_ENABLED` 配置为 `true` 后再部署。默认 `TASK_RUNTIME_ENABLED=false`，保证既有 MVP 行为不受新管理提交入口影响。
 
-管理接口均要求 `Authorization: Bearer <ADMIN_TOKEN>`，与阅读端 `feed.access` 会话独立：
+管理接口复用 Feed OAuth BFF 会话，每次向 Auth introspection 检查当前 `caps.feed.admin === true`。Auth 的 `admin` / `superAdmin` 自动拥有该权限，普通用户可由 Auth 超级管理员单独授予。管理权与 `feed.access` 阅读权益独立。未登录返回 401，缺少管理权返回 403，Auth 不可用返回 503；写请求必须携带与 Feed 配置地址完全一致的 `Origin`。旧 `ADMIN_TOKEN` 不再参与授权：
 
 | 方法与路径 | 作用 |
 | --- | --- |
@@ -164,7 +162,7 @@ T03 使用 `tasks`、`task_attempts` 和 `outbox` 保存单篇采集意图、每
 | `GET /internal/capture-tasks/:taskId` | 查看任务、当前 attempt 与文章状态 |
 | `POST /internal/capture-tasks/recover` | 手动执行与定时恢复相同的 outbox/attempt 恢复规则 |
 
-浏览器管理入口为 `/admin/tasks`，也可从「采集状态」进入。凭据只在当前页面内存中持有；退出或离开页面后重新输入，不写 URL、localStorage 或日志。提交结果不明时，重试复用原 requestId；明确成功后再次提交代表新的采集意图。
+浏览器管理入口为 `/admin/tasks` 和 `/admin/sources`，使用现有 Auth 登录；具备管理权时显示后台入口，不再输入共享凭据。权限撤销后下一次管理请求拒绝访问。提交结果不明时，重试复用原 requestId；明确成功后再次提交代表新的采集意图。
 
 任务状态含义：
 
@@ -296,11 +294,15 @@ pnpm build && pnpm deploy:ci
 ```sh
 curl https://feed.cqu.moe/health
 FEED_URL=https://feed.cqu.moe \
-FEED_ADMIN_TOKEN='<redacted>' \
+FEED_SESSION_COOKIE='__Host-feed_session=<redacted>' \
 node scripts/manage.mjs auth-check
 ```
 
 不要把真实 token 替换进文档或提交记录。真实账号登录、搜索和存档验证见 `acceptance.md`。权益撤销通过隔离集成测试验证，不会为测试撤销生产账号权益。
+
+### 后台权限版本切换
+
+先发布包含 `feed.admin` 的 Auth，再发布 Feed。没有新字段的旧 Auth 会使 Feed 后台拒绝访问，不会回退到共享 token。Auth 角色继承实时计算，不需要新增权限表或批量写入管理员权益。Feed 发布后确认管理员、单独授权用户、普通用户与撤权行为，再移除已不使用的 Worker `ADMIN_TOKEN` secret；回滚到旧 Feed 版本前须核对其凭据要求。
 
 ## 6. 旧版采集 Workflow（兼容入口）
 
@@ -393,15 +395,15 @@ CREATE VIRTUAL TABLE article_search USING fts5(
 
 ```sh
 FEED_URL=https://feed.cqu.moe \
-FEED_ADMIN_TOKEN='<redacted>' \
+FEED_SESSION_COOKIE='__Host-feed_session=<redacted>' \
 node scripts/manage.mjs status
 
 FEED_URL=https://feed.cqu.moe \
-FEED_ADMIN_TOKEN='<redacted>' \
+FEED_SESSION_COOKIE='__Host-feed_session=<redacted>' \
 node scripts/manage.mjs run
 
 FEED_URL=https://feed.cqu.moe \
-FEED_ADMIN_TOKEN='<redacted>' \
+FEED_SESSION_COOKIE='__Host-feed_session=<redacted>' \
 node scripts/manage.mjs auth-check
 ```
 
@@ -410,7 +412,7 @@ node scripts/manage.mjs auth-check
 - `auth-check`：验证 OAuth client 与 Auth introspection 通路。
 - `capture-tasks`：T03 管理 HTTP 入口见上一节；单篇恢复使用同一个 `recover` 接口，不重跑整站。
 
-优先通过 `FEED_ADMIN_TOKEN` 环境变量传值。未设置该变量时，脚本会尝试读取 `.private/production-secrets.json`；不要把该文件提交、打包或输出到日志。
+管理脚本只接受操作者显式提供的 `FEED_SESSION_COOKIE`，使用该登录会话的当前管理权，发送同源 `Origin`，并拒绝重定向。脚本不读取浏览器资料或默认生产 secrets 文件。会话失效需重新登录；日常操作直接使用后台页面。不要把真实会话放入命令历史、提交记录、构建产物或日志。
 
 首次补抓快照记录在 `acceptance.md`。后续运行以 `/internal/status` 和 D1/R2 读回为准。`complete` 仅表示已发现候选的存档完整，不承诺发现站点所有历史栏目或为扫描文件完成 OCR。
 
@@ -474,7 +476,7 @@ node scripts/compare-ocr.mjs results textin-xparse-auto
 node scripts/compare-ocr.mjs publish textin-xparse-auto
 ```
 
-已完成结果 publish 只更新阅读与索引，不再收费识别。start 可能发起付费调用，仍受文件缓存和全局页数预算约束。任意其他 article 通过带 ADMIN_TOKEN 的 `/internal/pdf-ocr/<id>` 管理。
+已完成结果 publish 只更新阅读与索引，不再收费识别。start 可能发起付费调用，仍受文件缓存和全局页数预算约束。任意其他 article 通过登录会话且具备 `feed.admin` 的 `/internal/pdf-ocr/<id>` 管理。
 
 查看 D1 `pdf_ocr_jobs` 了解失败和延期；`pdf_ocr_usage` 是按日/月的预留/成功处理页数与估算费用，`pdf_ocr_budget` 是原子配额状态。超时可能已经收费，因此失败不释放预算，不要为恢复任务随意清除 calls/attempts。`PDF_OCR_ENABLED=false` 只停止新自动入队，已启动 Workflow 仍可完成；不清空 key、数据或已发布文字。
 
@@ -485,7 +487,7 @@ node scripts/compare-ocr.mjs publish textin-xparse-auto
 
 先应用 `0006_sources.sql`，在独立环境绑定 `DISCOVERY` → `DiscoveryWorkflow`，并启用 `SOURCE_MANAGEMENT_ENABLED`、`TASK_RUNTIME_ENABLED` 与 `CRAWL_ENABLED`。不要在未完成隔离验收前修改生产开关。旧 MVP 的五个来源沿用原 ID；新站点和栏目保存在 D1，动态开关关闭时仍使用旧来源清单。
 
-管理入口 `/admin/sources` 使用既有管理员凭据；保存站点后创建栏目草稿。配置包含同站 HTTPS 列表 URL、文章路径正则、含附件的通知样本、刷新间隔（1800–604800 秒）与 IANA 时区。修改抓取配置须先暂停栏目；版本递增后要重新验证。暂停站点或栏目只停止新增调度，已有存档仍可阅读。
+管理入口 `/admin/sources` 复用 Auth 登录并检查 `feed.admin`；保存站点后创建栏目草稿。配置包含同站 HTTPS 列表 URL、文章路径正则、含附件的通知样本、刷新间隔（1800–604800 秒）与 IANA 时区。修改抓取配置须先暂停栏目；版本递增后要重新验证。暂停站点或栏目只停止新增调度，已有存档仍可阅读。
 
 `POST /internal/sites` 接收 `{name, origin, requestId}`；`requestId` 为 8–100 个 URI-safe 字符，同请求同内容重试返回同一站点，同请求不同内容返回 409。Origin 只约束抓取域，不合并逻辑站点；不同创建请求可以建立同 Origin 的独立站点。栏目身份按站点与列表 URL 确定，通知身份仍按 canonical URL 跨栏目去重。管理页在内存中保留尚未确认的创建请求，网络失败后原样重试，成功或退出时清理。
 

@@ -41,7 +41,7 @@ test('incompatible old archives cannot keep later eligible archives outside ever
       await f.db.prepare('UPDATE articles SET url=? WHERE id=?').bind(`https://jwc.cqu.edu.cn/old/${id}.htm`,id).run();
     }
     const eligible='999999999999999999999999';await seedDue(f,eligible);
-    for(let i=0;i<3;i++)assert.equal((await adminRequest(f.mf,'/internal/rechecks',{})).status,202);
+    for(let i=0;i<3;i++)assert.equal((await adminRequest(f.mf, f.admin,'/internal/rechecks',{})).status,202);
     assert.deepEqual((await f.db.prepare("SELECT article_id FROM tasks WHERE kind='recheck'").all()).results,[{article_id:eligible}]);
     assert.equal((await f.db.prepare("SELECT COUNT(*) AS n FROM articles WHERE next_recheck_at=0").first()).n,20);
   }finally{await f.mf.dispose();}
@@ -58,9 +58,9 @@ test('a pause or configuration change before atomic admission creates no recheck
       const db={prepare:sql=>f.db.prepare(sql),async batch(statements){
         if(!changed){
           changed=true;
-          assert.equal((await adminRequest(f.mf,'/internal/sources/jwc',{enabled:false},{method:'PATCH'})).status,200);
+          assert.equal((await adminRequest(f.mf, f.admin,'/internal/sources/jwc',{enabled:false},{method:'PATCH'})).status,200);
           if(change==='reconfigure'){
-            const edited=await adminRequest(f.mf,'/internal/sources/jwc',{name:'changed configuration',refreshIntervalSec:3600},{method:'PATCH'});
+            const edited=await adminRequest(f.mf, f.admin,'/internal/sources/jwc',{name:'changed configuration',refreshIntervalSec:3600},{method:'PATCH'});
             assert.equal(edited.status,200,JSON.stringify(edited.body));
             // Fault seam: sample revalidation finishes before the earlier admission commits.
             await f.db.prepare("UPDATE sources SET validation_state='verified',enabled=1 WHERE id='jwc'").run();
@@ -82,17 +82,17 @@ test('a shared archive uses another eligible associated source when its original
       VALUES ('secondary','secondary','https://jwc.cqu.edu.cn/',?,'https://jwc.cqu.edu.cn/second.htm',?,1,'verified')`)
       .bind(staticSiteId,JSON.stringify({articlePattern:'^/info/\\d+/\\d+\\.htm$'})).run();
     await seedDue(f,'303030303030303030303030',['secondary']);
-    assert.equal((await adminRequest(f.mf,'/internal/sources/jwc',{enabled:false},{method:'PATCH'})).status,200);
-    const scheduled=await adminRequest(f.mf,'/internal/rechecks',{limit:1});
+    assert.equal((await adminRequest(f.mf, f.admin,'/internal/sources/jwc',{enabled:false},{method:'PATCH'})).status,200);
+    const scheduled=await adminRequest(f.mf, f.admin,'/internal/rechecks',{limit:1});
     assert.equal(scheduled.body.scheduled.length,1);
     assert.equal((await f.db.prepare("SELECT source_id FROM tasks WHERE kind='recheck'").first()).source_id,'secondary');
     assert.deepEqual(await recheckFacts(f.db),{tasks:1,outboxes:1,advanced:1});
-    assert.deepEqual((await adminRequest(f.mf,'/internal/rechecks',{limit:1})).body.scheduled,[]);
+    assert.deepEqual((await adminRequest(f.mf, f.admin,'/internal/rechecks',{limit:1})).body.scheduled,[]);
   }finally{await f.mf.dispose();}
 });
 
 test('bounded recheck admission schedules ready articles by configured age tiers and deduplicates replay', async () => {
-  const { mf, db } = await subscriptionsFixture({
+  const { mf, db, admin } = await subscriptionsFixture({
     recheckMigration: true,
     recheckVars: {
       RECHECK_RECENT_AFTER_SEC: '1728000',
@@ -129,7 +129,7 @@ test('bounded recheck admission schedules ready articles by configured age tiers
         WHERE id=?`).bind(old, old, old),
     ]);
 
-    const scheduled = await adminRequest(mf, '/internal/rechecks', { limit: 10 });
+    const scheduled = await adminRequest(mf, admin, '/internal/rechecks', { limit: 10 });
     if (scheduled.status !== 202) {
       const errors = await (await mf.dispatchFetch('https://feed.test/__test/errors')).text();
       assert.fail(`${JSON.stringify(scheduled.body)}\nworker errors: ${errors}`);
@@ -148,13 +148,13 @@ test('bounded recheck admission schedules ready articles by configured age tiers
       [{ state: 'queued' }, { state: 'queued' }]);
 
     await db.prepare('UPDATE articles SET next_recheck_at=0 WHERE id IN (?,?)').bind(recent, old).run();
-    const replay = await adminRequest(mf, '/internal/rechecks', { limit: 10 });
+    const replay = await adminRequest(mf, admin, '/internal/rechecks', { limit: 10 });
     assert.equal(replay.status, 202);
     assert.deepEqual(replay.body.scheduled, []);
     assert.equal(replay.body.duplicate, true);
     assert.equal((await db.prepare(`SELECT COUNT(*) AS n FROM tasks WHERE kind='recheck'`).first()).n, 2);
 
-    const status = await adminRequest(mf, '/internal/rechecks', undefined, { method: 'GET' });
+    const status = await adminRequest(mf, admin, '/internal/rechecks', undefined, { method: 'GET' });
     assert.equal(status.status, 200, JSON.stringify(status.body));
     assert.equal(status.body.due, 0);
     assert.equal(status.body.readyArticles, 2);
@@ -166,7 +166,7 @@ test('bounded recheck admission schedules ready articles by configured age tiers
 
 test('a controlled source recheck produces immutable versions, RSS updates, and one immediate update email', async () => {
   const submissions = [];
-  const { mf, db, login, mail, mailClock, replayMail } = await subscriptionsFixture({
+  const { mf, db, login, mail, mailClock, replayMail, admin } = await subscriptionsFixture({
     clock: start,
     mailHarness: { async fetch(request) {
       submissions.push({ key: request.headers.get('idempotency-key'), body: await request.json() });
@@ -199,7 +199,7 @@ test('a controlled source recheck produces immutable versions, RSS updates, and 
     });
     assert.equal(subscription.status, 200, JSON.stringify(subscription.body));
 
-    const scheduled = await adminRequest(mf, '/internal/rechecks', { limit: 1 });
+    const scheduled = await adminRequest(mf, admin, '/internal/rechecks', { limit: 1 });
     if (scheduled.status !== 202) {
       const errors = await (await mf.dispatchFetch('https://feed.test/__test/errors')).text();
       assert.fail(`${JSON.stringify(scheduled.body)}\nworker errors: ${errors}`);
@@ -257,7 +257,7 @@ test('a controlled source recheck produces immutable versions, RSS updates, and 
     assert.equal(items(xml).filter(item => item.includes('<category>更新</category>')).length, 1);
 
     await db.prepare('UPDATE articles SET next_recheck_at=? WHERE id=?').bind(Date.now() - 2000, articleId).run();
-    const revertedSchedule = await adminRequest(mf, '/internal/rechecks', { limit: 1 });
+    const revertedSchedule = await adminRequest(mf, admin, '/internal/rechecks', { limit: 1 });
     const revertedTaskId = revertedSchedule.body.scheduled[0];
     await moduleInvoke(mf, '/__test/recheck-source', { mode: 'reverted' });
     const revertedCapture = await moduleInvoke(mf, '/__test/recheck-capture', { taskId: revertedTaskId });
@@ -286,7 +286,7 @@ test('a controlled source recheck produces immutable versions, RSS updates, and 
     assert.equal(new Set(itemGuids(revertedXml)).size, 3);
 
     await db.prepare('UPDATE articles SET next_recheck_at=? WHERE id=?').bind(Date.now() - 1000, articleId).run();
-    const failureSchedule = await adminRequest(mf, '/internal/rechecks', { limit: 1 });
+    const failureSchedule = await adminRequest(mf, admin, '/internal/rechecks', { limit: 1 });
     await moduleInvoke(mf, '/__test/recheck-source', { mode: 'unavailable' });
     const failure = await moduleInvoke(mf, '/__test/recheck-capture', { taskId: failureSchedule.body.scheduled[0] });
     assert.equal(failure.status, 200);

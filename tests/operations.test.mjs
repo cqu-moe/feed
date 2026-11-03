@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {build} from 'esbuild';
 import {Miniflare,convertV4MiniflareOptions} from 'miniflare';
+import {loginAdmin,oauthProvider} from './helpers/oauth-provider.mjs';
 
 const now=Date.now();
 const ids={
@@ -44,6 +45,7 @@ const workflowStub={
 };
 
 async function fixture({bindings={}}={}){
+  const provider=oauthProvider();
   const bundle=await build({
     stdin:{contents:`import worker from './worker/index.mjs';
       import {handleFeedJobs} from './worker/task-runtime.mjs';
@@ -121,8 +123,8 @@ async function fixture({bindings={}}={}){
   const mf=new Miniflare(convertV4MiniflareOptions({
     modules:true,script:bundle.outputFiles[0].text,
     compatibilityDate:'2026-10-11',compatibilityFlags:['nodejs_compat'],
-    bindings:{ADMIN_TOKEN:'test-admin-token',TASK_RUNTIME_ENABLED:'true',CRAWL_ENABLED:'true',MAX_TASK_ATTEMPTS:'3',...bindings},
-    d1Databases:['DB'],r2Buckets:['ARCHIVE'],
+    bindings:{...provider.bindings,BASE_URL:'https://feed.test',TASK_RUNTIME_ENABLED:'true',CRAWL_ENABLED:'true',MAX_TASK_ATTEMPTS:'3',...bindings},
+    d1Databases:['DB'],r2Buckets:['ARCHIVE'],serviceBindings:{AUTH:request=>provider.fetch(request)},
     queueProducers:{
       FEED_JOBS:{queueName:'feed-jobs'},
       FEED_EVENTS:{queueName:'feed-events'},
@@ -130,14 +132,14 @@ async function fixture({bindings={}}={}){
     },
   }));
   const db=await mf.getD1Database('DB');
-  for(const name of ['0001_feed.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql',
+  for(const name of ['0001_feed.sql','0002_auth.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql',
     '0006_sources.sql','0007_archive_versions.sql','0008_content_events.sql','0009_subscriptions.sql',
     '0010_subscription_editing.sql','0011_archive_migration.sql','0013_notification_matching.sql',
     '0014_mail_delivery.sql','0015_history_backfill.sql','0016_mail_digests.sql','0018_outbox_receipts.sql','0019_site_execution_leases.sql']){
     await applyMigration(db,await readFile(`migrations/${name}`,'utf8'));
   }
   await seed(db);
-  return {mf,db};
+  return {mf,db,admin:await loginAdmin(mf,provider)};
 }
 
 async function seed(db){
@@ -226,14 +228,14 @@ async function seed(db){
 }
 
 test('operations diagnostics links bounded business identities and redacts unsafe facts',async()=>{
-  const {mf,db}=await fixture();
+  const {mf,db,admin}=await fixture();
   try{
     const unsafe='Provider rejected {"token":"synthetic-json-secret","api_key":"synthetic-json-key","clientSecret":"synthetic-client-secret"}; Authorization: Basic synthetic-basic; Bearer synthetic-bearer; reader@example.test https://a.test/?token=synthetic-query';
     await db.prepare('UPDATE tasks SET last_error=? WHERE id=?').bind(unsafe,ids.captureTask).run();
     await db.prepare('UPDATE task_attempts SET error_code=? WHERE task_id=?').bind(unsafe,ids.captureTask).run();
     await db.prepare('UPDATE revision_requirements SET error_code=? WHERE revision_id=?').bind(unsafe,ids.revision).run();
     const response=await mf.dispatchFetch('https://feed.test/internal/operations/diagnostics',{
-      headers:{Authorization:'Bearer test-admin-token'},
+      headers:admin.headers,
     });
     assert.equal(response.status,200);
     const body=await response.json();
@@ -289,10 +291,10 @@ test('operations diagnostics links bounded business identities and redacts unsaf
 });
 
 test('operations OCR metrics follow the current UTC budget period without rewriting it',async()=>{
-  const {mf,db}=await fixture();
+  const {mf,db,admin}=await fixture();
   const diagnostics=async()=>{
     const response=await mf.dispatchFetch('https://feed.test/internal/operations/diagnostics',{
-      headers:{Authorization:'Bearer test-admin-token'},
+      headers:admin.headers,
     });
     assert.equal(response.status,200,await response.clone().text());
     return (await response.json()).metrics;
@@ -331,10 +333,10 @@ test('operations OCR metrics follow the current UTC budget period without rewrit
 });
 
 test('operations DLQ replay is targeted and preserves the persisted business identity',async()=>{
-  const {mf,db}=await fixture();
+  const {mf,db,admin}=await fixture();
   try{
     const replay=await mf.dispatchFetch('https://feed.test/internal/operations/replay',{
-      method:'POST',headers:{Authorization:'Bearer test-admin-token','Content-Type':'application/json'},
+      method:'POST',headers:{...admin.headers,'Content-Type':'application/json'},
       body:JSON.stringify({outboxId:ids.mailOutbox,topic:'feed-mail'}),
     });
     assert.equal(replay.status,202,await replay.text());
@@ -345,7 +347,7 @@ test('operations DLQ replay is targeted and preserves the persisted business ide
     assert.deepEqual(receipt,{state:'queued',attempts:2,replay_count:1});
 
     const wrongTopic=await mf.dispatchFetch('https://feed.test/internal/operations/replay',{
-      method:'POST',headers:{Authorization:'Bearer test-admin-token','Content-Type':'application/json'},
+      method:'POST',headers:{...admin.headers,'Content-Type':'application/json'},
       body:JSON.stringify({outboxId:ids.mailOutbox,topic:'feed-jobs'}),
     });
     assert.equal(wrongTopic.status,409);
@@ -353,7 +355,7 @@ test('operations DLQ replay is targeted and preserves the persisted business ide
       .bind(ids.mailOutbox).run();
     assert.equal(processed.meta.changes,1);
     const rejected=await mf.dispatchFetch('https://feed.test/internal/operations/replay',{
-      method:'POST',headers:{Authorization:'Bearer test-admin-token','Content-Type':'application/json'},
+      method:'POST',headers:{...admin.headers,'Content-Type':'application/json'},
       body:JSON.stringify({outboxId:ids.mailOutbox,topic:'feed-mail'}),
     });
     assert.equal(rejected.status,409);
@@ -364,15 +366,15 @@ test('operations DLQ replay is targeted and preserves the persisted business ide
 });
 
 test('targeted task recovery does not duplicate active workflows and retries only terminated instances',async()=>{
-  const {mf,db}=await fixture();
+  const {mf,db,admin}=await fixture();
   try{
-    const active=await adminPost(mf,`/internal/operations/tasks/${ids.activeTask}/recover`);
+    const active=await adminPost(mf,admin,`/internal/operations/tasks/${ids.activeTask}/recover`);
     assert.equal(active.status,202);
     assert.deepEqual(await active.json(),{id:ids.activeTask,state:'running',recovered:0,workflowStatus:'waiting'});
     assert.equal((await taskRow(db,ids.activeTask)).attemptNo,1);
     assert.deepEqual((await getSends(mf)).FEED_JOBS??[],[]);
 
-    const launch=await adminPost(mf,`/internal/operations/tasks/${ids.launchTask}/recover`);
+    const launch=await adminPost(mf,admin,`/internal/operations/tasks/${ids.launchTask}/recover`);
     assert.equal(launch.status,202);
     assert.deepEqual(await launch.json(),{id:ids.launchTask,state:'queued',recovered:1,workflowStatus:null});
     const launchSends=(await getSends(mf)).FEED_JOBS;
@@ -382,7 +384,7 @@ test('targeted task recovery does not duplicate active workflows and retries onl
     });
 
     await setWorkflowStatus(mf,'errored');
-    const retried=await adminPost(mf,`/internal/operations/tasks/${ids.activeTask}/recover`);
+    const retried=await adminPost(mf,admin,`/internal/operations/tasks/${ids.activeTask}/recover`);
     assert.equal(retried.status,202);
     assert.deepEqual(await retried.json(),{id:ids.activeTask,state:'queued',recovered:1,workflowStatus:'errored'});
     const row=await taskRow(db,ids.activeTask);
@@ -398,12 +400,12 @@ test('targeted task recovery does not duplicate active workflows and retries onl
 
 test('failed and due deferred recovery requires a confirmed terminal platform instance',async()=>{
   for(const state of ['failed','deferred']){
-    const {mf,db}=await fixture();
+    const {mf,db,admin}=await fixture();
     try{
       await db.prepare('UPDATE tasks SET state=?,due_at=? WHERE id=?').bind(state,now-1,ids.activeTask).run();
       for(const platform of ['waiting','running','paused','queued','waitingForPause','rollingBack','unknown','unavailable']){
         await setWorkflowStatus(mf,platform);
-        const response=await adminPost(mf,`/internal/operations/tasks/${ids.activeTask}/recover`);
+        const response=await adminPost(mf,admin,`/internal/operations/tasks/${ids.activeTask}/recover`);
         if(['unknown','unavailable'].includes(platform))assert.equal(response.status,503);
         else{
           assert.equal(response.status,202);
@@ -412,8 +414,8 @@ test('failed and due deferred recovery requires a confirmed terminal platform in
         assert.equal((await taskRow(db,ids.activeTask)).attemptNo,1);
         assert.deepEqual((await getSends(mf)).FEED_JOBS??[],[]);
       }
-      await adminPost(mf,'/fixture/workflow-status',{status:'complete',barrier:2});
-      const responses=await Promise.all([1,2].map(()=>adminPost(mf,`/internal/operations/tasks/${ids.activeTask}/recover`)));
+      await adminPost(mf,admin,'/fixture/workflow-status',{status:'complete',barrier:2});
+      const responses=await Promise.all([1,2].map(()=>adminPost(mf,admin,`/internal/operations/tasks/${ids.activeTask}/recover`)));
       const results=await Promise.all(responses.map(response=>response.json()));
       assert.equal(results.reduce((sum,result)=>sum+result.recovered,0),1);
       assert.deepEqual(await taskRow(db,ids.activeTask),{state:'queued',attemptNo:2});
@@ -423,15 +425,15 @@ test('failed and due deferred recovery requires a confirmed terminal platform in
 });
 
 test('targeted dispatch and operations replay share the durable discovery admission budget',async()=>{
-  const {mf,db}=await fixture({bindings:{
+  const {mf,db,admin}=await fixture({bindings:{
     SOURCE_MANAGEMENT_ENABLED:'true',
     MAX_LIVE_DISCOVERY_TASKS_PER_RUN:'0',
   }});
   try{
-    const replay=await adminPost(mf,'/internal/operations/replay',{outboxId:ids.jobOutbox,topic:'feed-jobs'});
+    const replay=await adminPost(mf,admin,'/internal/operations/replay',{outboxId:ids.jobOutbox,topic:'feed-jobs'});
     assert.equal(replay.status,409);
 
-    const recovered=await adminPost(mf,`/internal/operations/tasks/${ids.launchTask}/recover`);
+    const recovered=await adminPost(mf,admin,`/internal/operations/tasks/${ids.launchTask}/recover`);
     assert.equal(recovered.status,202);
     assert.deepEqual(await recovered.json(),{
       id:ids.launchTask,state:'queued',recovered:0,workflowStatus:null,
@@ -446,17 +448,17 @@ test('targeted dispatch and operations replay share the durable discovery admiss
 
 test('replay preserves a fast consumer processed receipt even when the queue response is lost',async()=>{
   for(const mode of ['consume','consume-and-fail']){
-    const {mf,db}=await fixture();
+    const {mf,db,admin}=await fixture();
     try{
       await db.prepare("UPDATE mail_messages SET state='accepted' WHERE id=?").bind(ids.mailMessage).run();
-      await adminPost(mf,'/fixture/queue-mode',{mode});
-      const response=await adminPost(mf,'/internal/operations/replay',{outboxId:ids.mailOutbox,topic:'feed-mail'});
+      await adminPost(mf,admin,'/fixture/queue-mode',{mode});
+      const response=await adminPost(mf,admin,'/internal/operations/replay',{outboxId:ids.mailOutbox,topic:'feed-mail'});
       assert.equal(response.status,mode==='consume'?202:503);
       const receipt=await db.prepare('SELECT state,processed_at,last_error FROM outbox_receipts WHERE outbox_id=?').bind(ids.mailOutbox).first();
       assert.equal(receipt.state,'processed');
       assert.ok(receipt.processed_at>0);
       assert.equal(receipt.last_error,null);
-      const again=await adminPost(mf,'/internal/operations/replay',{outboxId:ids.mailOutbox,topic:'feed-mail'});
+      const again=await adminPost(mf,admin,'/internal/operations/replay',{outboxId:ids.mailOutbox,topic:'feed-mail'});
       assert.equal(again.status,409);
       assert.equal((await getSends(mf)).FEED_MAIL.length,1);
     }finally{await mf.dispose();}
@@ -464,15 +466,15 @@ test('replay preserves a fast consumer processed receipt even when the queue res
 });
 
 test('replay atomically starts a fresh retry window for simultaneous and repeated requests',async()=>{
-  const {mf,db}=await fixture();
+  const {mf,db,admin}=await fixture();
   try{
-    const replay=()=>adminPost(mf,'/internal/operations/replay',{outboxId:ids.mailOutbox,topic:'feed-mail'});
+    const replay=()=>adminPost(mf,admin,'/internal/operations/replay',{outboxId:ids.mailOutbox,topic:'feed-mail'});
     const concurrent=await Promise.all([replay(),replay()]);
     assert.deepEqual(concurrent.map(response=>response.status).sort(),[202,409]);
     assert.equal((await replay()).status,409);
     assert.equal((await getSends(mf)).FEED_MAIL.length,1);
     const diagnostics=await mf.dispatchFetch('https://feed.test/internal/operations/diagnostics',{
-      headers:{Authorization:'Bearer test-admin-token'},
+      headers:admin.headers,
     }).then(response=>response.json());
     assert.deepEqual(diagnostics.queues.find(queue=>queue.topic==='feed-mail').deadLetters,[]);
     // Expire only the new replay window; the original outbox identity and age stay unchanged.
@@ -481,7 +483,7 @@ test('replay atomically starts a fresh retry window for simultaneous and repeate
     assert.deepEqual((await getSends(mf)).FEED_MAIL,Array(2).fill(JSON.parse(await outboxPayload(db,ids.mailOutbox))));
     assert.equal((await db.prepare('SELECT replay_count FROM outbox_receipts WHERE outbox_id=?').bind(ids.mailOutbox).first()).replay_count,2);
     await db.prepare('UPDATE outbox_receipts SET last_replayed_at=? WHERE outbox_id=?').bind(now-16*60_000,ids.mailOutbox).run();
-    await adminPost(mf,'/fixture/queue-mode',{mode:'fail'});
+    await adminPost(mf,admin,'/fixture/queue-mode',{mode:'fail'});
     assert.equal((await replay()).status,503);
     assert.equal((await replay()).status,409);
     assert.equal((await getSends(mf)).FEED_MAIL.length,3);
@@ -489,7 +491,7 @@ test('replay atomically starts a fresh retry window for simultaneous and repeate
 });
 
 test('OCR diagnostics trace the complete descriptor to bounded requirements across source revisions',async()=>{
-  const {mf,db}=await fixture();
+  const {mf,db,admin}=await fixture();
   try{
     const ocrId='f'.repeat(24),ocrOutbox='ef'.repeat(12),optionsHash='9'.repeat(64);
     const descriptor={v:1,inputHash:hashes.artifact,processor:'mistral-ocr',processorVersion:'v1',optionsHash,options:{model:'test'}};
@@ -520,7 +522,7 @@ test('OCR diagnostics trace the complete descriptor to bounded requirements acro
           VALUES (?,?,'body_ocr',1,'pending',?,?,?,?)`).bind(revision,slot,hash,processor,version,options).run();
       }
     }
-    const diagnostics=limit=>mf.dispatchFetch(`https://feed.test/internal/operations/diagnostics?limit=${limit}`,{headers:{Authorization:'Bearer test-admin-token'}}).then(response=>response.json());
+    const diagnostics=limit=>mf.dispatchFetch(`https://feed.test/internal/operations/diagnostics?limit=${limit}`,{headers:admin.headers}).then(response=>response.json());
     const body=await diagnostics(20),ocr=body.tasks.find(task=>task.id===ocrId);
     assert.equal(ocr.sourceId,'ocr0');
     assert.equal(ocr.revisionId,revisions[0]);
@@ -538,16 +540,16 @@ test('OCR diagnostics trace the complete descriptor to bounded requirements acro
 });
 
 test('operations endpoints are admin-only and bounded',async()=>{
-  const {mf}=await fixture();
+  const {mf,admin}=await fixture();
   try{
     const unauthorized=await mf.dispatchFetch('https://feed.test/internal/operations/diagnostics');
     assert.equal(unauthorized.status,401);
-    const invalid=await adminPost(mf,'/internal/operations/tasks/ffffffffffffffffffffffff/recover');
+    const invalid=await adminPost(mf,admin,'/internal/operations/tasks/ffffffffffffffffffffffff/recover');
     assert.equal(invalid.status,404);
-    const unsupported=await adminPost(mf,`/internal/operations/tasks/${ids.matchTask}/recover`);
+    const unsupported=await adminPost(mf,admin,`/internal/operations/tasks/${ids.matchTask}/recover`);
     assert.equal(unsupported.status,400);
     const bounded=await mf.dispatchFetch('https://feed.test/internal/operations/diagnostics?limit=999',{
-      headers:{Authorization:'Bearer test-admin-token'},
+      headers:admin.headers,
     });
     assert.equal(bounded.status,200);
     assert.equal((await bounded.json()).limit,100);
@@ -558,28 +560,28 @@ test('operations endpoints are admin-only and bounded',async()=>{
 
 test('disabled crawl or runtime rejects recovery and job replay without blocking diagnostics or mail replay',async()=>{
   for(const flag of ['CRAWL_ENABLED','TASK_RUNTIME_ENABLED']){
-    const {mf,db}=await fixture({bindings:{[flag]:'false'}});
+    const {mf,db,admin}=await fixture({bindings:{[flag]:'false'}});
     try{
       const before=await taskRow(db,ids.launchTask);
-      const recovered=await adminPost(mf,`/internal/operations/tasks/${ids.launchTask}/recover`);
+      const recovered=await adminPost(mf,admin,`/internal/operations/tasks/${ids.launchTask}/recover`);
       assert.equal(recovered.status,503,flag);
-      const replay=await adminPost(mf,'/internal/operations/replay',{outboxId:ids.jobOutbox,topic:'feed-jobs'});
+      const replay=await adminPost(mf,admin,'/internal/operations/replay',{outboxId:ids.jobOutbox,topic:'feed-jobs'});
       assert.equal(replay.status,503,flag);
       assert.deepEqual(await taskRow(db,ids.launchTask),before);
       assert.deepEqual((await getSends(mf)).FEED_JOBS??[],[]);
       const diagnostics=await mf.dispatchFetch('https://feed.test/internal/operations/diagnostics',{
-        headers:{Authorization:'Bearer test-admin-token'},
+        headers:admin.headers,
       });
       assert.equal(diagnostics.status,200);
-      const mail=await adminPost(mf,'/internal/operations/replay',{outboxId:ids.mailOutbox,topic:'feed-mail'});
+      const mail=await adminPost(mf,admin,'/internal/operations/replay',{outboxId:ids.mailOutbox,topic:'feed-mail'});
       assert.equal(mail.status,202);
     }finally{await mf.dispose();}
   }
 });
 
-async function adminPost(mf,path,body){
+async function adminPost(mf,admin,path,body){
   return mf.dispatchFetch(`https://feed.test${path}`,{
-    method:'POST',headers:{Authorization:'Bearer test-admin-token','Content-Type':'application/json'},
+    method:'POST',headers:{...admin.headers,'Content-Type':'application/json'},
     ...(body?{body:JSON.stringify(body)}:{}),
   });
 }

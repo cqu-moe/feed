@@ -10,7 +10,7 @@ import {
 } from './helpers/subscriptions-fixture.mjs';
 
 test('a valid private RSS emits dated historical and update events with stable identity and conditional reads', async () => {
-  const { mf, login, setPolicy, setRecipient, setPolicyService } = await subscriptionsFixture();
+  const { mf, login, setPolicy, setRecipient, setPolicyService, admin } = await subscriptionsFixture();
   try {
     const cookie = await login('rss-reader');
     const created = await subscriptionCall(mf, '/api/subscriptions', {
@@ -175,7 +175,7 @@ test('a valid private RSS emits dated historical and update events with stable i
 });
 
 test('RSS eligibility follows the subscription target source date association', async () => {
-  const { mf, login } = await subscriptionsFixture();
+  const { mf, login, admin } = await subscriptionsFixture();
   try {
     const cookie = await login('rss-source-date-reader');
     const subscriptions = [];
@@ -247,7 +247,7 @@ test('RSS eligibility follows the subscription target source date association', 
 });
 
 test('latest source date corrections govern RSS eligibility and invalidate prior ETags', async () => {
-  const { mf, login } = await subscriptionsFixture();
+  const { mf, login, admin } = await subscriptionsFixture();
   try {
     const cookie = await login('rss-correction-reader');
     const subscriptions = new Map();
@@ -301,7 +301,7 @@ test('latest source date corrections govern RSS eligibility and invalidate prior
     ]));
     const emptyEtag = await rssEtag(mf, subscriptions.get('jwc'));
 
-    const verified = await adminRequest(mf, `/internal/notification-events/${eventId}/date-verification`, {
+    const verified = await adminRequest(mf, admin, `/internal/notification-events/${eventId}/date-verification`, {
       requestId: 'verify-jwc-rss-minute',
       sourceId: 'jwc',
       verifiedBy: 'rss-admin',
@@ -326,7 +326,7 @@ test('latest source date corrections govern RSS eligibility and invalidate prior
       ['news', []],
     ]));
 
-    const hidden = await adminRequest(mf, `/internal/notification-events/${eventId}/date-verification`, {
+    const hidden = await adminRequest(mf, admin, `/internal/notification-events/${eventId}/date-verification`, {
       requestId: 'verify-jwc-rss-unknown',
       sourceId: 'jwc',
       verifiedBy: 'rss-admin',

@@ -5,12 +5,12 @@ import {promisify} from 'node:util';
 import {run} from '../scripts/provision-sources.mjs';
 
 const exec = promisify(execFile);
-const secret = 'secret-admin-token';
+const sessionCookie = '__Host-feed_session=test-session-cookie';
 const RESTORE_IDS = ['civil', 'intex', 'news', 'xgb'];
 
 test('default dry run reads the catalog without credentials or network', async () => {
   const {stdout, stderr} = await exec(process.execPath, ['scripts/provision-sources.mjs'], {
-    env: {...process.env, FEED_ADMIN_TOKEN: ''},
+    env: {...process.env, FEED_SESSION_COOKIE: ''},
   });
   const summary = JSON.parse(stdout);
   assert.equal(summary.mode, 'dry-run');
@@ -19,7 +19,7 @@ test('default dry run reads the catalog without credentials or network', async (
   assert.equal(summary.sites.flatMap(site => site.columns).length, 51);
   assert.ok(summary.sites.flatMap(site => site.columns).every(column => column.refreshIntervalSec === 86400));
   assert.equal(stderr, '');
-  assert.equal(stdout.includes(secret), false);
+  assert.equal(stdout.includes(sessionCookie), false);
 });
 
 test('transport failures retry bounded reads without replaying a possibly committed write', async t => {
@@ -27,7 +27,7 @@ test('transport failures retry bounded reads without replaying a possibly commit
     const api = apiFixture();
     let failures = 0;
     const attempt = run(['--apply', '--catalog', 'tests/fixtures/one-column.json'], {
-      baseUrl: 'https://feed.test', token: secret, sleep: async () => {},
+      baseUrl: 'https://feed.test', cookie: sessionCookie, sleep: async () => {},
       fetch: async (url, options) => {
         if (new URL(url).pathname === '/internal/sites') {
           if (options.method === 'GET' && mode !== 'committed-write' && (mode === 'persistent-read' || failures === 0)) {
@@ -68,10 +68,10 @@ test('repeat apply reuses enabled verified sources without recreating or reverif
     articlePattern: '^/info/\\d+/\\d+\\.htm$',
   };
   api.sites.push({id: 'site-uc', origin: 'https://uc.cqu.edu.cn/', enabled: true});
-  await run(['--apply', '--catalog', 'tests/fixtures/one-column.json'], {baseUrl: 'https://feed.test', token: secret, fetch: api.fetch});
+  await run(['--apply', '--catalog', 'tests/fixtures/one-column.json'], {baseUrl: 'https://feed.test', cookie: sessionCookie, fetch: api.fetch});
   const callsBefore = api.calls.length;
 
-  const summary = await run(['--apply', '--catalog', 'tests/fixtures/one-column.json'], {baseUrl: 'https://feed.test', token: secret, fetch: api.fetch});
+  const summary = await run(['--apply', '--catalog', 'tests/fixtures/one-column.json'], {baseUrl: 'https://feed.test', cookie: sessionCookie, fetch: api.fetch});
 
   assert.equal(summary.ok, true);
   assert.equal(summary.results[0].status, 'already-enabled-verified');
@@ -82,7 +82,7 @@ test('repeat apply reuses enabled verified sources without recreating or reverif
 test('failed verification stays disabled and a quota task error stops the run', async () => {
   const api = apiFixture({outcomes: {failing: {state: 'failed', error: 'HTTP 402: insufficient credits'}, passing: {state: 'verified'}}});
   const summary = await run(['--apply', '--catalog', catalogPath('failing-passing.json')], {
-    baseUrl: 'https://feed.test', token: secret, fetch: api.fetch,
+    baseUrl: 'https://feed.test', cookie: sessionCookie, fetch: api.fetch,
     sleep: async () => {
       for (const source of Object.values(api.sources)) {
         const outcome = api.outcomes[source.id];
@@ -100,13 +100,13 @@ test('failed verification stays disabled and a quota task error stops the run', 
   assert.equal(api.sources.failing.enabled, false);
   assert.equal(api.sources.failing.validationState, 'failed');
   assert.equal(summary.quotaStopped, true);
-  assert.equal(JSON.stringify(summary).includes(secret), false);
+  assert.equal(JSON.stringify(summary).includes(sessionCookie), false);
 });
 
 test('draft source resumes its running validation task without duplicate submission', async () => {
   const api = apiFixture({sources: [draftSource('running')]});
   const summary = await run(['--apply', '--catalog', catalogPath('running.json')], {
-    baseUrl: 'https://feed.test', token: secret, fetch: api.fetch, sleep: async () => {
+    baseUrl: 'https://feed.test', cookie: sessionCookie, fetch: api.fetch, sleep: async () => {
       api.sources.running.validationState = 'verified';
       api.tasks.running.state = 'succeeded';
     },
@@ -128,7 +128,7 @@ test('configuration drift pauses, patches, and revalidates an existing source', 
   }]});
   api.sites.push({id: 'site-uc', origin: 'https://uc.cqu.edu.cn/', enabled: true});
   const summary = await run(['--apply', '--catalog', 'tests/fixtures/one-column.json', '--retry-failed'], {
-    baseUrl: 'https://feed.test', token: secret, fetch: api.fetch,
+    baseUrl: 'https://feed.test', cookie: sessionCookie, fetch: api.fetch,
   });
 
   const patch = api.calls.find(call => call.method === 'PATCH' && call.body?.refreshIntervalSec === 3600);
@@ -146,7 +146,7 @@ test('failed source with a deferred task resumes it instead of submitting a dupl
   }]});
   api.tasks.deferred.state = 'deferred';
   const summary = await run(['--apply', '--catalog', catalogPath('running.json')], {
-    baseUrl: 'https://feed.test', token: secret, fetch: api.fetch, sleep: async () => {
+    baseUrl: 'https://feed.test', cookie: sessionCookie, fetch: api.fetch, sleep: async () => {
       api.tasks.deferred.state = 'succeeded';
       api.sources.deferred.validationState = 'verified';
     },
@@ -166,7 +166,7 @@ test('xgb restore updates its sample and waits for a running verification to fin
   }))]});
   let seenRunningTask = false;
   const summary = await run(['--apply', '--catalog', catalogPath('xgb-restore.json'), '--restore-existing'], {
-    baseUrl: 'https://feed.test', token: secret, fetch: api.fetch, sleep: async () => {
+    baseUrl: 'https://feed.test', cookie: sessionCookie, fetch: api.fetch, sleep: async () => {
       if (seenRunningTask) throw new Error('poll should stop at terminal source and task state');
       seenRunningTask = true;
       api.tasks['xgb-task'].state = 'succeeded';
@@ -208,7 +208,7 @@ function apiFixture({sources = [], outcomes = {}} = {}) {
   let created = 0;
   const state = {
     calls: [],
-    credentials: secret,
+    credentials: sessionCookie,
     sites: [],
     sources: Object.fromEntries(sources.map(source => [source.id, source])),
     tasks: Object.fromEntries(sources.filter(source => source.validationTaskId).map(source => [
@@ -220,6 +220,9 @@ function apiFixture({sources = [], outcomes = {}} = {}) {
   state.fetch = async (input, init = {}) => {
     const url = new URL(input);
     const method = init.method ?? 'GET';
+    assert.equal(init.headers?.Cookie, sessionCookie);
+    assert.equal(init.headers?.Origin, 'https://feed.test');
+    assert.equal(init.headers?.Authorization, undefined);
     const body = init.body ? JSON.parse(init.body) : null;
     state.calls.push({method, path: url.pathname, body});
     if (method === 'GET') {

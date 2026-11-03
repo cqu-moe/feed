@@ -395,7 +395,7 @@ async function refreshCredentials(env, config, tokenHash, credentials) {
 }
 
 function unauthenticated(error) {
-  return { authenticated: false, entitled: false, ...(error ? { error } : {}) };
+  return { authenticated: false, entitled: false, admin: false, ...(error ? { error } : {}) };
 }
 
 export async function session(request, env, options = {}) {
@@ -439,6 +439,7 @@ export async function session(request, env, options = {}) {
       return {
         authenticated: true,
         entitled: false,
+        admin: authority.caps?.feed?.admin === true,
         user: credentials.user,
         ...(options.includeAccount
           ? { account: await feedAccountStatus(env, credentials.sub) }
@@ -450,6 +451,7 @@ export async function session(request, env, options = {}) {
     return {
       authenticated: true,
       entitled: true,
+      admin: authority.caps?.feed?.admin === true,
       user: credentials.user,
       ...(options.includeAccount
         ? { account: await feedAccountStatus(env, credentials.sub) }
@@ -472,10 +474,25 @@ export async function session(request, env, options = {}) {
     return {
       authenticated: Boolean(knownUser),
       entitled: false,
+      admin: false,
       ...(knownUser ? { user: knownUser } : {}),
       error: "unavailable",
     };
   }
+}
+
+// Administration shares the BFF identity, but is independent of reading rights.
+// Never authorize from stored user metadata, a stale JWT, or a shared token.
+export async function adminAuthorizationError(request, env) {
+  const state = await session(request, env);
+  if (state.error === "unavailable") return response({ error: "认证服务暂时不可用，请稍后重试" }, 503);
+  if (!state.authenticated) return response({ error: "请先登录" }, 401);
+  if (!state.admin) return response({ error: "需要 feed.admin 管理权限" }, 403);
+  if (!["GET", "HEAD", "OPTIONS"].includes(request.method)
+    && request.headers.get("Origin") !== oauthConfig(env).baseUrl.origin) {
+    return response({ error: "invalid_origin" }, 403);
+  }
+  return null;
 }
 
 export async function authRoute(request, env) {
@@ -590,7 +607,7 @@ export async function authRoute(request, env) {
         Date.now() + SESSION_LIFETIME_SECONDS * 1000,
       ).run();
 
-      if (!hasFeedAccess(authority)) {
+      if (!hasFeedAccess(authority) && !new URL(transaction.returnTo, config.baseUrl).pathname.startsWith("/admin/")) {
         return redirect("/access?reason=feed_access", [
           clearLogin,
           cookieHeader(SESSION_COOKIE, sessionToken, SESSION_LIFETIME_SECONDS),

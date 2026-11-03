@@ -28,7 +28,7 @@ import {
 } from '@cqu-moe/ui';
 import { BellPlus, House, RefreshCw, UserRound } from 'lucide-react';
 import { parseSession, requestJson, type Session } from './api';
-import { AccessDeniedState, FeedBrand, LoginRequiredState, LogoutButton, safeNext } from './components';
+import { AccessDeniedState, AdminDeniedState, FeedBrand, LoginRequiredState, LogoutButton, safeNext } from './components';
 import { ArticleDetailPage } from './article-detail';
 import { AccessPage, AccountPage, LoginPage, SourcesPage } from './pages';
 import { AdminTasksPage } from './admin-tasks';
@@ -84,14 +84,25 @@ async function loadProtectedSession(): Promise<RootLoader> {
   return { session: result.data };
 }
 
+async function loadAdminSession(): Promise<RootLoader> {
+  const startedAt = performance.now();
+  const result = await requestJson('/api/session', parseSession);
+  if (!result.ok) throw new Response(null, { status: result.status });
+  if (!result.data.authenticated) throw redirect(loginRedirect());
+  confirmSession(result.data, startedAt);
+  if (!result.data.admin) throw new Response(null, { status: 403 });
+  return { session: result.data };
+}
+
 async function loadLogin({ request }: LoaderFunctionArgs) {
   const startedAt = performance.now();
   const result = await requestJson('/api/session', parseSession);
   if (!result.ok) return null;
   if (!result.data.authenticated) return null;
   confirmSession(result.data, startedAt);
-  if (!result.data.entitled) throw redirect('/account');
-  throw redirect(safeNext(new URL(request.url).searchParams.get('next')));
+  const next = safeNext(new URL(request.url).searchParams.get('next'));
+  if (!result.data.entitled && !(result.data.admin && next.startsWith('/admin/'))) throw redirect('/account');
+  throw redirect(next);
 }
 
 async function loadAccess() {
@@ -151,6 +162,12 @@ function Layout() {
             <UserRound aria-hidden="true" />
             账户
           </NavLink>
+          {session.admin && (
+            <NavLink to="/admin/tasks">
+              <RefreshCw aria-hidden="true" />
+              管理
+            </NavLink>
+          )}
         </>
       }
     >
@@ -175,6 +192,7 @@ function RouteError() {
   const status = isRouteErrorResponse(error) ? error.status : 0;
 
   if (status === 401) return <LoginRequiredState />;
+  if (status === 403 && window.location.pathname.startsWith('/admin/')) return <AdminDeniedState />;
   if (status === 403) return <AccessDeniedState />;
 
   return (
@@ -219,8 +237,8 @@ function NotFound() {
 }
 
 const router = createBrowserRouter([
-  { path: '/admin/tasks', element: <><TelemetryRoute /><AdminTasksPage /></>, errorElement: <><TelemetryRoute /><RouteError /></> },
-  { path: '/admin/sources', element: <><TelemetryRoute /><AdminSourcesPage /></>, errorElement: <><TelemetryRoute /><RouteError /></> },
+  { path: '/admin/tasks', loader: loadAdminSession, element: <><TelemetryRoute /><AdminTasksPage /></>, errorElement: <><TelemetryRoute /><RouteError /></> },
+  { path: '/admin/sources', loader: loadAdminSession, element: <><TelemetryRoute /><AdminSourcesPage /></>, errorElement: <><TelemetryRoute /><RouteError /></> },
   {
     path: '/reader/:articleId/revisions/:revisionId/:filename',
     loader: loadProtectedSession,

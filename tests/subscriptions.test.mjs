@@ -79,7 +79,7 @@ async function fixture({mailEnabled=false}={}){
       {
         name:'feed',modules:true,script:app.outputFiles[0].text,compatibilityDate:'2026-10-11',
         compatibilityFlags:['nodejs_compat'],
-        bindings:{...provider.bindings,ADMIN_TOKEN:'test-admin-token',BASE_URL:feedOrigin,SOURCE_MANAGEMENT_ENABLED:'true',MAIL_ENABLED:String(mailEnabled),FEED_AUTH_RPC_CLIENT_ID:'feed-rpc-client',FEED_AUTH_RPC_CLIENT_SECRET:'feed-rpc-secret'},
+        bindings:{...provider.bindings,BASE_URL:feedOrigin,SOURCE_MANAGEMENT_ENABLED:'true',MAIL_ENABLED:String(mailEnabled),FEED_AUTH_RPC_CLIENT_ID:'feed-rpc-client',FEED_AUTH_RPC_CLIENT_SECRET:'feed-rpc-secret'},
         d1Databases:['DB'],r2Buckets:['ARCHIVE'],
     serviceBindings:{AUTH:request=>provider.fetch(request),AUTH_FEED_RPC:{name:'policy',entrypoint:'AuthService'}},
       },
@@ -94,8 +94,10 @@ async function fixture({mailEnabled=false}={}){
     await applyMigration(db,await readFile(`migrations/${name}`,'utf8'));
   }
   const policyWorker=await mf.getWorker('policy');
+  provider.setAdmin(true,'subscriptions-admin');
+  const admin={headers:{Cookie:await login(mf,provider,'subscriptions-admin'),Origin:feedOrigin}};
   return {
-    mf,db,
+    mf,db,admin,
     login:(subject='user-a')=>login(mf,provider,subject),
     revokeAccess(){provider.setAccess(false);},
     async setPolicy(subject,policy){await post(policyWorker,`${policyOrigin}/state`,{policies:{[subject]:policy}});},
@@ -105,7 +107,7 @@ async function fixture({mailEnabled=false}={}){
 }
 
 test('an owner can retrieve the same private RSS link after creating, retrying and logging in again',async()=>{
-  const {mf,login,setPolicy}=await fixture({mailEnabled:true});
+  const {mf,login,setPolicy, admin }=await fixture({mailEnabled:true});
   try{
     await setPolicy('user-a',{access:true,limit:{kind:'limited',value:2}});
     const cookie=await login();
@@ -140,7 +142,7 @@ test('an owner can retrieve the same private RSS link after creating, retrying a
 });
 
 test('subscription listing exposes policy, source options, and preserved configuration for revoked reading access',async()=>{
-  const {mf,login,setPolicy,revokeAccess}=await fixture();
+  const {mf,login,setPolicy,revokeAccess, admin }=await fixture();
   try{
     await setPolicy('revoked-reader',{access:true,limit:{kind:'limited',value:1}});
     const cookie=await login('revoked-reader');
@@ -171,7 +173,7 @@ test('subscription listing exposes policy, source options, and preserved configu
 });
 
 test('an Auth RPC outage pauses computed running state without dropping saved configuration',async()=>{
-  const {mf,login,setPolicy,setPolicyService}=await fixture();
+  const {mf,login,setPolicy,setPolicyService, admin }=await fixture();
   try{
     await setPolicy('list-outage-user',{access:true,limit:{kind:'limited',value:1}});
     const cookie=await login('list-outage-user');
@@ -191,7 +193,7 @@ test('an Auth RPC outage pauses computed running state without dropping saved co
 });
 
 test('finite quota prevents concurrent over-creation while paused configs still count and soft-deleted configs do not',async()=>{
-  const {mf,db,login,setPolicy}=await fixture();
+  const {mf,db,admin,login,setPolicy}=await fixture();
   try{
     await setPolicy('quota-user',{access:true,limit:{kind:'limited',value:2}});
     const cookie=await login('quota-user');
@@ -230,7 +232,7 @@ test('finite quota prevents concurrent over-creation while paused configs still 
 });
 
 test('request identity is owner-scoped and conflicting commands are explicit',async()=>{
-  const {mf,login,setPolicy}=await fixture();
+  const {mf,login,setPolicy, admin }=await fixture();
   try{
     await setPolicy('owner-a',{access:true,limit:{kind:'unlimited'}});
     await setPolicy('owner-b',{access:true,limit:{kind:'unlimited'}});
@@ -267,7 +269,7 @@ test('request identity is owner-scoped and conflicting commands are explicit',as
 });
 
 test('pre-check failures never write, while post-write downgrade or outage preserves the created config',async()=>{
-  const {mf,login,setPolicy,setPolicyService}=await fixture();
+  const {mf,login,setPolicy,setPolicyService, admin }=await fixture();
   try{
     const cases=[
       ['missing',{access:true,limit:{kind:'missing'}}],
@@ -329,7 +331,7 @@ test('pre-check failures never write, while post-write downgrade or outage prese
 });
 
 test('site retries keep the first source snapshot and the retrievable RSS credential is encrypted at rest',async()=>{
-  const {mf,db,login,setPolicy}=await fixture();
+  const {mf,db,login,setPolicy, admin }=await fixture();
   try{
     await setPolicy('freeze-user',{access:true,limit:{kind:'unlimited'}});
     const cookie=await login('freeze-user');
@@ -344,7 +346,7 @@ test('site retries keep the first source snapshot and the retrievable RSS creden
     assert.match(credential.ciphertext,/^v1\./);
     assert.equal(credential.ciphertext.includes(token),false);
 
-    const added=await adminRequest(mf,'/internal/sources',{
+    const added=await adminRequest(mf,admin,'/internal/sources',{
       siteId:staticSiteId,name:'教务处新栏目',listUrl:'https://jwc.cqu.edu.cn/new/list.htm',
       articlePattern:'^/info/[0-9]+/[0-9]+[.]htm$',refreshIntervalSec:1800,
       sampleArticleUrl:sharedArticleUrl,timezone:'Asia/Shanghai',
@@ -376,7 +378,7 @@ test('site retries keep the first source snapshot and the retrievable RSS creden
 });
 
 test('the reserved static source seed preserves T04 adapter configuration',async()=>{
-  const {mf,db,login}=await fixture();
+  const {mf,db,login, admin }=await fixture();
   try{
     const cookie=await login('seed-user');
     assert.equal((await call(mf,'/api/sources',{cookie})).status,200);
@@ -391,7 +393,7 @@ test('the reserved static source seed preserves T04 adapter configuration',async
 });
 
 test('a removed target interval can be added again with a new effective time',async()=>{
-  const {mf,db,login,setPolicy}=await fixture();
+  const {mf,db,login,setPolicy, admin }=await fixture();
   try{
     await setPolicy('interval-user',{access:true,limit:{kind:'unlimited'}});
     const cookie=await login('interval-user');
@@ -414,7 +416,7 @@ test('a removed target interval can be added again with a new effective time',as
 });
 
 test('subscription writes require a session and same-origin POST',async()=>{
-  const {mf,login,setPolicy}=await fixture();
+  const {mf,login,setPolicy, admin }=await fixture();
   try{
     await setPolicy('csrf-user',{access:true,limit:{kind:'unlimited'}});
     const command={requestId:'csrf-command',name:'CSRF 订阅',siteIds:[],sourceIds:['jwc'],emailMode:'daily_digest'};
@@ -444,9 +446,9 @@ async function post(worker,path,body){
   assert.equal(response.status,200);
 }
 
-async function adminRequest(mf,path,body){
+async function adminRequest(mf,admin,path,body){
   const response=await mf.dispatchFetch(feedOrigin+path,{
-    method:'POST',headers:{Authorization:'Bearer test-admin-token','Content-Type':'application/json'},body:JSON.stringify(body),
+    method:'POST',headers:{...admin.headers,'Content-Type':'application/json'},body:JSON.stringify(body),
   });
   return {status:response.status,body:await response.json()};
 }

@@ -3,18 +3,21 @@ import { expect } from './test-api';
 import { request as httpsRequest } from 'node:https';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { apiFetch, control, login } from './support';
+import { apiFetch, control, cookieHeader, fulfillTurnstileScript, login } from './support';
 
 type Row = Record<string, any>;
 let unexpected: string[];
 const checkpoints: string[] = [];
 const operations: Row[] = [];
 let generation = 0;
+let adminCookie = '';
 beforeEach(async ({ browser }) => {
   unexpected = []; checkpoints.length = 0; operations.length = 0; generation = 0;
   const allowed = [process.env.FEED_E2E_APP_URL!, process.env.FEED_E2E_AUTH_URL!].map(url => new URL(url).origin);
   await browser.route('**/*', async route => {
-    if (!allowed.includes(new URL(route.request.url).origin)) { unexpected.push(new URL(route.request.url).origin); await route.abort(); }
+    const target = new URL(route.request.url);
+    if (await fulfillTurnstileScript(route, `${target.origin}${target.pathname}`)) return;
+    if (!allowed.includes(target.origin)) { unexpected.push(target.origin); await route.abort(); }
     else await route.continue();
   });
 });
@@ -28,10 +31,12 @@ test('FEED04 real mail Queue, signed callbacks, policy and unknown recovery', as
   for (const table of ['articles', 'tasks', 'revisions', 'events', 'objects']) expect(empty[table]).toEqual([]);
   const noMail = await state();
   for (const table of ['mail_messages', 'mail_items', 'mail_webhook_receipts', 'user_deliveries', 'accepted']) expect(noMail[table]).toEqual([]);
-  expect((await admin('/internal/mail', 'GET', undefined, '')).status).toBe(401);
+  expect((await admin('/internal/mail', 'GET')).status).toBe(401);
   expect((await admin('/internal/mail/recover', 'POST', {}, 'invalid-token')).status).toBe(401);
   await mark('empty business state and actual administrator denial');
 
+  await login(app, screen, browser, 'ADMIN');
+  adminCookie = await cookieHeader(browser, '__Host-feed_session');
   const school = 'https://school.example.test';
   const site = (await ok('/internal/sites', 'POST', { name: '邮件验收学校', origin: school, requestId: 'feed04-site-create' }, 201)).site;
   const sources: string[] = [];
@@ -43,6 +48,7 @@ test('FEED04 real mail Queue, signed callbacks, policy and unknown recovery', as
     await until('real validation Workflow', async () => (await ok(`/internal/capture-tasks/${task.id}`)).task.state === 'succeeded');
     await ok(`/internal/sources/${source.id}`, 'PATCH', { enabled: true });
   }
+  await app.clearState();
   await login(app, screen, browser, 'OWNER');
   await screen.getByRole('button', '新建订阅').first().click();
   const sheet = screen.getByRole('dialog', '新建订阅');
@@ -274,10 +280,15 @@ async function until<T>(label: string, read: () => Promise<T>, timeout = 45000):
   do { const value = await read(); if (value) return value as NonNullable<T>; await new Promise(done => setTimeout(done, 250)); } while (Date.now() < deadline);
   throw new Error(`Timed out waiting for ${label}`);
 }
-async function admin(path: string, method = 'GET', body?: Row, token = process.env.FEED_E2E_ADMIN_TOKEN!): Promise<{ status: number; body: any }> {
+async function admin(path: string, method = 'GET', body?: Row, token = ''): Promise<{ status: number; body: any }> {
   return new Promise((done, fail) => {
     const request = httpsRequest(new URL(path, process.env.FEED_E2E_APP_URL), { method, rejectUnauthorized: false, agent: false,
-      headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), ...(body ? { 'content-type': 'application/json' } : {}) } }, response => {
+      headers: {
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+        origin: process.env.FEED_E2E_APP_URL!,
+        ...(adminCookie ? { cookie: adminCookie } : {}),
+        ...(body ? { 'content-type': 'application/json' } : {}),
+      } }, response => {
       const chunks: Buffer[] = []; response.on('data', chunk => chunks.push(chunk)); response.once('error', fail);
       response.once('end', () => { try { if (method !== 'GET' || response.statusCode !== 200) operations.push({ method, path, status: response.statusCode }); done({ status: response.statusCode!, body: JSON.parse(Buffer.concat(chunks).toString()) }); } catch (error) { fail(error); } });
     });

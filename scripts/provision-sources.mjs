@@ -4,6 +4,7 @@ import {readFile} from 'node:fs/promises';
 import {resolve} from 'node:path';
 import {parseArgs} from 'node:util';
 import {fileURLToPath} from 'node:url';
+import {adminHeaders,readAdminSession} from './admin-session.mjs';
 
 const DEFAULT_CATALOG = fileURLToPath(new URL('../worker/source-catalog.json', import.meta.url));
 const ARTICLE_PATTERN = '^/info/\\d+/\\d+\\.htm$';
@@ -76,18 +77,7 @@ function dryRun(catalog, options) {
   };
 }
 
-async function readToken(options, token) {
-  if (token) return token;
-  if (options.credentialsFile) {
-    const value = JSON.parse(await readFile(options.credentialsFile, 'utf8'));
-    if (typeof value.ADMIN_TOKEN !== 'string' || !value.ADMIN_TOKEN) throw new Error('Credentials file needs ADMIN_TOKEN');
-    return value.ADMIN_TOKEN;
-  }
-  if (!process.env.FEED_ADMIN_TOKEN) throw new Error('--apply needs FEED_ADMIN_TOKEN or --credentials-file');
-  return process.env.FEED_ADMIN_TOKEN;
-}
-
-function makeApi(baseUrl, token, fetchImpl, sleep) {
+function makeApi(baseUrl, cookie, fetchImpl, sleep) {
   const base = new URL(baseUrl);
   return async function api(path, method = 'GET', body) {
     let response, data;
@@ -95,7 +85,7 @@ function makeApi(baseUrl, token, fetchImpl, sleep) {
       try {
         response = await fetchImpl(new URL(path, base), {
           method,
-          headers: {Authorization: `Bearer ${token}`, ...(body && {'Content-Type': 'application/json'})},
+          headers: {...adminHeaders(base, cookie), ...(body && {'Content-Type': 'application/json'})},
           body: body && JSON.stringify(body),
           redirect: 'error',
           signal: AbortSignal.timeout(30_000),
@@ -174,8 +164,8 @@ async function verifyAndEnable(api, source, listUrl, options, sleep, force = fal
   return {status: 'verified-and-enabled', taskId: current.validationTaskId ?? null};
 }
 
-async function provisionCatalog(catalog, options, token, fetchImpl, sleep) {
-  const api = makeApi(options.baseUrl, token, fetchImpl, sleep);
+async function provisionCatalog(catalog, options, cookie, fetchImpl, sleep) {
+  const api = makeApi(options.baseUrl, cookie, fetchImpl, sleep);
   const deadline = options.deadline;
   const existingSites = (await api('/internal/sites')).sites;
   const existingSources = (await api('/internal/sources')).sources;
@@ -225,7 +215,7 @@ async function provisionCatalog(catalog, options, token, fetchImpl, sleep) {
         results.push(result);
       } catch (error) {
         result.status = 'failed';
-        result.error = redact(error.message, token);
+        result.error = redact(error.message, cookie);
         failures.push({siteKey: site.key, column: column.name, sourceId: result.sourceId ?? null, error: result.error});
         progress(`${label} failed: ${result.error}`);
         results.push(result);
@@ -258,7 +248,7 @@ async function provisionCatalog(catalog, options, token, fetchImpl, sleep) {
         progress(`restore:${id} ${result.status}`);
       } catch (error) {
         result.status = 'failed';
-        result.error = redact(error.message, token);
+        result.error = redact(error.message, cookie);
         failures.push({restoreId: id, error: result.error});
         progress(`restore:${id} failed: ${result.error}`);
         if (error.quota) { quota = true; results.push(result); break; }
@@ -279,7 +269,7 @@ function redact(value, token) {
 export async function run(argv, {
   fetch: fetchImpl = globalThis.fetch,
   sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)),
-  token,
+  cookie,
   baseUrl,
 } = {}) {
   const options = parseOptions(argv);
@@ -292,7 +282,7 @@ export async function run(argv, {
   }
   options.baseUrl = target.origin;
   options.deadline = Date.now() + options.timeoutMinutes * 60_000;
-  return provisionCatalog(catalog, options, await readToken(options, token), fetchImpl, sleep);
+  return provisionCatalog(catalog, options, await readAdminSession({cookie, credentialsFile: options.credentialsFile}), fetchImpl, sleep);
 }
 
 if (resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -300,7 +290,7 @@ if (resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
     process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
     process.exitCode = summary.ok ? 0 : 1;
   }, error => {
-    process.stdout.write(`${JSON.stringify({ok: false, error: redact(error.message, process.env.FEED_ADMIN_TOKEN ?? '')})}\n`);
+    process.stdout.write(`${JSON.stringify({ok: false, error: redact(error.message, process.env.FEED_SESSION_COOKIE ?? '')})}\n`);
     process.exitCode = 1;
   });
 }

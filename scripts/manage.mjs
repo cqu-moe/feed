@@ -1,10 +1,10 @@
-import {readFile} from 'node:fs/promises';
+import {adminHeaders,readAdminSession} from './admin-session.mjs';
 const command=process.argv[2]||'status';
 if(!['status','run','auth-check','repair-text'].includes(command))throw new Error('Usage: node scripts/manage.mjs status|run|auth-check|repair-text <article-id>');
-const secrets=process.env.FEED_ADMIN_TOKEN?{ADMIN_TOKEN:process.env.FEED_ADMIN_TOKEN}:JSON.parse(await readFile('.private/production-secrets.json','utf8'));
+const cookie=await readAdminSession();
 const base=process.env.FEED_URL||'https://cqu-feed.user-unauthorized.workers.dev';
 const id=process.argv[3];
 if(command==='repair-text'&&!/^[a-f0-9]{24}$/.test(id??''))throw new Error('repair-text requires an article id');
-const response=await fetch(new URL(`/internal/${command}${command==='repair-text'?'/'+id:''}`,base),{method:['run','repair-text'].includes(command)?'POST':'GET',headers:{Authorization:`Bearer ${secrets.ADMIN_TOKEN}`},signal:AbortSignal.timeout(30000)});
+const response=await fetch(new URL(`/internal/${command}${command==='repair-text'?'/'+id:''}`,base),{method:['run','repair-text'].includes(command)?'POST':'GET',headers:adminHeaders(base,cookie),redirect:'error',signal:AbortSignal.timeout(30000)});
 if(!response.ok)throw new Error(`Admin request HTTP ${response.status}`);
 console.log(JSON.stringify(await response.json(),null,2));

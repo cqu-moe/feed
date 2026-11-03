@@ -61,7 +61,7 @@ node scripts/compare-ocr.mjs publish textin-xparse-auto
 FEED_ARTICLE_ID=<article-id> node scripts/compare-ocr.mjs publish textin-xparse-auto
 ```
 
-`publish` 会优先复用结果；首次扫描件可能付费。管理 API 仍为 `/internal/pdf-ocr/<article-id>`（ADMIN_TOKEN）：GET 状态、GET `?model=...` 私有结果、POST `{ "model":"textin-xparse-auto", "publish":true }` 入队。`needs_review` 自动停住；不要为恢复而清空 calls、预算或 R2 请求记录。
+`publish` 会优先复用结果；首次扫描件可能付费。管理 API 仍为 `/internal/pdf-ocr/<article-id>`（Auth 登录会话与 `feed.admin`）：GET 状态、GET `?model=...` 私有结果、POST `{ "model":"textin-xparse-auto", "publish":true }` 入队。`needs_review` 自动停住；不要为恢复而清空 calls、预算或 R2 请求记录。
 
 每日 Cron 同时接新通知并补偿未完成的 PDF。`PDF_OCR_ENABLED=false` 停止自动入队，已启动 Workflow 不撤销。普通 Office/压缩附件暂不全文索引；加密、损坏、超大或文字仅由矢量轮廓构成的 PDF 不保证提取。OCR 仍可能错姓名和数字，原 PDF 保留作对照；不生成新的隐形文字层 PDF。
 

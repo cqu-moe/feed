@@ -70,7 +70,7 @@ for (const key of ['FEED_E2E_APP_URL', 'FEED_E2E_AUTH_URL', 'FEED_E2E_OUTPUT', '
 }
 
 export default {
-  credentials: Object.fromEntries(['owner', 'reject', 'other'].map(role => [role, {
+  credentials: Object.fromEntries(['owner', 'reject', 'other', 'admin'].filter(role => process.env[`FEED_E2E_${role.toUpperCase()}_EMAIL`]).map(role => [role, {
     username: process.env[`FEED_E2E_${role.toUpperCase()}_EMAIL`]!,
     password: process.env[`FEED_E2E_${role.toUpperCase()}_PASSWORD`]!,
   }])),

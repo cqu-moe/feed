@@ -1,8 +1,10 @@
 import { beforeEach, afterEach, test, type Browser } from './test-api';
 import { credentials, expect } from './test-api';
+import { cookieHeader, fulfillTurnstileScript, type AppSurface } from './support';
 import { request as httpsRequest } from 'node:https';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import type { Screen } from 'e2e';
 
 // FEED-03 owns production of archived facts. FEED-02 owns detailed reader/PDF
 // controls. This suite reads only the files and versions its own ingestion made.
@@ -12,6 +14,7 @@ const school = 'https://school.example.test';
 let unexpected: string[];
 const checkpoints: string[] = [];
 const operations: { method: string; path: string; status: number }[] = [];
+let adminCookie = '';
 
 beforeEach(async ({ browser }) => {
   unexpected = [];
@@ -19,6 +22,8 @@ beforeEach(async ({ browser }) => {
   operations.length = 0;
   const allowed = [process.env.FEED_E2E_APP_URL!, process.env.FEED_E2E_AUTH_URL!].map(url => new URL(url).origin);
   await browser.route('**/*', async route => {
+    const target = new URL(route.request.url);
+    if (await fulfillTurnstileScript(route, `${target.origin}${target.pathname}`)) return;
     if (!allowed.includes(new URL(route.request.url).origin)) {
       unexpected.push(new URL(route.request.url).origin);
       await route.abort();
@@ -30,18 +35,26 @@ afterEach(async () => {
   expect(unexpected).toEqual([]);
 });
 
+beforeEach(async () => {
+  if (!process.env.FEED_E2E_ADMIN_EMAIL || !process.env.FEED_E2E_ADMIN_PASSWORD || !process.env.FEED_E2E_ADMIN_ID) {
+    throw new Error('Missing synthetic administrator identity');
+  }
+});
+
 test('FEED03 native Queue Workflow ingestion, completeness, replay and recovery', async ({ app, browser, screen }) => {
   await app.open('/subscriptions');
   await expect(screen.getByRole('heading', /^重大通知/)).toBeVisible();
   if (process.env.FEED_E2E_BREAK_ASSERTION === '1') await expect(screen.getByRole('heading', '故意错误的采集成功断言')).toBeVisible();
   const empty = await state();
   for (const table of ['articles', 'tasks', 'revisions', 'events', 'objects'] as const) expect(empty[table]).toEqual([]);
-  expect((await admin('/internal/sources', 'GET', undefined, '')).status).toBe(401);
+  expect((await admin('/internal/sources', 'GET')).status).toBe(401);
   expect((await admin('/internal/sources/schedule', 'POST', {}, 'wrong-admin-token')).status).toBe(401);
-  expect((await admin('/internal/operations/diagnostics', 'GET', undefined, '')).status).toBe(401);
+  expect((await admin('/internal/operations/diagnostics', 'GET')).status).toBe(401);
   expect((await state()).tasks).toEqual([]);
   await mark('empty D1/R2 and actual administrator denial');
 
+  await adminLogin(app, screen, browser);
+  expect((await admin('/internal/sources/schedule', 'POST', {}, '', 'https://csrf.example.test')).status).toBe(403);
   const site = (await ok('/internal/sites', 'POST', { name: '合成学校', origin: school, requestId: 'feed03-site-create' }, 201)).site;
   const sourceIds: string[] = [];
   for (const lane of ['a', 'b']) {
@@ -93,11 +106,8 @@ test('FEED03 native Queue Workflow ingestion, completeness, replay and recovery'
   expect(observed.events).toHaveLength(2);
   await mark('live pagination, canonical URL across columns and duplicate delivery without recollection');
 
-  await screen.getByRole('link', '登录并开始阅读').first().click();
-  await screen.getByLabel('邮箱').fill(credentials.user('owner').username);
-  await browser.locator('#password').fill(credentials.user('owner').password);
-  await screen.getByRole('button', '登录', { exact: true }).click();
-  await expect(browser).toHaveURL(/\/subscriptions$/);
+  await app.clearState();
+  await adminLogin(app, screen, browser, 'OWNER');
   const first = await reader(browser, `/api/articles/${mainId}`);
   expect(first.revision.id).toBe(firstRevision);
   expect(first.article.bodyText).toBe('采集验收第一版完整正文');
@@ -108,6 +118,26 @@ test('FEED03 native Queue Workflow ingestion, completeness, replay and recovery'
   await expect(screen.getByRole('heading', '采集验收通知1001', { exact: true })).toBeVisible();
   await expect(screen.getByText('采集验收第一版完整正文', { exact: true })).toBeVisible();
   await mark('actual Auth reader finds ingestion output and downloads original R2 bytes');
+
+  // A role administrator remains effective without `feed.access`; its redundant
+  // explicit cap can be revoked. Role downgrade fails closed, while a normal
+  // user can use an explicit fresh grant through the same real BFF/OAuth path.
+  const administratorId = process.env.FEED_E2E_ADMIN_ID!;
+  const administratorSession = await admin('/api/session');
+  expect(administratorSession.body).toMatchObject({ authenticated: true, entitled: false, admin: true });
+  await control('set-feed-admin', { userId: administratorId, enabled: true });
+  await control('set-feed-admin', { userId: administratorId, enabled: false });
+  expect((await ok('/internal/sources')).sources.length).toBeGreaterThan(0);
+  await control('set-auth-role', { userId: administratorId, role: 'user' });
+  expect((await admin('/internal/sources')).status).toBe(403);
+  await control('set-feed-admin', { userId: process.env.FEED_E2E_OWNER_ID!, enabled: true });
+  adminCookie = await cookieHeader(browser, '__Host-feed_session');
+  expect((await ok('/internal/sources')).sources.length).toBeGreaterThan(0);
+  await control('set-feed-admin', { userId: process.env.FEED_E2E_OWNER_ID!, enabled: false });
+  expect((await admin('/internal/sources')).status).toBe(403);
+  await control('set-feed-admin', { userId: process.env.FEED_E2E_OWNER_ID!, enabled: true });
+  expect((await ok('/internal/sources')).sources.length).toBeGreaterThan(0);
+  await mark('Feed admin is independent of feed.access after fresh capability and role changes');
 
   // Same saved request identity must reuse a task, rather than making another paid request.
   await control('ingestion-mode', { mode: 'failure' });
@@ -286,7 +316,7 @@ async function control(action: string, input: Row = {}): Promise<any> {
   const r = await fetch(`${process.env.FEED_E2E_CONTROL_URL}/control`, { method: 'POST', headers: { authorization: `Bearer ${process.env.FEED_E2E_CONTROL_SECRET}` }, body: JSON.stringify({ action, ...input }) });
   const text = await r.text();
   if (!r.ok) throw new Error(`Control ${action}: ${r.status} ${text}`);
-  return JSON.parse(text);
+  return text ? JSON.parse(text) : null;
 }
 async function state(): Promise<State> { return control('ingestion-state'); }
 async function until<T>(label: string, read: () => Promise<T>, timeout = 45000): Promise<NonNullable<T>> {
@@ -294,10 +324,16 @@ async function until<T>(label: string, read: () => Promise<T>, timeout = 45000):
   do { const result = await read(); if (result) return result as NonNullable<T>; await new Promise(done => setTimeout(done, 300)); } while (Date.now() < deadline);
   throw new Error(`Timed out waiting for ${label}`);
 }
-async function admin(path: string, method = 'GET', body?: Row, token = process.env.FEED_E2E_ADMIN_TOKEN!): Promise<{ status: number; body: any }> {
+async function admin(path: string, method = 'GET', body?: Row, token = '', origin = process.env.FEED_E2E_APP_URL!): Promise<{ status: number; body: any }> {
+  const headers = {
+    ...(token ? { authorization: `Bearer ${token}` } : {}),
+    origin,
+    ...(adminCookie ? { cookie: adminCookie } : {}),
+    ...(body ? { 'content-type': 'application/json' } : {}),
+  };
   return new Promise((done, fail) => {
     const request = httpsRequest(new URL(path, process.env.FEED_E2E_APP_URL), { method, rejectUnauthorized: false, agent: false,
-      headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), ...(body ? { 'content-type': 'application/json' } : {}) },
+      headers,
     }, response => {
       const chunks: Buffer[] = [];
       response.on('data', chunk => chunks.push(chunk));
@@ -311,6 +347,18 @@ async function admin(path: string, method = 'GET', body?: Row, token = process.e
     request.setTimeout(15000, () => request.destroy(new Error(`Admin timeout ${path}`)));
     request.once('error', fail); request.end(body ? JSON.stringify(body) : undefined);
   });
+}
+async function adminLogin(app: AppSurface, screen: Screen, browser: Browser, role: 'ADMIN' | 'OWNER' = 'ADMIN') {
+  const returnTo = role === 'ADMIN' ? '/admin/tasks' : '/subscriptions';
+  await app.open('/subscriptions');
+  await app.open(`/login?next=${encodeURIComponent(returnTo)}`);
+  await screen.getByRole('link', '登录并开始阅读').first().click();
+  const account = credentials.user(role.toLowerCase());
+  await screen.getByLabel('邮箱').fill(account.username);
+  await browser.locator('#password').fill(account.password);
+  await screen.getByRole('button', '登录', { exact: true }).click();
+  await expect(browser).toHaveURL(new RegExp(`${role === 'ADMIN' ? '/admin/tasks' : '/subscriptions'}$`));
+  if (role === 'ADMIN') adminCookie = await cookieHeader(browser, '__Host-feed_session');
 }
 async function ok(path: string, method = 'GET', body?: Row, status = 200): Promise<any> {
   const r = await admin(path, method, body); if (r.status !== status) throw new Error(`${method} ${path}: expected ${status}, got ${r.status}: ${JSON.stringify(r.body)}`); return r.body;

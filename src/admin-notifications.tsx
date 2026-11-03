@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Alert, AlertDescription, AlertTitle, Button } from '@cqu-moe/ui';
-import { requestJson } from './api';
+import { adminRequestMessage, requestJson } from './api';
 import { formatDateTime } from './components';
 
 type EventSummary = { id: string; kind: string; title: string; readyAt: string; historyOnly: boolean; matches: number; deliveries: number };
@@ -49,26 +49,34 @@ const deliveryStates: Record<string, string> = {
   submission_unknown: '发送结果待确认', suppressed: '已抑制', cancelled: '已取消',
 };
 
-export function AdminNotificationEvents({ token }: { token: string }) {
+export function AdminNotificationEvents() {
   const [events, setEvents] = useState<EventSummary[] | null>(null);
   const [selected, setSelected] = useState<{ event: EventSummary; detail: EventStatus } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [identityReady, setIdentityReady] = useState(false);
   const controller = useRef<AbortController | null>(null);
-  useEffect(() => () => controller.current?.abort(), []);
+  useEffect(() => {
+    setIdentityReady(true);
+  }, []);
+  useEffect(() => {
+    if (!identityReady) return;
+    void read();
+    return () => controller.current?.abort();
+  }, [identityReady]);
   async function read(event?: EventSummary) {
     if (busy) return;
     const pending = new AbortController(); controller.current = pending;
     setBusy(true); setError('');
-    const init = { signal: pending.signal, headers: { Authorization: `Bearer ${token}` } };
+    const init = { signal: pending.signal };
     if (event) {
       const result = await requestJson(`/internal/notification-events/${event.id}`, parseStatus, init);
       if (pending.signal.aborted) return;
-      if (result.ok) setSelected({ event, detail: result.data }); else setError(result.message);
+      if (result.ok) setSelected({ event, detail: result.data }); else setError(adminRequestMessage(result.status, '读取', result.message));
     } else {
       const result = await requestJson('/internal/notification-events', parseEvents, init);
       if (pending.signal.aborted) return;
-      if (result.ok) { setEvents(result.data); setSelected(null); } else setError(result.message);
+      if (result.ok) { setEvents(result.data); setSelected(null); } else setError(adminRequestMessage(result.status, '读取', result.message));
     }
     setBusy(false);
   }

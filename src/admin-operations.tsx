@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router';
 import { Alert, AlertDescription, AlertTitle, Button, PageState } from '@cqu-moe/ui';
 import { RefreshCw } from 'lucide-react';
-import { requestJson } from './api';
+import { adminRequestMessage, requestJson } from './api';
 
 type BusinessId = string | null;
 
@@ -81,6 +82,8 @@ type Diagnostics = {
 type LoadState =
   | { kind: 'loading' }
   | { kind: 'ready'; data: Diagnostics }
+  | { kind: 'unauthorized' }
+  | { kind: 'forbidden' }
   | { kind: 'error'; message: string };
 
 const topicLabels: Record<QueueDeadLetter['topic'], string> = {
@@ -234,7 +237,7 @@ function parseRecoveryResult(value: unknown): { state: string; recovered: number
   return { state: value.state, recovered: Number(value.recovered) };
 }
 
-export function AdminOperationsPanel({ token }: { token: string }) {
+export function AdminOperationsPanel() {
   const [state, setState] = useState<LoadState>({ kind: 'loading' });
   const [reloadKey, setReloadKey] = useState(0);
   const [busyAction, setBusyAction] = useState('');
@@ -248,14 +251,15 @@ export function AdminOperationsPanel({ token }: { token: string }) {
     setState({ kind: 'loading' });
     requestJson('/internal/operations/diagnostics', parseDiagnostics, {
       signal: pending.signal,
-      headers: { Authorization: `Bearer ${token}` },
     }).then(result => {
       if (pending.signal.aborted) return;
       if (result.ok) setState({ kind: 'ready', data: result.data });
-      else setState({ kind: 'error', message: result.status === 401 ? '管理员凭据无效，请重新进入管理。' : result.message });
+      else if (result.status === 401) setState({ kind: 'unauthorized' });
+      else if (result.status === 403) setState({ kind: 'forbidden' });
+      else setState({ kind: 'error', message: adminRequestMessage(result.status, '读取', result.message) });
     });
     return () => pending.abort();
-  }, [token, reloadKey]);
+  }, [reloadKey]);
 
   async function refresh() {
     setReloadKey(value => value + 1);
@@ -279,10 +283,9 @@ export function AdminOperationsPanel({ token }: { token: string }) {
     void runAction(key, async () => {
       const result = await requestJson('/internal/operations/replay', value => value, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ outboxId: item.outboxId, topic: item.topic }),
       });
-      if (!result.ok) throw new Error(result.message);
+      if (!result.ok) throw new Error(adminRequestMessage(result.status, '重放', result.message));
       setNotice(`已按原业务身份重放 ${item.outboxId}。`);
     });
   }
@@ -292,9 +295,8 @@ export function AdminOperationsPanel({ token }: { token: string }) {
     void runAction(key, async () => {
       const result = await requestJson(`/internal/operations/tasks/${task.id}/recover`, parseRecoveryResult, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
       });
-      if (!result.ok) throw new Error(result.message);
+      if (!result.ok) throw new Error(adminRequestMessage(result.status, '恢复', result.message));
       setNotice(result.data.recovered === 1
         ? `已为任务 ${task.id} 创建第 ${task.attemptNo + 1} 次执行。`
         : `任务 ${task.id} 仍在 ${task.state}，未重复启动。`);
@@ -318,6 +320,22 @@ export function AdminOperationsPanel({ token }: { token: string }) {
     {actionError && <Alert variant="destructive"><AlertTitle>恢复操作未完成</AlertTitle><AlertDescription>{actionError}</AlertDescription></Alert>}
     {notice && <p role="status">{notice}</p>}
     {state.kind === 'loading' && <PageState state="loading" title="正在读取运行诊断" description="正在汇总队列、任务、版本和邮件状态。" />}
+    {state.kind === 'unauthorized' && (
+      <Alert variant="destructive">
+        <AlertTitle>登录已过期</AlertTitle>
+        <AlertDescription>当前会话已失效，已记录的诊断不会丢失。</AlertDescription>
+        <div className="feed-card-actions">
+          <Button asChild><a href={`/auth/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`}>重新登录</a></Button>
+        </div>
+      </Alert>
+    )}
+    {state.kind === 'forbidden' && (
+      <Alert variant="destructive">
+        <AlertTitle>管理员权限已变化</AlertTitle>
+        <AlertDescription>当前账号没有 Feed 管理权限，已记录的诊断不会丢失。</AlertDescription>
+        <div className="feed-card-actions"><Button asChild><Link to="/">返回通知列表</Link></Button></div>
+      </Alert>
+    )}
     {state.kind === 'error' && <Alert variant="destructive"><AlertTitle>运行诊断读取失败</AlertTitle><AlertDescription>{state.message}</AlertDescription></Alert>}
     {diagnostics && <>
       <dl className="feed-operations-metrics" aria-label="运行指标">

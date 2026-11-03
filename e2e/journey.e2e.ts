@@ -7,6 +7,7 @@ import {
   apiFetchMany,
   control,
   escapeOrigin,
+  fulfillTurnstileScript,
   login,
 } from './support';
 
@@ -22,6 +23,7 @@ beforeEach(async ({ browser }) => {
   const auth = new URL(process.env.FEED_E2E_AUTH_URL!);
   await browser.route('**/*', async route => {
     const target = new URL(route.request.url);
+    if (await fulfillTurnstileScript(route, `${target.origin}${target.pathname}`)) return;
     if (target.origin !== feed.origin && target.origin !== auth.origin) {
       unexpected.push(target.origin);
       await route.abort();
