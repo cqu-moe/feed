@@ -12,6 +12,7 @@ type Task = {
   id: string; kind?: string; sourceId?: string; articleId: string | null; articleTitle?: string; state: string;
   attemptNo: number; workflowInstanceId: string | null; attemptState: string | null;
   articleStatus: string | null; dueAt: number; lastError: string | null;
+  createdAt?: number; updatedAt?: number;
   missingRequirements?: Array<{ kind: string; name: string | null; filename: string | null; state: string; error: string | null }>;
 };
 const states: Record<string, string> = {
@@ -46,6 +47,8 @@ function parseCreated(value: unknown): Task {
   return parseTask(value.task);
 }
 const label = (state: string | null) => state ? states[state] ?? state : '尚未接手';
+const taskTime = (value: number | undefined) => typeof value === 'number' && Number.isFinite(value)
+  ? formatDateTime(new Date(value).toISOString()) : '未记录';
 
 export function AdminTasksPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -130,6 +133,8 @@ export function AdminTasksPage() {
             <h2>任务详情</h2>
             <dl className="feed-source-meta">
               <div><dt>任务</dt><dd>{label(activeTask.state)} · 第 {activeTask.attemptNo} 次执行</dd></div>
+              <div><dt>创建时间</dt><dd>{taskTime(activeTask.createdAt)}</dd></div>
+              <div><dt>状态更新时间</dt><dd>{taskTime(activeTask.updatedAt)}</dd></div>
               <div><dt>Workflow 接手</dt><dd>{label(activeTask.attemptState)}</dd></div>
               <div><dt>通知归档</dt><dd>{activeTask.articleStatus ? articleStatusLabel(activeTask.articleStatus) : '未记录'}</dd></div>
               {activeTask.state === 'deferred' && <div><dt>最早恢复时间</dt><dd>{formatDateTime(new Date(activeTask.dueAt).toISOString())}</dd></div>}
@@ -156,9 +161,12 @@ export function AdminTasksPage() {
           <AdminMailPanel />
           <section aria-label="最近采集任务">
             <h2>最近采集任务</h2>
+            <p>列表保留历史执行结果；请结合状态更新时间判断近期运行情况。</p>
+            <p><a href="https://us.posthog.com/project/662666/dashboard/2205863" target="_blank" rel="noreferrer">在 PostHog 查看采集趋势与积压</a></p>
             {tasks.length === 0 ? <PageState state="empty" title="还没有采集任务" description="填写已发现通知的 ID，发起第一次采集。" /> :
               <div className="feed-article-list">{tasks.map(task => <article className="feed-card" key={task.id}>
                 <div className="feed-article-topline"><strong>{task.articleTitle ?? task.articleId ?? `栏目发现 / 验证 · ${task.sourceId ?? ''}`}</strong><span className="feed-status">{label(task.state)}</span></div>
+                <p>状态更新：{taskTime(task.updatedAt)} · 第 {task.attemptNo} 次执行</p>
                 <p className="feed-admin-id">{task.id}</p>
                 <Button variant="outline" onClick={() => setSelected(task.id)} aria-pressed={selected === task.id}>查看任务详情</Button>
               </article>)}</div>}

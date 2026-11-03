@@ -1,8 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { gunzipSync } from 'node:zlib';
+import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import {
+  buildFeedCollectionAttemptEvents,
+  buildFeedCollectionBacklogSnapshot,
   buildFeedPipelineSummaries,
   buildFeedWorkerEvent,
+  captureFeedPipelineSummaries,
 } from '../worker/telemetry.mjs';
 
 const revisionId = 'a11111111111111111111111';
@@ -107,4 +113,191 @@ test('pipeline summaries count logical task outcomes with stable window identiti
   assert.equal(buildFeedPipelineSummaries([
     { kind: 'capture', state: 'deferred', id: '555555555555555555555555' },
   ], windowStart, 300_000).length, 0);
+});
+
+test('collection attempt telemetry preserves task-attempt identity and machine errors', () => {
+  const taskId = 'c33333333333333333333333';
+  const attempts = buildFeedCollectionAttemptEvents([
+    {
+      task_id: taskId,
+      source_id: 'jwc',
+      task_kind: 'discover',
+      state: 'failed',
+      attempt_count: 2,
+      error_code: 'provider_error',
+      started_at: 1_000,
+      ended_at: 61_000,
+      other_current_attempt: 3,
+      last_error: 'Browser Origin did not become ready (HTTP 200)',
+    },
+    {
+      task_id: taskId,
+      source_id: 'intex',
+      task_kind: 'capture',
+      state: 'succeeded',
+      attempt_count: 3,
+      started_at: 2_000,
+      ended_at: 32_000,
+    },
+    { task_id: 'invalid', task_kind: 'discover', state: 'succeeded', attempt_count: 1 },
+    { task_id: 'd44444444444444444444444', task_kind: 'discover', state: 'starting', attempt_count: 1 },
+  ]);
+
+  assert.equal(attempts.length, 2);
+  assert.deepEqual(attempts.map(({ outcome, error_code, duration_ms, attempt_id }) => ({
+    outcome,
+    error_code,
+    duration_ms,
+    attempt_id,
+  })), [
+    { outcome: 'failure', error_code: 'provider_error', duration_ms: 60_000, attempt_id: `${taskId}:2` },
+    { outcome: 'success', error_code: undefined, duration_ms: 30_000, attempt_id: `${taskId}:3` },
+  ]);
+  const captured = buildFeedWorkerEvent(
+    { POSTHOG_PROJECT_TOKEN: 'public-project-token', ENVIRONMENT: 'production' },
+    'feed_collection_attempt_finished',
+    `feed_task:${taskId}:2`,
+    attempts[0],
+  ).properties;
+  assert.equal(captured.source_id, 'jwc');
+  assert.equal(captured.task_kind, 'discover');
+  assert.equal(captured.attempt_count, 2);
+  assert.equal(JSON.stringify(captured).includes('Browser Origin'), false);
+  assert.equal(JSON.stringify(captured).includes('HTTP 200'), false);
+});
+
+test('collection backlog snapshots remain present when no work terminates', () => {
+  const windowEnd = Date.UTC(2026, 10, 3, 0, 5);
+  const snapshot = buildFeedCollectionBacklogSnapshot({
+    failed_count: 44,
+    blocked_count: 1,
+    deferred_count: 1,
+    active_count: 1,
+    max_attempt_count: 3,
+    oldest_backlog_created_at: windowEnd - 86_400_000,
+    oldest_active_created_at: windowEnd - 600_000,
+    oldest_deferred_created_at: windowEnd - 3_600_000,
+    invalid_created_at: null,
+  }, { enabled_count: 56, failed_count: 2, overdue_count: 2 }, windowEnd, 300_000);
+  const captured = buildFeedWorkerEvent(
+    { POSTHOG_PROJECT_TOKEN: 'public-project-token', ENVIRONMENT: 'production' },
+    'feed_collection_backlog_snapshot',
+    `feed_backlog:collection:${windowEnd - 300_000}`,
+    snapshot,
+  ).properties;
+
+  assert.deepEqual(captured, {
+    $geoip_disable: true,
+    $process_person_profile: false,
+    actor_type: 'system',
+    attempt_id: `pipeline:backlog:${windowEnd - 300_000}`,
+    blocked_count: 1,
+    deferred_count: 1,
+    end_to_end_duration_ms: 86_400_000,
+    environment: 'production',
+    enabled_source_count: 56,
+    failed_count: 44,
+    failed_source_count: 2,
+    active_count: 1,
+    flow: 'pipeline',
+    max_attempt_count: 3,
+    operation: 'pipeline_backlog',
+    operation_id: `pipeline:backlog:${windowEnd - 300_000}`,
+    outcome: 'failure',
+    product: 'feed',
+    release: 'unconfigured',
+    snapshot_kind: 'collection',
+    stage: 'summary',
+    surface: 'worker',
+    task_count: 47,
+    telemetry_version: 2,
+    trigger: 'scheduled',
+    duration_basis: 'task_created_to_backlog_observation',
+    warning_code: 'backlog_present',
+    overdue_source_count: 2,
+    oldest_active_age_ms: 600_000,
+    oldest_deferred_age_ms: 3_600_000,
+    window_end_epoch_ms: windowEnd,
+    window_start_epoch_ms: windowEnd - 300_000,
+  });
+  assert.equal(
+    buildFeedCollectionBacklogSnapshot({}, { enabled_count: 0, failed_count: 0, overdue_count: 0 }, windowEnd, 300_000).task_count,
+    0,
+  );
+});
+
+test('scheduled collection telemetry sends persisted attempts and whole backlog in one batch', async t => {
+  const windowEnd = Date.UTC(2026, 10, 3, 0, 5);
+  const mf = new Miniflare(convertV4MiniflareOptions({
+    modules: true, script: 'export default {}', compatibilityDate: '2026-10-11', d1Databases: ['DB'],
+  }));
+  t.after(() => mf.dispose());
+  const db = await mf.getD1Database('DB');
+  for (const name of ['0001_feed.sql', '0005_task_runtime.sql', '0006_sources.sql']) {
+    const sql = await readFile(`migrations/${name}`, 'utf8');
+    for (const statement of sql.split(/;\s*\n(?=CREATE|ALTER|WITH|PRAGMA|$)/)
+      .map(value => value.trim()).filter(value => value && !/^PRAGMA\b/i.test(value))) {
+      await db.prepare(statement).run();
+    }
+  }
+  await db.prepare(`INSERT INTO sources(id,site_id,name,url,enabled,validation_state,error,next_discovery_at)
+    VALUES ('jwc','7fd03676e5751e9b6dd95ecb','教务处','https://jwc.cqu.edu.cn/',1,'verified',
+      'Browser Origin did not become ready (HTTP 200)',?)`).bind(windowEnd - 7_200_000).run();
+  await db.prepare(`INSERT INTO sources(id,site_id,name,url,enabled,validation_state,next_discovery_at)
+    VALUES ('intex','1922681dab068aba5ab31dd8','国际处','https://intex.cqu.edu.cn/',0,'failed',0)`).run();
+  const taskId = 'e55555555555555555555555';
+  for (const [id, state, attempt, age] of [
+    [taskId, 'failed', 3, 86_400_000],
+    ['f66666666666666666666666', 'deferred', 2, 3_600_000],
+    ['a77777777777777777777777', 'running', 1, 7_200_000],
+  ]) {
+    await db.prepare(`INSERT INTO tasks(id,kind,business_key,source_id,state,attempt_no,due_at,created_at,updated_at)
+      VALUES (?,'discover',?,'jwc',?,?,0,?,?)`)
+      .bind(id, `discover:${id}`, state, attempt, windowEnd - age, windowEnd - 260_000).run();
+  }
+  for (const [attempt, endedAt] of [[1, windowEnd - 260_000], [2, windowEnd], [3, windowEnd + 1]]) {
+    await db.prepare(`INSERT INTO task_attempts(task_id,attempt_no,workflow_instance_id,state,started_at,ended_at,error_code)
+      VALUES (?,?,?,'failed',?,?,'provider_error')`)
+      .bind(taskId, attempt, `task-${taskId}-a${attempt}`, endedAt - 60_000, endedAt).run();
+  }
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const request = new Request(input, init);
+    assert.equal(new URL(request.url).hostname, 'posthog.test');
+    const body = Buffer.from(await request.arrayBuffer());
+    requests.push(JSON.parse((request.headers.get('content-encoding') === 'gzip' ? gunzipSync(body) : body).toString()));
+    return Response.json({});
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const closing = [];
+  await captureFeedPipelineSummaries(
+    { DB: db, POSTHOG_PROJECT_TOKEN: 'public-project-token', POSTHOG_HOST: 'https://posthog.test',
+      ENVIRONMENT: 'test', POSTHOG_TEST_CAPTURE: 'true' },
+    { waitUntil(promise) { closing.push(promise); } },
+    () => windowEnd,
+  );
+  await Promise.all(closing);
+  assert.equal(requests.length, 1);
+  const events = requests[0].batch;
+  assert.equal(events.length, 4);
+  const attempts = events.filter(event => event.event === 'feed_collection_attempt_finished');
+  assert.deepEqual(attempts.map(event => event.properties.attempt_id), [`${taskId}:1`, `${taskId}:2`]);
+  for (const event of attempts) {
+    assert.equal(event.properties.source_id, 'jwc');
+    assert.equal(event.properties.error_code, 'provider_error');
+    assert.equal(event.properties.duration_ms, 60_000);
+    assert.equal(event.properties.is_test, true);
+  }
+  const snapshot = events.find(event => event.event === 'feed_collection_backlog_snapshot').properties;
+  assert.equal(snapshot.failed_count, 1);
+  assert.equal(snapshot.deferred_count, 1);
+  assert.equal(snapshot.active_count, 1);
+  assert.equal(snapshot.enabled_source_count, 1);
+  assert.equal(snapshot.failed_source_count, 1);
+  assert.equal(snapshot.overdue_source_count, 1);
+  assert.equal(snapshot.oldest_active_age_ms, 7_200_000);
+  assert.equal(snapshot.oldest_deferred_age_ms, 3_600_000);
+  assert.equal(events.find(event => event.event === 'feed_pipeline_summary').properties.failure_count, 1);
+  assert.equal(JSON.stringify(requests).includes('Browser Origin'), false);
 });

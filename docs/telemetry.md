@@ -147,6 +147,35 @@ Every five minutes, the scheduled Worker reads the authoritative D1 task ledger 
 
 Counts are logical tasks from the task ledger, not workflow attempts or queue dispatches. `active_count` separates queued/starting/running/deferred work and must not be added to terminal success/failure rates. A task is counted in the window where its authoritative terminal state is observed.
 
+### `feed_collection_attempt_finished`
+
+Emitted from the same five-minute scheduled window for at most the first 1,000 persisted collection-attempt rows that ended in that window, ordered by end time, task ID, and attempt number. The query keeps every historical attempt, even after task recovery advances `tasks.attempt_no`; the cap applies only to telemetry volume, so a burst beyond 1,000 can be dropped without an under-count indicator. It exposes the persisted attempt state and machine `error_code`; it does not promote a flattened code to a browser diagnosis or send `last_error`, URLs, HTML, screenshots, credentials, or other business objects.
+
+- `trigger`: `scheduled`; `operation`: `collection_attempt`; `flow`: `collection`; `stage`: `finished`.
+- `operation_id`: logical task ID; `attempt_id`: `<task_id>:<attempt_count>`. This identity makes retried attempts individually analyzable without changing the logical task.
+- `task_id`, `source_id` (nullable short source identifier), `task_kind` (`discover` / `capture` / `recheck` / `backfill`), `state`, and `attempt_count`.
+- `state` and outcome mapping: `succeeded` → `success`; `failed` → `failure`; `cancelled` → `canceled`; `blocked` and `deferred` → `partial`.
+- Non-success attempts carry the bounded persisted `error_code` (or `unknown` when absent/unsafe). Raw task/attempt error text is never sent.
+- `duration_ms`: persisted attempt `started_at` to `ended_at` when both are valid; `duration_basis`: `task_attempt_started_to_ended`. Missing timestamps omit both fields rather than inventing a duration.
+- For charts, use `attempt_id` as the unique attempt key. Retries of the same logical task intentionally have distinct `attempt_id` values. The deterministic IDs make duplicates recognizable after a Cron replay, but do not make PostHog delivery exactly-once.
+
+### `feed_collection_backlog_snapshot`
+
+Emitted once per normal five-minute collection telemetry window, even when nothing terminates. D1 aggregates all retained historical and current collection tasks in failed, blocked, deferred, queued, starting, or running states so quiet windows do not hide debt from before the current release; no bounded row sample can silently under-count it. Cron retry or replay has no persisted emission ledger, so it can produce duplicate attempt or snapshot events.
+
+- `trigger`: `scheduled`; `operation`: `pipeline_backlog`; `flow`: `pipeline`; `stage`: `summary`.
+- `snapshot_kind`: `collection`.
+- `operation_id` and `attempt_id`: `pipeline:backlog:<window_start_epoch_ms>`, matching the deterministic summary-window identity.
+- `failed_count`, `blocked_count`, `deferred_count`, `active_count`, `task_count`, and `max_attempt_count`.
+- `oldest_active_age_ms` and `oldest_deferred_age_ms`: observation boundary minus oldest current active/deferred task creation timestamp. Invalid or absent timestamps omit the field.
+- `enabled_source_count`, `failed_source_count`, and `overdue_source_count`: collection sources enabled at both source/site level, the enabled subset with a current non-empty source error or `validation_state='failed'`, and the enabled verified subset overdue by at least one hour (`next_discovery_at` is positive and no later than one hour before the observation boundary).
+- `end_to_end_duration_ms`: oldest included failed/blocked/deferred/active task creation to the observation boundary; `duration_basis`: `task_created_to_backlog_observation`. An empty snapshot has zero counts and omits the duration fields.
+- `outcome`: `failure` when failed/blocked work exists; otherwise `partial` when deferred/active work exists; otherwise `success`. `warning_code:backlog_present` marks any non-empty snapshot.
+
+The snapshot is a monitoring observation, not an alert threshold or proof that a source is currently failing. Use the latest snapshot value in charts and do not sum it across windows; historical task counts are stock metrics. A Cron replay can duplicate a snapshot event even though its window identity is deterministic.
+
+For PostHog dashboard 2205863, chart the concrete new event names directly: `feed_collection_attempt_finished` for source/kind/state/error trends and `feed_collection_backlog_snapshot` for latest stock/health values. Insights may be defined before deployment, but remain empty until the production Worker running this contract emits the events.
+
 ## Identity, replay, and privacy
 
 After `/api/session` confirms authentication, Web identifies only with the authenticated central `user.id` string. Logout and A→B account switching call `reset()` before identifying the new ID. Name, email, student ID, source credentials, and cookies are not telemetry identity.

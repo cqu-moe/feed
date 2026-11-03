@@ -1,8 +1,9 @@
 import {scrape} from './browser-scrape.mjs';
+import {isExplicitlyEmptyList} from '../crawler/list-state.mjs';
 import {normalizedDate} from './utils.mjs';
 import {canonicalUrl} from './sources.mjs';
 
-function listPage(input) {
+function listPage(input,isExplicitlyEmptyList) {
   const date=text=>{
     const match=String(text??'').match(/(20\d{2})[年.\/-]\s*(\d{1,2})[月.\/-]\s*(\d{1,2})(?:日)?(?:[T\s]+\d{1,2}:\d{2}(?::\d{2}(?:[.]\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?/);
     if(!match)return null;
@@ -71,7 +72,7 @@ function listPage(input) {
       next.push(url.href);
     }
   }
-  return {articles,next:[...new Set(next)],title:document.title,externalArticleCount};
+  return {articles,next:[...new Set(next)],title:document.title,externalArticleCount,explicitlyEmpty:isExplicitlyEmptyList(document)};
 }
 
 export async function discoverList(env,source,url,{scrape:scrapeDependency=scrape,baselineCutoffAt,allowExternalOnly=false,now=()=>Date.now(),siteAdmission,executionHandoff}={}){
@@ -82,7 +83,7 @@ export async function discoverList(env,source,url,{scrape:scrapeDependency=scrap
   const data=await scrapeDependency(env,target.href,{
     source,formats:['links'],readiness:{articlePattern:pattern,allowExternalOnly},
     ...(siteAdmission?{siteAdmission}:{}),...(executionHandoff===false?{executionHandoff:false}:{}),
-    actions:[{type:'executeJavascript',script:`var __name=value=>value; (${listPage.toString()})(${JSON.stringify(actionSource)})`}],
+    actions:[{type:'executeJavascript',script:`var __name=value=>value; (${listPage.toString()})(${JSON.stringify(actionSource)},${isExplicitlyEmptyList.toString()})`}],
   });
   let page=data.actions?.javascriptReturns?.[0]?.value;
   if(typeof page==='string')page=JSON.parse(page);
@@ -97,7 +98,7 @@ export async function discoverList(env,source,url,{scrape:scrapeDependency=scrap
       ...published,
     });
   }
-  if(!articles.length&&!(allowExternalOnly&&page.externalArticleCount>0))throw new Error('No article links found in list');
+  if(!articles.length&&page.explicitlyEmpty!==true&&!(allowExternalOnly&&page.externalArticleCount>0))throw new Error('No article links found in list');
   return {
     articles,added:articles.length,dated:articles.filter(row=>row.precision!=='unknown').length,
     undated:articles.length-articles.filter(row=>row.precision!=='unknown').length,
