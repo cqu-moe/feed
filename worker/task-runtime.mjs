@@ -42,12 +42,6 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
 
     async dispatchDueOutbox(limit=20){
       const timestamp=now(),size=boundedInteger(limit,20,1,100);
-      if(env.SOURCE_MANAGEMENT_ENABLED==='true'){
-        const history=await env.DB.prepare(`SELECT 1 FROM outbox o JOIN tasks t
-          ON t.id=json_extract(o.payload_json,'$.taskId') WHERE o.topic='feed-jobs' AND o.state='queued'
-          AND t.kind='backfill' AND t.state='queued' AND o.available_at<=? LIMIT 1`).bind(timestamp).first();
-        if(history)await createSources(env,{now}).scheduleDue({limit});
-      }
       const lane="CASE WHEN t.kind='discover' THEN 0 WHEN t.kind='backfill' THEN 2 ELSE 1 END";
       // Read a bounded candidate batch from each lane: exhausted live permits
       // must not hide history or events that still have capacity to dispatch.

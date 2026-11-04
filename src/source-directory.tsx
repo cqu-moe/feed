@@ -68,13 +68,16 @@ export function SourceDirectory({ sources, admin }: { sources: Source[]; admin: 
 
 function ColumnDetails({ source, status, admin }: { source: Source; status: SourceStatus; admin: boolean }) {
   const scheduled = source.enabled && source.siteEnabled && source.validationState === 'verified';
+  const plannedAt = scheduled ? source.scheduledDiscoveryAt : null;
   return <div className="directory-detail">
     {source.error && <Alert variant="destructive"><AlertTitle>最近一次采集失败</AlertTitle><AlertDescription>{source.error}</AlertDescription></Alert>}
     <dl>
       <div><dt>{status.timeLabel}</dt><dd>{formatDateTime(source.lastRunAt)}</dd></div>
       {admin && <div><dt>刷新间隔</dt><dd>{refreshIntervalLabel(source.refreshIntervalSec)}</dd></div>}
       <div><dt>已存档</dt><dd>{source.articleCount} 条</dd></div>
-      {admin && <div><dt>下次检查</dt><dd>{!source.maintenanceStateKnown ? '未知' : scheduled ? discoveryTimeLabel(source.nextDiscoveryAt) : '未安排'}</dd></div>}
+      {plannedAt != null && plannedAt > 0
+        ? <div><dt>本轮最早检查</dt><dd>{discoveryTimeLabel(plannedAt)}</dd></div>
+        : admin && <div><dt>下次检查</dt><dd>{!source.maintenanceStateKnown ? '未知' : scheduled ? discoveryTimeLabel(source.nextDiscoveryAt) : '未安排'}</dd></div>}
     </dl>
     <a className="feed-plain-link" href={source.listUrl ?? source.url} target="_blank" rel="noreferrer">打开原栏目 <ExternalLink aria-hidden="true" /></a>
   </div>;

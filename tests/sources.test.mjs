@@ -139,7 +139,7 @@ async function fixture({versioned=false,notifications=false,discoveryPages=2,env
           }},CAPTURE:workflow,DISCOVERY:workflow,FEED_JOBS:{
             async send(body,options){
               const task=await database.prepare('SELECT kind,source_id AS sourceId FROM tasks WHERE id=?').bind(body.taskId??'').first();
-              globalThis.SOURCES_SENT.push({...body,...task});return await actualQueue.send(body,options);},
+              globalThis.SOURCES_SENT.push({...body,...task,options});return await actualQueue.send(body,options);},
           }};
           globalThis.SOURCES_ENV=env;
           return env;
@@ -150,7 +150,12 @@ async function fixture({versioned=false,notifications=false,discoveryPages=2,env
             if(url.pathname==='/fixture/clock'){fixedNow=(await request.json()).now;return Response.json({now:fixedNow});}
             if(url.pathname==='/fixture/list-options'){globalThis.SOURCES_LIST_OPTIONS=await request.json();return Response.json({ok:true});}
             if(url.pathname==='/fixture/sent')return Response.json(globalThis.SOURCES_SENT);
-            if(url.pathname==='/fixture/schedule-only')return Response.json(await createSources(env,{now:runtimeNow}).scheduleDue());
+            if(url.pathname==='/fixture/schedule-only')return Response.json(await createSources(env,{now:runtimeNow}).scheduleDue(await request.json()));
+            if(url.pathname==='/fixture/cron'){
+              const jobs=[];
+              await worker.scheduled(await request.json(),env,{waitUntil(job){jobs.push(job);}});
+              await Promise.all(jobs);return Response.json({ok:true});
+            }
             if(url.pathname==='/fixture/dispatch')return Response.json(await createTaskRuntime(env,{now:runtimeNow}).dispatchDueOutbox((await request.json()).limit));
             if(url.pathname==='/fixture/extra-dates'){globalThis.SOURCES_EXTRA_DATES=true;return Response.json({ok:true});}
             if(url.pathname==='/fixture/backfill-dates'){globalThis.SOURCES_BACKFILL_DATES=true;return Response.json({ok:true});}
@@ -750,6 +755,7 @@ test('live tasks dispatch first while admin starts and continuation pages share 
     await control(mf,'clock',{now:Date.parse('2026-10-12T04:00:00Z')});
     await db.prepare('UPDATE sources SET next_discovery_at=? WHERE id=?').bind(Date.parse('2026-10-13T00:00:00Z'),history).run();
     await control(mf,'submit-backfill',{sourceId:history,requestId:'budget-history-30',windowDays:30});
+    await control(mf,'schedule-only',{});
     const before=(await control(mf,'sent',{})).length;
     await Promise.all([control(mf,'dispatch',{}),control(mf,'dispatch',{})]);
     await waitFor(async()=>{
@@ -796,6 +802,93 @@ test('due scans enqueue all eligible columns once and keep active retries in the
     await control(mf,'clock',{now:now+2*86_400_000});
     assert.deepEqual((await control(mf,'schedule-only',{})).scheduled,[],
       'queued work and deferred retries must not create another live cycle');
+  }finally{await mf.dispose();}
+});
+
+test('dispatching history and five-minute recovery never scan due columns',async()=>{
+  const {mf,admin,gate}=await fixture();
+  try{
+    const site=await request(mf,admin,'/internal/sites',{method:'POST',body:{name:'派发不扫描',origin:'https://a.test'}});
+    const live=await createVerifiedSource(mf,admin,site.data.site.id,'https://a.test/list-a.htm');
+    const history=await createHistorySource(mf,admin,site.data.site.id,'https://a.test/list-b.htm');
+    const before=(await request(mf,admin,'/internal/capture-tasks')).data.tasks.map(task=>task.id);
+    gate.url='https://a.test/list-b.htm';
+    await control(mf,'submit-backfill',{sourceId:history,requestId:'no-hidden-rescan'});
+    await control(mf,'dispatch',{});
+    await control(mf,'cron',{cron:'*/5 * * * *',scheduledTime:Date.now()});
+    const tasks=(await request(mf,admin,'/internal/capture-tasks')).data.tasks;
+    assert.deepEqual(tasks.filter(task=>task.sourceId===live&&!before.includes(task.id)),[],
+      'only the hourly scan or an explicit admin schedule may create live checks');
+    assert.equal((await request(mf,admin,`/internal/sources/${live}`)).data.source.nextDiscoveryAt,0);
+  }finally{gate.release?.();await mf.dispose();}
+});
+
+test('hourly scans stagger each site from the original Cron hour across batches and delayed invocation',async()=>{
+  const {mf,db,admin}=await fixture();
+  try{
+    const site=await request(mf,admin,'/internal/sites',{method:'POST',body:{
+      requestId:'hourly-stagger-site',name:'整点错峰站点',origin:'https://a.test',
+    }});
+    const a=await createVerifiedSource(mf,admin,site.data.site.id,'https://a.test/list-a.htm');
+    const b=await createVerifiedSource(mf,admin,site.data.site.id,'https://a.test/list-b.htm');
+    const later=await createVerifiedSource(mf,admin,site.data.site.id,'https://a.test/list.htm');
+    const scheduledTime=Date.parse('2026-11-03T10:00:00Z');
+    const now=Date.parse('2026-11-03T10:07:00.250Z');
+    await control(mf,'clock',{now});
+    await db.prepare('UPDATE sources SET next_discovery_at=?').bind(scheduledTime-59*60_000).run();
+    await db.prepare('UPDATE sources SET next_discovery_at=? WHERE id=?').bind(scheduledTime+4*60_000,later).run();
+    const before=(await control(mf,'scrapes',{})).calls;
+    const sentBefore=(await control(mf,'sent',{})).length;
+    const first=await control(mf,'schedule-only',{limit:1,scheduledTime});
+    assert.equal(first.scheduled.length,1);
+    const taskResponse=await request(mf,admin,`/internal/capture-tasks/${first.scheduled[0]}`);
+    assert.equal(taskResponse.status,200,JSON.stringify(taskResponse));
+    const task=taskResponse.data.task;
+    // Fixed site/hour vector; changing process time cannot change the plan.
+    assert.equal(task.dueAt,Date.parse('2026-11-03T10:49:51Z'));
+    await control(mf,'cron',{cron:'0 * * * *',scheduledTime});
+    await control(mf,'cron',{cron:'0 * * * *',scheduledTime});
+    const sent=(await control(mf,'sent',{})).slice(sentBefore).filter(row=>row.kind==='discover');
+    assert.deepEqual(sent.map(row=>row.sourceId).sort(),[a,b].sort());
+    assert.ok(sent.every(row=>row.options.delaySeconds===2571));
+    const tasks=(await request(mf,admin,'/internal/capture-tasks')).data.tasks.filter(row=>row.kind==='discover');
+    assert.equal(tasks.filter(row=>[a,b].includes(row.sourceId)&&row.state==='queued').length,2);
+    assert.deepEqual((await control(mf,'scrapes',{})).calls,before,'Queue waiting must not visit the source');
+    for(const id of [a,b])assert.equal((await request(mf,admin,`/internal/sources/${id}`)).data.source.lastRunAt,null);
+
+    await db.prepare("UPDATE tasks SET state='succeeded' WHERE kind='discover' AND state='queued'").run();
+    await db.prepare('UPDATE sources SET next_discovery_at=? WHERE id IN (?,?)').bind(scheduledTime+3_600_000,a,b).run();
+    await control(mf,'clock',{now:Date.parse('2026-11-03T11:01:00Z')});
+    const next=await control(mf,'schedule-only',{scheduledTime:scheduledTime+3_600_000});
+    const plans=await Promise.all(next.scheduled.map(async id=>(await request(mf,admin,`/internal/capture-tasks/${id}`)).data.task));
+    const nextColumns=plans.filter(row=>[a,b].includes(row.sourceId));
+    assert.deepEqual(nextColumns.map(row=>row.sourceId).sort(),[a,b].sort());
+    assert.ok(nextColumns.every(row=>row.dueAt===Date.parse('2026-11-03T11:09:38Z')));
+  }finally{await mf.dispose();}
+});
+
+test('source APIs expose only a valid current-round plan without recording success',async()=>{
+  const {mf,db,admin}=await fixture();
+  try{
+    const site=await request(mf,admin,'/internal/sites',{method:'POST',body:{
+      requestId:'hourly-stagger-site',name:'本轮排班状态',origin:'https://a.test',
+    }});
+    const id=await createVerifiedSource(mf,admin,site.data.site.id,'https://a.test/list-a.htm');
+    const scheduledTime=Date.parse('2026-11-03T10:00:00Z');
+    const lastRunAt='2026-11-02T09:01:00.000Z';
+    await control(mf,'clock',{now:Date.parse('2026-11-03T10:12:00Z')});
+    await db.prepare('UPDATE sources SET last_run_at=?,refresh_interval_sec=86400,next_discovery_at=? WHERE id=?')
+      .bind(lastRunAt,Date.parse('2026-11-03T09:01:00Z'),id).run();
+    const {scheduled}=await control(mf,'schedule-only',{scheduledTime});
+    const publicSource=async()=>(await request(mf,admin,'/api/sources')).data.sources.find(source=>source.id===id);
+    const source=await publicSource();
+    assert.equal(source.scheduledDiscoveryAt,Date.parse('2026-11-03T10:49:51Z'));
+    assert.equal(source.lastRunAt,lastRunAt);
+    assert.equal((await request(mf,admin,'/internal/sources')).data.sources.find(source=>source.id===id).scheduledDiscoveryAt,source.scheduledDiscoveryAt);
+    await db.prepare('UPDATE sources SET config_version=2 WHERE id=?').bind(id).run();
+    assert.equal((await publicSource()).scheduledDiscoveryAt,null,'configuration changes invalidate the public plan immediately');
+    await db.prepare('UPDATE sources SET config_version=1 WHERE id=?').bind(id).run();
+    assert.equal((await publicSource()).scheduledDiscoveryAt,source.scheduledDiscoveryAt);
   }finally{await mf.dispose();}
 });
 
@@ -1250,7 +1343,9 @@ async function applyMigration(db,sql){
 }
 
 async function control(mf,path,body){
-  return (await mf.dispatchFetch('https://feed.test/fixture/'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+  const response=await mf.dispatchFetch('https://feed.test/fixture/'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  assert.equal(response.status,200,await response.clone().text());
+  return response.json();
 }
 
 async function seedDiscoveryPermit(db,{id,state,taskAttempt,permitAttempt,admittedAt}){

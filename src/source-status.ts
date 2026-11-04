@@ -10,6 +10,7 @@ export type SourceStatus = {
 
 // Wait for the next hourly scan, then allow ten minutes for Queue processing.
 const CRON_TOLERANCE_MS = 70 * 60 * 1000;
+const PROCESSING_GRACE_MS = 10 * 60 * 1000;
 
 function parseTime(value: string | null): number | null {
   if (!value) return null;
@@ -43,6 +44,11 @@ export function sourceStatus(source: Source, now = Date.now()): SourceStatus {
   }
   if (source.error) {
     return { label: '最近有错误', tone: 'is-error', timeLabel: '最近检查' };
+  }
+  if (source.scheduledDiscoveryAt != null && source.scheduledDiscoveryAt > 0) {
+    const label = now > source.scheduledDiscoveryAt + PROCESSING_GRACE_MS
+      ? '检查已超期' : now < source.scheduledDiscoveryAt ? '等待计划检查' : '检查处理中';
+    return { label, tone: 'is-warning', timeLabel: source.lastRunAt ? '最近成功检查' : '最近检查' };
   }
   if (!source.lastRunAt) {
     return { label: '等待首次采集', tone: 'is-warning', timeLabel: '最近检查' };

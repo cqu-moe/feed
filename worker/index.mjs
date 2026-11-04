@@ -28,7 +28,7 @@ export default {
       jobs.push(archive.resumeExtract());
     }
     if(controller.cron==='0 * * * *'&&env.TASK_RUNTIME_ENABLED==='true'){
-      jobs.push(sources.scheduleDue());
+      jobs.push(sources.scheduleDue({scheduledTime:controller.scheduledTime}).then(()=>createTaskRuntime(env).dispatchDueOutbox()));
       if(env.ARCHIVE_VERSIONS_ENABLED==='true')jobs.push(createArchiveRecheck(env).scheduleDue());
     }
     if(controller.cron==='*/5 * * * *'&&env.TASK_RUNTIME_ENABLED==='true'){

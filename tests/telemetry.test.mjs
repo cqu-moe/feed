@@ -227,7 +227,7 @@ test('collection backlog snapshots remain present when no work terminates', () =
 });
 
 test('scheduled collection telemetry sends persisted attempts and whole backlog in one batch', async t => {
-  const windowEnd = Date.UTC(2026, 10, 3, 0, 5);
+  const windowEnd = Date.UTC(2026, 10, 3, 10, 15);
   const mf = new Miniflare(convertV4MiniflareOptions({
     modules: true, script: 'export default {}', compatibilityDate: '2026-10-11', d1Databases: ['DB'],
   }));
@@ -249,6 +249,38 @@ test('scheduled collection telemetry sends persisted attempts and whole backlog 
     await db.prepare(`INSERT INTO sources(id,site_id,name,url,enabled,validation_state,refresh_interval_sec,next_discovery_at,last_run_at)
       VALUES (?,'7fd03676e5751e9b6dd95ecb',?,'https://jwc.cqu.edu.cn/',?,'verified',86400,?,?)`)
       .bind(id, id, enabled, windowEnd + 3_600_000, new Date(windowEnd - age).toISOString()).run();
+  }
+  // 09:01 became due, the 10:00 scan selected 10:48; observe at 10:15.
+  const hour=Date.UTC(2026,10,3,10);
+  const scheduledCases=[
+    {id:'planned',plan:hour+48*60_000},
+    {id:'processing',plan:hour+12*60_000},
+    {id:'first-planned',plan:hour+48*60_000,first:true},
+    {id:'first-expired',plan:hour+4*60_000,first:true},
+    {id:'grace-expired',plan:hour+4*60_000},
+    {id:'workflow-backoff',plan:hour+54*60_000,original:hour+4*60_000,state:'running'},
+    {id:'missed-previous',plan:hour+48*60_000,age:2*86_400_000+74*60_000},
+    {id:'old-config',plan:hour+48*60_000,version:2},
+    {id:'retry-plan',plan:hour+48*60_000,attempt:2},
+    {id:'failed-plan',plan:hour+48*60_000,state:'failed'},
+    {id:'failed-send',plan:hour+48*60_000,launchError:'send failed'},
+    {id:'existing-error',plan:hour+48*60_000,error:'origin error'},
+    {id:'out-of-hour',plan:hour+3_600_000},
+    {id:'pagination',plan:hour+48*60_000,page:2},
+    {id:'no-launch',plan:hour+48*60_000,noLaunch:true},
+  ];
+  for(const row of scheduledCases){
+    await db.prepare(`INSERT INTO sources(id,site_id,name,url,enabled,validation_state,refresh_interval_sec,next_discovery_at,last_run_at,error)
+      VALUES (?,'7fd03676e5751e9b6dd95ecb',?,'https://jwc.cqu.edu.cn/',1,'verified',86400,?,?,?)`)
+      .bind(row.id,row.id,windowEnd+86_400_000,row.first?null:new Date(windowEnd-(row.age??86_400_000+74*60_000)).toISOString(),row.error??null).run();
+    await db.prepare(`INSERT INTO tasks(id,kind,business_key,source_id,state,attempt_no,due_at,payload_json,created_at,updated_at)
+      VALUES (?,'discover',?,?,?, ?,?,?,?,?)`)
+      .bind(row.id,'discover:'+row.id,row.id,row.state??'queued',row.attempt??1,row.plan,JSON.stringify({
+        source:{siteId:'7fd03676e5751e9b6dd95ecb',configVersion:row.version??1},page:row.page??1,scheduledHour:hour,scheduledStartAt:row.original??row.plan,
+      }),hour,hour).run();
+    if(!row.noLaunch)await db.prepare(`INSERT INTO outbox(id,topic,dedupe_key,payload_json,available_at,last_error,created_at,updated_at)
+      VALUES (?,'feed-jobs',?,'{}',?,?,?,?)`)
+      .bind(row.id,'start:'+row.id+':a1',hour,row.launchError??null,hour,hour).run();
   }
   const taskId = 'e55555555555555555555555';
   for (const [id, state, attempt, age] of [
@@ -295,12 +327,12 @@ test('scheduled collection telemetry sends persisted attempts and whole backlog 
     assert.equal(event.properties.is_test, true);
   }
   const snapshot = events.find(event => event.event === 'feed_collection_backlog_snapshot').properties;
-  assert.equal(snapshot.failed_count, 1);
+  assert.equal(snapshot.failed_count, 2);
   assert.equal(snapshot.deferred_count, 1);
-  assert.equal(snapshot.active_count, 1);
-  assert.equal(snapshot.enabled_source_count, 3);
-  assert.equal(snapshot.failed_source_count, 1);
-  assert.equal(snapshot.overdue_source_count, 2, 'a future schedule must not hide stale successful checks');
+  assert.equal(snapshot.active_count, 15);
+  assert.equal(snapshot.enabled_source_count, 18);
+  assert.equal(snapshot.failed_source_count, 2);
+  assert.equal(snapshot.overdue_source_count, 14, 'only valid current-round plans suppress overdue checks within their own processing grace');
   assert.equal(snapshot.oldest_active_age_ms, 7_200_000);
   assert.equal(snapshot.oldest_deferred_age_ms, 3_600_000);
   assert.equal(events.find(event => event.event === 'feed_pipeline_summary').properties.failure_count, 1);

@@ -1,3 +1,4 @@
+import {scheduledDiscoveryAtSql} from './source-schedule.mjs';
 import {backfillEnabledSql,readBackfillControl} from './backfill-control.mjs';
 import staticSources from './sources.json';
 import {savedDiscoveryPage} from './discovery-journal.mjs';
@@ -7,7 +8,7 @@ import {launchOutboxId,launchOutboxStatement} from './task-statements.mjs';
 import {articleSourceAssociationStatements} from './notifications.mjs';
 import {articleId,cleanError,cutoffDate,sha} from './utils.mjs';
 
-const sourceSelect=`SELECT s.*,st.name AS site_name,st.origin AS site_origin,st.enabled AS site_enabled
+const sourceSelect=`SELECT s.*,${scheduledDiscoveryAtSql()} AS scheduled_discovery_at,st.name AS site_name,st.origin AS site_origin,st.enabled AS site_enabled
   FROM sources s JOIN sites st ON st.id=s.site_id`;
 const trackingParameters=[/^utm_/i,/^fbclid$/i,/^gclid$/i,/^spm$/i];
 
@@ -287,21 +288,25 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
         .bind(JSON.stringify({error:cleanError(error)}),timestamp(),id,configVersion,taskId,taskId,attemptNo).run();
     },
 
-    async scheduleDue({limit=100}={}){
+    async scheduleDue({limit=100,scheduledTime}={}){
       if(env.CRAWL_ENABLED!=='true'||env.TASK_RUNTIME_ENABLED!=='true'||env.SOURCE_MANAGEMENT_ENABLED!=='true')return {scheduled:[]};
       const at=timestamp(),size=boundedInteger(limit,100,1,100);
+      const scheduledHour=scheduledTime===undefined?null:Math.floor(scheduledTime/3_600_000)*3_600_000;
+      const cutoff=scheduledHour??at;
       const rows=await env.DB.prepare(`${sourceSelect}
         WHERE s.enabled=1 AND st.enabled=1 AND s.validation_state='verified' AND s.next_discovery_at<=?
           AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.source_id=s.id AND t.kind='discover'
             AND t.state IN ('queued','starting','running','deferred'))
-        ORDER BY s.next_discovery_at,s.id LIMIT ?`).bind(at,size).all();
+        ORDER BY s.next_discovery_at,s.id LIMIT ?`).bind(cutoff,size).all();
       const scheduled=[];const scheduledIds=[];
       for(const row of rows.results){
         try{
-          const source=rowFromDb(row),slot=row.next_discovery_at>0?row.next_discovery_at:at;
+          const source=rowFromDb(row),slot=scheduledHour??(row.next_discovery_at>0?row.next_discovery_at:at);
+          const offset=scheduledHour===null?0:parseInt((await sha(`${source.siteId}:${scheduledHour}`)).slice(0,8),16)%3600;
+          const dueAt=scheduledHour===null?at:scheduledHour+offset*1000;
           const built=await discoveryTaskStatements(env,source,{
-            page:1,checkpoint:{nextUrls:sourceStartUrls(source),visited:[]},scheduledSlot:slot,previousDue:row.next_discovery_at,
-          },{timestamp:at,advanceSource:true});
+            page:1,checkpoint:{nextUrls:sourceStartUrls(source),visited:[]},scheduledSlot:slot,previousDue:row.next_discovery_at,...(scheduledHour===null?{}:{scheduledHour}),
+          },{timestamp:at,advanceSource:true,dueAt});
           const committed=await env.DB.batch(built.statements);
           if(!committed[1].results?.length)continue;
           const taskId=built.taskId;
@@ -498,10 +503,11 @@ async function liveSourceControl(env,sourceId,configVersion){
   return null;
 }
 
-async function discoveryTaskStatements(env,source,context,{timestamp,advanceSource,taskGuard}){
+async function discoveryTaskStatements(env,source,context,{timestamp,advanceSource,taskGuard,dueAt=timestamp}){
   const businessKey=`discover:${source.id}:${source.configVersion}:${context.scheduledSlot}:p${context.page}`;
   const taskId=(await sha(businessKey)).slice(0,24);
-  const payload={source,checkpoint:context.checkpoint,page:context.page,scheduledSlot:context.scheduledSlot};
+  const payload={source,checkpoint:context.checkpoint,page:context.page,scheduledSlot:context.scheduledSlot,
+    ...(context.scheduledHour===undefined?{}:{scheduledHour:context.scheduledHour,scheduledStartAt:dueAt,previousDue:context.previousDue})};
   const nextDue=timestamp+source.refreshIntervalSec*1000;
   const statements=[];
   const sourceGuard=advanceSource
@@ -518,7 +524,7 @@ async function discoveryTaskStatements(env,source,context,{timestamp,advanceSour
     env.DB.prepare(`INSERT INTO tasks(id,kind,business_key,source_id,article_id,payload_json,state,priority,due_at,attempt_no,created_at,updated_at)
       SELECT ?,'discover',?,?,NULL,?,'queued',90,?,1,?,? FROM sources WHERE id=? AND config_version=? AND EXISTS(SELECT 1 FROM sites WHERE sites.id=sources.site_id AND sites.enabled=1) AND ${sourceGuard}${parentGuard}
       ON CONFLICT(business_key) DO NOTHING RETURNING id`)
-      .bind(taskId,businessKey,source.id,JSON.stringify(payload),timestamp,timestamp,timestamp,source.id,source.configVersion,...(advanceSource?[nextDue]:[]),...parentGuardArgs),
+      .bind(taskId,businessKey,source.id,JSON.stringify(payload),dueAt,timestamp,timestamp,source.id,source.configVersion,...(advanceSource?[nextDue]:[]),...parentGuardArgs),
     launchOutboxStatement(env,{id:await launchOutboxId(taskId,1),taskId,attempt:1,timestamp,
       guardSql:'kind=?',guardArgs:['discover']}),
   );
@@ -566,7 +572,7 @@ function rowFromDb(row){
       ...(config.sampleArticleUrl?{sampleArticleUrl:config.sampleArticleUrl}:{}),
     },
     configVersion:row.config_version,enabled:row.enabled===1,siteEnabled:row.site_enabled===1,
-    refreshIntervalSec:row.refresh_interval_sec,nextDiscoveryAt:row.next_discovery_at,
+    refreshIntervalSec:row.refresh_interval_sec,nextDiscoveryAt:row.next_discovery_at,scheduledDiscoveryAt:row.scheduled_discovery_at??null,
     baselineCutoffAt:row.baseline_cutoff_at,backfillCursor:cursor,
     validationState:row.validation_state,validationJson:safeJson(row.validation_json,null),
     validatedAt:row.validated_at,validationTaskId:row.validation_task_id,timezone:row.source_timezone,

@@ -49,6 +49,7 @@ export type Source = {
   validationState?: 'draft' | 'verified' | 'failed' | (string & {});
   refreshIntervalSec?: number | null;
   nextDiscoveryAt?: number | null;
+  scheduledDiscoveryAt?: number | null;
   lastRunAt: string | null;
   articleCount: number;
   error?: string | null;
@@ -331,6 +332,7 @@ function parseSource(value: unknown): Source {
     validationState: typeof value.validationState === 'string' && value.validationState ? value.validationState : undefined,
     refreshIntervalSec: optionalPositiveInteger(value.refreshIntervalSec),
     nextDiscoveryAt: optionalInteger(value.nextDiscoveryAt),
+    scheduledDiscoveryAt: optionalInteger(value.scheduledDiscoveryAt),
     lastRunAt: value.lastRunAt,
     articleCount: value.articleCount,
     error: stringOrNull(value.error),

@@ -116,3 +116,46 @@ test('invalid source timestamps and four-item metadata remain readable across la
     return style.color !== style.backgroundColor && style.backgroundColor !== 'rgba(0, 0, 0, 0)';
   })).toBe(true);
 });
+
+test('scheduled checks stay visibly pending until their own processing grace expires', async ({ page }, testInfo) => {
+  await page.clock.install({ time: new Date('2026-11-03T10:12:00Z') });
+  const base = {
+    siteId: 'planned-site', siteName: '计划站点', url: 'https://planned.example.edu/',
+    enabled: true, siteEnabled: true, validationState: 'verified', refreshIntervalSec: 86400,
+    nextDiscoveryAt: Date.parse('2026-11-04T10:00:00Z'),
+    lastRunAt: '2026-11-02T09:01:00.000Z', articleCount: 8, error: null,
+  };
+  await installReadingRoutes(page, { admin: true, sources: [
+    { ...base, id: 'planned', name: '本轮等待', scheduledDiscoveryAt: Date.parse('2026-11-03T10:48:00Z') },
+    { ...base, id: 'missing', name: '没有排班', scheduledDiscoveryAt: null },
+    { ...base, id: 'old', name: '上一轮漏检', lastRunAt: '2026-11-01T09:01:00Z', scheduledDiscoveryAt: null },
+    { ...base, id: 'error', name: '已有错误', error: '源站连接失败', scheduledDiscoveryAt: null },
+    { ...base, id: 'fresh', name: '已经成功', lastRunAt: '2026-11-03T10:05:00Z', scheduledDiscoveryAt: null },
+  ] });
+  await page.goto('/sources');
+  await page.locator('.directory-site > summary').click();
+  await expect(page.locator('.directory-badge')).toHaveText(['等待计划检查', '检查已超期', '检查已超期', '最近有错误', '运行正常']);
+  const planned = page.locator('.directory-column').filter({ hasText: '本轮等待' });
+  await planned.locator(':scope > summary').click();
+  await expect(planned.locator('dt')).toHaveText(['最近成功检查', '刷新间隔', '已存档', '本轮最早检查']);
+  const successfulTime = await planned.locator('dd').first().textContent();
+  for (const theme of ['light', 'dark']) {
+    await page.evaluate(value => { localStorage.setItem('cqu-moe-theme', value); document.documentElement.dataset.theme = value; document.documentElement.classList.toggle('dark', value === 'dark'); }, theme);
+    for (const width of [320, 390, 768, 1440]) {
+      await page.setViewportSize({ width, height: 900 });
+      await expect(planned.getByText('本轮最早检查', { exact: true })).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      if (width === 390 || width === 1440) await page.screenshot({ path: testInfo.outputPath(`planned-${theme}-${width}.png`), fullPage: true });
+    }
+  }
+  await page.clock.fastForward(40 * 60_000);
+  await page.reload();
+  await page.locator('.directory-site > summary').click();
+  await expect(planned.locator('.directory-badge')).toHaveText('检查处理中');
+  await page.clock.fastForward(7 * 60_000);
+  await page.reload();
+  await page.locator('.directory-site > summary').click();
+  await expect(planned.locator('.directory-badge')).toHaveText('检查已超期');
+  await planned.locator(':scope > summary').click();
+  await expect(planned.locator('dd').first()).toHaveText(successfulTime!);
+});
