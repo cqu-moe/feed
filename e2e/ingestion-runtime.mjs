@@ -24,14 +24,14 @@ export function createIngestionFixture({ dateOnly = false } = {}) {
   const bindings = {
     BRIDGE_SECRET: 'synthetic-ingestion-bridge-secret',
     TEXTIN_APP_ID: 'synthetic-textin', TEXTIN_SECRET_CODE: 'synthetic-textin',
-    CRAWL_ENABLED: 'true', TASK_RUNTIME_ENABLED: 'true',
+    CRAWL_ENABLED: 'true', TASK_RUNTIME_ENABLED: 'true', COLLECTION_EXECUTOR: 'workflow',
     ARCHIVE_VERSIONS_ENABLED: 'true', ARCHIVE_READS_ENABLED: 'true',
     PDF_OCR_ENABLED: 'true', PDF_OCR_MODEL: 'textin-xparse-auto',
     QUEUE_DEAD_LETTER_AFTER_MS: '60000', MAX_TASK_ATTEMPTS: '3',
     MAX_DISCOVERY_PAGES_PER_RUN: '2', MAX_BACKFILL_PAGES_PER_RUN: '5',
   };
   const consumers = Object.fromEntries(['jobs', 'events'].map(lane => [
-    `feed-e2e-${lane}`, { maxBatchSize: 1, maxConcurrency: 2, maxBatchTimeout: 0, maxRetries: 0, deadLetterQueue: 'feed-e2e-dlq' },
+    `feed-e2e-${lane}`, { maxBatchSize: 1, ...(lane === 'events' ? { maxConcurrency: 2 } : {}), maxBatchTimeout: 0, maxRetries: 0, deadLetterQueue: 'feed-e2e-dlq' },
   ]));
   const deadLetterObserver = {
     name: 'feed-dlq-observer',
@@ -112,7 +112,7 @@ export function createIngestionFixture({ dateOnly = false } = {}) {
       if ((await bucket.list()).objects.length) throw new Error('Ingestion requires empty R2');
     },
     // This DO fixture is the external browser boundary. Task admission, Queue,
-    // Queue execution, OCR Workflow, journals, completeness and reads remain native.
+    // Workflow execution, OCR, journals, completeness and reads remain native.
     browserWorker: {
       name: 'browser-fixture',
       modules: [{ type: 'ESModule', path: 'browser-fixture.mjs', contents: `
