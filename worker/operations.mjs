@@ -1,3 +1,4 @@
+import {sendPersistedOutbox} from './outbox-dispatch.mjs';
 import {cleanError} from './utils.mjs';
 import {requireCrawlRuntime} from './task-runtime.mjs';
 import {admitDiscovery} from './backfill-control.mjs';
@@ -42,7 +43,13 @@ export function createOperations(env,{now=()=>Date.now()}={}){
       if(row.topic!==input.topic)throw operationsError('Outbox topic does not match the selected queue',409);
       if(row.state!=='sent')throw operationsError('Outbox message is not in its sent state',409);
       if(row.receipt_state==='processed')throw operationsError('Outbox message was already processed',409);
-      if(at-Math.max(row.updated_at,row.last_replayed_at??0)<queueDeadLetterAfterMs)
+      if(payloadIsStartJob(row.payload_json)){
+        const task=await env.DB.prepare(`SELECT kind,due_at FROM tasks
+          WHERE id=json_extract(?,'$.taskId') AND attempt_no=json_extract(?,'$.attempt')`)
+          .bind(row.payload_json,row.payload_json).first();
+        if(!task||at-Math.max(row.updated_at,row.last_replayed_at??0,task.kind==='ocr'?0:task.due_at)<queueDeadLetterAfterMs)
+          throw operationsError('Outbox message has not exceeded the Queue retry window',409);
+      }else if(at-Math.max(row.updated_at,row.last_replayed_at??0)<queueDeadLetterAfterMs)
         throw operationsError('Outbox message has not exceeded the Queue retry window',409);
       const target=row.topic==='feed-jobs'?env.FEED_JOBS:row.topic==='feed-events'?env.FEED_EVENTS:env.FEED_MAIL;
       if(!target)throw operationsError(`Queue binding unavailable for ${row.topic}`,503);
@@ -56,14 +63,19 @@ export function createOperations(env,{now=()=>Date.now()}={}){
         throw operationsError('Discovery admission budget is exhausted',409);
       // Claim before sending: a fast consumer may already have processed this message when send resolves.
       const claimed=await env.DB.prepare(`INSERT INTO outbox_receipts(outbox_id,topic,state,attempts,replay_count,last_error,last_replayed_at,created_at,updated_at)
-        SELECT id,topic,'queued',0,1,NULL,?,?,? FROM outbox WHERE id=? AND state='sent' AND updated_at<=?
+        SELECT id,topic,'queued',0,1,NULL,?,?,? FROM outbox o WHERE o.id=? AND o.state='sent' AND o.updated_at<=?
+          AND (json_extract(o.payload_json,'$.type')<>'start-job' OR EXISTS(
+            SELECT 1 FROM tasks t LEFT JOIN task_attempts a ON a.task_id=t.id AND a.attempt_no=t.attempt_no
+            WHERE t.id=json_extract(o.payload_json,'$.taskId') AND t.attempt_no=json_extract(o.payload_json,'$.attempt')
+              AND (t.kind='ocr' OR (t.state IN ('queued','starting') AND a.handed_off_at IS NULL AND t.due_at<=?))))
         ON CONFLICT(outbox_id) DO UPDATE SET state='queued',replay_count=replay_count+1,last_error=NULL,
           last_replayed_at=excluded.last_replayed_at,updated_at=excluded.updated_at
         WHERE outbox_receipts.state<>'processed'
           AND (outbox_receipts.last_replayed_at IS NULL OR outbox_receipts.last_replayed_at<=?)`)
-        .bind(at,at,at,row.id,at-queueDeadLetterAfterMs,at-queueDeadLetterAfterMs).run();
+        .bind(at,at,at,row.id,at-queueDeadLetterAfterMs,
+          at-queueDeadLetterAfterMs,at-queueDeadLetterAfterMs).run();
       if(!claimed.meta.changes)throw operationsError('Outbox replay is already claimed or processed',409);
-      try{await target.send(payload,{contentType:'json'});}
+      try{await sendPersistedOutbox(env,target,row,at);}
       catch(error){
         // An ambiguous Queue response retains its wait window and cannot overwrite a processed receipt.
         await env.DB.prepare(`UPDATE outbox_receipts SET state='failed',last_error=?,updated_at=?
@@ -84,7 +96,13 @@ export function createOperations(env,{now=()=>Date.now()}={}){
         WHERE o.topic=? AND o.state='sent' AND o.updated_at<=?
           AND (r.outbox_id IS NULL OR r.state<>'processed')
           AND (r.last_replayed_at IS NULL OR r.last_replayed_at<=?)
-        ORDER BY o.updated_at,o.id LIMIT ?`).bind(topic,at-queueDeadLetterAfterMs,at-queueDeadLetterAfterMs,pageSize).all();
+          AND (json_extract(o.payload_json,'$.type')<>'start-job' OR EXISTS(
+            SELECT 1 FROM tasks t LEFT JOIN task_attempts a ON a.task_id=t.id AND a.attempt_no=t.attempt_no WHERE t.id=json_extract(o.payload_json,'$.taskId')
+              AND (t.kind='ocr' OR (t.state IN ('queued','starting') AND a.handed_off_at IS NULL AND t.attempt_no=json_extract(o.payload_json,'$.attempt')
+              AND ?-MAX(o.updated_at,COALESCE(r.last_replayed_at,0),t.due_at)>=?))
+          ))
+        ORDER BY o.updated_at,o.id LIMIT ?`)
+        .bind(topic,at-queueDeadLetterAfterMs,at-queueDeadLetterAfterMs,at,queueDeadLetterAfterMs,pageSize).all();
       const items=[];
       for(const row of rows.results){
         const payload=parseIdentity(row.payloadJson??row.payload_json);
@@ -112,9 +130,12 @@ export function createOperations(env,{now=()=>Date.now()}={}){
       LEFT JOIN content_events e ON e.revision_id=r.id
       WHERE t.kind IN ('discover','capture','ocr','match-event')
         AND (t.state IN ('failed','blocked','deferred')
-          OR (t.state IN ('queued','starting','running') AND t.updated_at<=?))
+          OR (t.state IN ('queued','starting','running') AND t.updated_at<=? AND NOT EXISTS(
+            SELECT 1 FROM outbox o LEFT JOIN outbox_receipts receipt ON receipt.outbox_id=o.id
+            WHERE o.dedupe_key='start:'||t.id||':a'||t.attempt_no AND o.topic='feed-jobs' AND o.state='sent'
+              AND t.state IN ('queued','starting') AND MAX(t.due_at,o.updated_at,COALESCE(receipt.last_replayed_at,0))>?)))
       ORDER BY CASE t.state WHEN 'failed' THEN 0 WHEN 'blocked' THEN 1 WHEN 'deferred' THEN 2 ELSE 3 END,
-        t.updated_at,t.id LIMIT ?`).bind(at-queueDeadLetterAfterMs,pageSize).all();
+        t.updated_at,t.id LIMIT ?`).bind(at-queueDeadLetterAfterMs,at-queueDeadLetterAfterMs,pageSize).all();
     return Promise.all(rows.results.map(async row=>({
       id:row.id,kind:taskKind(row),taskKind:row.taskKind??row.kind,state:row.state,
       taskId:row.id,
@@ -351,6 +372,10 @@ function parseIdentity(value){
     const payload=JSON.parse(value);
     return payload&&typeof payload==='object'&&!Array.isArray(payload)?payload:null;
   }catch{return null;}
+}
+
+function payloadIsStartJob(value){
+  return parseIdentity(value)?.type==='start-job';
 }
 
 function redact(value){

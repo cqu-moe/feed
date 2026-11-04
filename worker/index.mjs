@@ -11,6 +11,7 @@ import {json,encoder,cleanError} from './utils.mjs';
 import {createArchive} from './archive.mjs';
 import {createSources} from './sources.mjs';
 import {createTaskRuntime,handleFeedJobs} from './task-runtime.mjs';
+import {launchOutboxId} from './task-statements.mjs';
 import {createArchiveRecheck} from './archive-recheck.mjs';
 import {captureFeedPipelineSummaries} from './telemetry.mjs';
 export {FeedIngest} from './workflow.mjs';
@@ -28,7 +29,16 @@ export default {
       jobs.push(archive.resumeExtract());
     }
     if(controller.cron==='0 * * * *'&&env.TASK_RUNTIME_ENABLED==='true'){
-      jobs.push(sources.scheduleDue());
+      jobs.push((async()=>{
+        const runtime=createTaskRuntime(env);
+        let scheduled;
+        do{
+          ({scheduled}=await sources.scheduleDue({scheduledTime:controller.scheduledTime}));
+          for(const taskId of scheduled){
+            await runtime.dispatchOutbox(await launchOutboxId(taskId,1)).catch(()=>false);
+          }
+        }while(scheduled.length===100);
+      })());
       if(env.ARCHIVE_VERSIONS_ENABLED==='true')jobs.push(createArchiveRecheck(env).scheduleDue());
     }
     if(controller.cron==='*/5 * * * *'&&env.TASK_RUNTIME_ENABLED==='true'){

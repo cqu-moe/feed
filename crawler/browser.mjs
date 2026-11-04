@@ -113,7 +113,9 @@ export async function openBrowser({signal,skipCarousel=false,pdfOrigin=null}={})
       }else if(message.method==='Page.frameNavigated'&&!message.params.frame.parentId){
         mainFrameId=message.params.frame.id;
       }else if(message.method==='Network.responseReceived'&&message.params.type==='Document'&&message.params.frameId===mainFrameId){
-        documents.push({url:message.params.response.url,status:message.params.response.status});
+        const {url,status,headers}=message.params.response;
+        const retryAfter=Object.entries(headers).find(([key])=>key.toLowerCase()==='retry-after')?.[1];
+        documents.push({url,status,retryAfter});
       }
     });
     // Auth's successful fresh-session flow does not call Runtime.enable.

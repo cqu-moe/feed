@@ -1,3 +1,4 @@
+import {launchDelaySeconds,sendPersistedOutbox} from './outbox-dispatch.mjs';
 import {admitDiscovery,backfillTaskSql,backfillFailureStatement,retainDiscoveryAdmissions} from './backfill-control.mjs';
 import {createMail,handleMailMessage} from './notification-mail.mjs';
 import {cleanError,sha} from './utils.mjs';
@@ -41,12 +42,6 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
 
     async dispatchDueOutbox(limit=20){
       const timestamp=now(),size=boundedInteger(limit,20,1,100);
-      if(env.SOURCE_MANAGEMENT_ENABLED==='true'){
-        const history=await env.DB.prepare(`SELECT 1 FROM outbox o JOIN tasks t
-          ON t.id=json_extract(o.payload_json,'$.taskId') WHERE o.topic='feed-jobs' AND o.state='queued'
-          AND t.kind='backfill' AND t.state='queued' AND o.available_at<=? LIMIT 1`).bind(timestamp).first();
-        if(history)await createSources(env,{now}).scheduleDue({limit});
-      }
       const lane="CASE WHEN t.kind='discover' THEN 0 WHEN t.kind='backfill' THEN 2 ELSE 1 END";
       // Read a bounded candidate batch from each lane: exhausted live permits
       // must not hide history or events that still have capacity to dispatch.
@@ -55,9 +50,11 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
           ROW_NUMBER() OVER(PARTITION BY ${lane} ORDER BY o.available_at,o.id) AS lane_rank
         FROM outbox o LEFT JOIN tasks t ON o.topic='feed-jobs' AND t.id=json_extract(o.payload_json,'$.taskId')
         WHERE o.state='queued' AND o.available_at<=?
+          AND (o.topic<>'feed-jobs' OR NOT EXISTS(SELECT 1 FROM outbox_receipts r WHERE r.outbox_id=o.id
+            AND o.last_error IS NULL AND r.last_replayed_at>?))
           ${env.SOURCE_MANAGEMENT_ENABLED==='true'?`AND (t.kind IS NULL OR t.kind<>'backfill' OR (t.state IN ('queued','starting','running')
             AND t.attempt_no=json_extract(o.payload_json,'$.attempt') AND ${backfillTaskSql()}))`:''})
-        SELECT * FROM candidates WHERE lane_rank<=? ORDER BY dispatch_lane,available_at,id`).bind(timestamp,size).all();
+        SELECT * FROM candidates WHERE lane_rank<=? ORDER BY dispatch_lane,available_at,id`).bind(timestamp,timestamp-launchReplayAfterMs,size).all();
       const dispatched=[];
       for(const row of rows.results){
         if(dispatched.length>=size)break;
@@ -67,7 +64,7 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
           const message=JSON.parse(row.payload_json);
           if(row.topic==='feed-jobs'&&env.SOURCE_MANAGEMENT_ENABLED==='true'
             &&!await admitDiscovery(env,message.taskId,message.attempt,timestamp))continue;
-          await target.send(message,{contentType:'json'});
+          await sendPersistedOutbox(env,target,row,timestamp);
           // Sending first intentionally permits duplicates after a crash. The consumer owns idempotency.
           await env.DB.prepare(`UPDATE outbox SET state='sent',attempts=attempts+1,last_error=NULL,updated_at=?
             WHERE id=? AND state='queued' AND available_at<=?`).bind(timestamp,row.id,timestamp).run();
@@ -91,39 +88,53 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
       if(message.attempt<task.attempt_no)return {state:task.state,acked:'stale-attempt'};
       if(message.attempt!==task.attempt_no)throw new SchemaError('Future task attempt');
       if(!activeStates.includes(task.state))return {state:task.state,acked:'terminal'};
+      if(task.state==='queued'&&task.due_at>now())return {state:'queued',acked:'not-due',retryDelaySeconds:launchDelaySeconds(task.due_at,now())};
       if(!['capture','recheck','discover','backfill','ocr'].includes(task.kind))throw new SchemaError('Unsupported workflow kind');
       const priorAttempt=await env.DB.prepare('SELECT * FROM task_attempts WHERE task_id=? AND attempt_no=?')
         .bind(task.id,message.attempt).first();
+      const workflowExecution=env.COLLECTION_EXECUTOR==='workflow'
+        &&browserTaskKind(task.kind);
       if(browserTaskKind(task.kind)){
-        if(!priorAttempt)return runtime.runJobInQueue(message,task);
-        if(isQueueInstance(priorAttempt.workflow_instance_id)){
-          if(task.state==='queued')return runtime.runJobInQueue(message,task);
-          return {state:task.state,acked:'running'};
+        if(!priorAttempt&&!workflowExecution)return runtime.runJobInQueue(message,task);
+        if(priorAttempt&&isQueueInstance(priorAttempt.workflow_instance_id)){
+          if(task.state==='queued'&&!workflowExecution)return runtime.runJobInQueue(message,task);
+          if(!workflowExecution||priorAttempt.state!=='deferred'||priorAttempt.result_json)
+            return {state:task.state,acked:'running'};
         }
       }
-      const instanceId=priorAttempt?.workflow_instance_id??workflowInstanceId(task.id,message.attempt),timestamp=now();
+      const instanceId=workflowExecution&&isQueueInstance(priorAttempt?.workflow_instance_id)
+        ?workflowInstanceId(task.id,message.attempt)
+        :priorAttempt?.workflow_instance_id??workflowInstanceId(task.id,message.attempt),timestamp=now();
       const workflowBinding=selectWorkflow(env,{workflow,workflows},task.kind);
-      let siteClaim=null;
-      if(browserTaskKind(task.kind)){
-        siteClaim=await claimSiteExecution(env,{...task,attempt_no:message.attempt},timestamp);
-        if(!siteClaim.admitted){
-          await delayBusyLaunch(env,task.id,message.attempt,timestamp);
-          return {state:task.state,acked:'site-busy'};
-        }
-      }
       await env.DB.batch([
-        env.DB.prepare(`UPDATE tasks SET state='starting',updated_at=? WHERE id=? AND state='queued' AND attempt_no=?`)
-          .bind(timestamp,task.id,message.attempt),
+        env.DB.prepare(`UPDATE tasks SET state='starting',updated_at=? WHERE id=? AND state='queued' AND attempt_no=? AND due_at<=?
+          AND (?=0 OR NOT EXISTS(SELECT 1 FROM task_attempts a JOIN site_execution_leases l
+            ON l.owner_task_id=a.task_id AND l.owner_attempt_no=a.attempt_no
+            WHERE a.task_id=tasks.id AND a.attempt_no=tasks.attempt_no
+              AND a.workflow_instance_id LIKE 'queue-%' AND l.lease_until>?))`)
+          .bind(timestamp,task.id,message.attempt,timestamp,workflowExecution?1:0,timestamp),
         env.DB.prepare(`INSERT INTO task_attempts(task_id,attempt_no,workflow_instance_id,state,started_at)
           SELECT id,attempt_no,?,'starting',? FROM tasks WHERE id=? AND attempt_no=? AND state IN ('starting','running')
-          ON CONFLICT(task_id,attempt_no) DO NOTHING`).bind(instanceId,timestamp,task.id,message.attempt),
+          ON CONFLICT(task_id,attempt_no) DO UPDATE SET workflow_instance_id=excluded.workflow_instance_id,
+            state='starting',started_at=excluded.started_at,handed_off_at=NULL,ended_at=NULL,error_code=NULL
+          WHERE ? AND task_attempts.workflow_instance_id LIKE 'queue-%' AND task_attempts.state='deferred'
+            AND task_attempts.result_json IS NULL
+            AND EXISTS(SELECT 1 FROM tasks WHERE id=task_attempts.task_id AND attempt_no=task_attempts.attempt_no AND state='starting')`)
+          .bind(instanceId,timestamp,task.id,message.attempt,workflowExecution?1:0),
+        ...(workflowExecution?[env.DB.prepare(`UPDATE outbox_receipts SET state='queued',processed_at=NULL,last_error=NULL,updated_at=?
+          WHERE outbox_id=? AND changes()>0`).bind(timestamp,message.outboxId)]:[]),
       ]);
       task=await env.DB.prepare('SELECT * FROM tasks WHERE id=?').bind(task.id).first();
       if(task.attempt_no!==message.attempt||!activeStates.includes(task.state))return {state:task.state,acked:'superseded'};
-      if(siteClaim && (!siteClaim.siteId || siteClaim.generation===undefined))throw new Error('Site execution claim is missing');
+      if(task.state==='queued'&&task.due_at>now())return {state:'queued',acked:'not-due',retryDelaySeconds:launchDelaySeconds(task.due_at,now())};
       const attempt=await env.DB.prepare('SELECT * FROM task_attempts WHERE task_id=? AND attempt_no=?')
         .bind(task.id,message.attempt).first();
-      if(attempt?.workflow_instance_id!==instanceId)throw new Error('Workflow attempt ledger is missing');
+      if(!attempt)throw new Error('Workflow attempt ledger is missing');
+      if(attempt.workflow_instance_id!==instanceId){
+        if(task.state==='queued'&&isQueueInstance(attempt.workflow_instance_id)&&attempt.state==='deferred')
+          return {state:task.state,acked:'site-releasing',retryDelaySeconds:30};
+        return {state:task.state,acked:'running'};
+      }
       const instance=attempt.handed_off_at!==null
         ?await workflowBinding.get(instanceId)
         :await ensureWorkflow(workflowBinding,instanceId,{taskId:task.id,attempt:message.attempt});
@@ -187,12 +198,15 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
       const timestamp=now(),pageSize=boundedInteger(limit,20,1,100);
       if(env.SOURCE_MANAGEMENT_ENABLED==='true')await retainDiscoveryAdmissions(env,timestamp);
       // A sent message may expire or enter its launch DLQ. Re-send the same identity, with a finite launch budget.
+      const launchDispatched=[];
       const stranded=await env.DB.prepare(`SELECT t.id,t.kind,t.attempt_no,o.id AS outbox_id,o.attempts,a.workflow_instance_id FROM tasks t
         LEFT JOIN task_attempts a ON a.task_id=t.id AND a.attempt_no=t.attempt_no
         JOIN outbox o ON o.topic='feed-jobs' AND o.dedupe_key='start:'||t.id||':a'||t.attempt_no
-        WHERE t.state IN ('queued','starting') AND o.state='sent' AND o.updated_at<=?
+        LEFT JOIN outbox_receipts r ON r.outbox_id=o.id
+        WHERE t.state IN ('queued','starting') AND o.state='sent' AND COALESCE(r.state,'')<>'processed'
+          AND ?-MAX(o.updated_at,COALESCE(r.last_replayed_at,0),t.due_at)>=?
         AND NOT EXISTS(SELECT 1 FROM task_attempts a WHERE a.task_id=t.id AND a.attempt_no=t.attempt_no AND a.handed_off_at IS NOT NULL)
-        ORDER BY o.updated_at,o.id LIMIT ?`).bind(timestamp-launchReplayAfterMs,pageSize).all();
+        ORDER BY o.updated_at,o.id LIMIT ?`).bind(timestamp,launchReplayAfterMs,pageSize).all();
       for(const row of stranded.results){
         if(row.workflow_instance_id){
           try{
@@ -203,11 +217,17 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
         }
         if(row.attempts>=maxLaunchAttempts){
           await env.DB.batch([env.DB.prepare(`UPDATE tasks SET state='blocked',last_error='launch_delivery_exhausted',updated_at=?
-            WHERE id=? AND attempt_no=? AND state IN ('queued','starting')`).bind(timestamp,row.id,row.attempt_no),
+            WHERE id=? AND attempt_no=? AND state IN ('queued','starting')
+              AND NOT EXISTS(SELECT 1 FROM task_attempts a WHERE a.task_id=tasks.id
+                AND a.attempt_no=tasks.attempt_no AND a.handed_off_at IS NOT NULL)
+              AND EXISTS(SELECT 1 FROM outbox o LEFT JOIN outbox_receipts r ON r.outbox_id=o.id
+                WHERE o.id=? AND o.topic='feed-jobs' AND o.dedupe_key='start:'||tasks.id||':a'||tasks.attempt_no
+                  AND o.state='sent' AND o.attempts>=? AND COALESCE(r.state,'')<>'processed'
+                  AND ?-MAX(o.updated_at,COALESCE(r.last_replayed_at,0),tasks.due_at)>=?)`)
+            .bind(timestamp,row.id,row.attempt_no,row.outbox_id,maxLaunchAttempts,timestamp,launchReplayAfterMs),
             ...(row.kind==='backfill'?[backfillFailureStatement(env,row.id,row.attempt_no,timestamp)]:[])]);
         }else{
-          await env.DB.prepare("UPDATE outbox SET state='queued',available_at=?,updated_at=? WHERE id=? AND state='sent'")
-            .bind(timestamp,timestamp,row.outbox_id).run();
+          if(await runtime.requeueLaunch(row.id,row.attempt_no,timestamp,maxLaunchAttempts))launchDispatched.push(row.outbox_id);
         }
       }
       const rows=await env.DB.prepare(`SELECT t.*,a.workflow_instance_id,a.result_json,a.started_at FROM tasks t
@@ -248,7 +268,7 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
             .bind(cleanError(error),timestamp,task.id,task.attempt_no).run();
         }
       }
-      const dispatched=await runtime.dispatchDueOutbox(pageSize);
+      const dispatched=[...launchDispatched,...await runtime.dispatchDueOutbox(pageSize)];
       return {dispatched,reconciled:rows.results.length,recovered};
     },
 
@@ -263,6 +283,11 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
       requireCrawlRuntime(env);
       let workflowStatus=null;
       if(activeStates.includes(task.state)&&!task.workflow_instance_id){
+        const outbox=await env.DB.prepare(`SELECT o.state,o.updated_at,r.last_replayed_at,r.state AS receipt FROM outbox o
+          LEFT JOIN outbox_receipts r ON r.outbox_id=o.id
+          WHERE o.topic='feed-jobs' AND o.dedupe_key=?`).bind(launchDedupeKey(task.id,task.attempt_no)).first();
+        if(outbox?.state==='sent'&&(outbox.receipt==='processed'||now()-Math.max(outbox.updated_at,outbox.last_replayed_at??0,task.due_at)<launchReplayAfterMs))
+          return {id:task.id,state:task.state,recovered:0,workflowStatus:null};
         const replayed=await runtime.requeueLaunch(task.id,task.attempt_no,now());
         return {id:task.id,state:task.state,recovered:recovered(replayed),workflowStatus:null};
       }
@@ -311,13 +336,28 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
         ...(dispatched?{}:{dispatched:false})};
     },
 
-    async requeueLaunch(taskId,attemptNo,timestamp){
+    async requeueLaunch(taskId,attemptNo,timestamp,launchLimit=null){
       const key=launchDedupeKey(taskId,attemptNo);
-      await env.DB.prepare(`UPDATE outbox SET state='queued',available_at=?,updated_at=?
-        WHERE topic='feed-jobs' AND dedupe_key=? AND state='sent'`)
-        .bind(timestamp,timestamp,key).run();
-      const row=await env.DB.prepare('SELECT id FROM outbox WHERE topic=? AND dedupe_key=?')
-        .bind('feed-jobs',key).first();
+      const claimed=await env.DB.batch([
+        env.DB.prepare(`INSERT INTO outbox_receipts(outbox_id,topic,state,attempts,replay_count,last_error,last_replayed_at,created_at,updated_at)
+          SELECT o.id,o.topic,'queued',0,1,NULL,?,?,? FROM outbox o
+          WHERE o.topic='feed-jobs' AND o.dedupe_key=? AND (? IS NULL OR o.attempts<?) AND EXISTS(
+            SELECT 1 FROM tasks t LEFT JOIN task_attempts a ON a.task_id=t.id AND a.attempt_no=t.attempt_no
+            LEFT JOIN outbox_receipts r ON r.outbox_id=o.id
+            WHERE t.id=? AND t.attempt_no=? AND t.state IN ('queued','starting') AND a.handed_off_at IS NULL
+              AND COALESCE(r.state,'')<>'processed'
+              AND ((o.state='queued' AND o.available_at<=?) OR (o.state='sent'
+                AND ?-MAX(o.updated_at,COALESCE(r.last_replayed_at,0),t.due_at)>=?)))
+          ON CONFLICT(outbox_id) DO UPDATE SET state='queued',replay_count=replay_count+1,last_error=NULL,
+            last_replayed_at=excluded.last_replayed_at,updated_at=excluded.updated_at
+          WHERE outbox_receipts.state<>'processed'
+            AND (outbox_receipts.last_replayed_at IS NULL OR outbox_receipts.last_replayed_at<=?)
+          RETURNING outbox_id AS id`)
+          .bind(timestamp,timestamp,timestamp,key,launchLimit,launchLimit,taskId,attemptNo,timestamp,timestamp,launchReplayAfterMs,timestamp-launchReplayAfterMs),
+        env.DB.prepare(`UPDATE outbox SET state='queued',available_at=?,last_error=NULL,updated_at=?
+          WHERE topic='feed-jobs' AND dedupe_key=? AND changes()>0`).bind(timestamp,timestamp,key),
+      ]);
+      const row=claimed[0].results[0];
       if(!row)return false;
       return await runtime.dispatchOutbox(row.id).catch(()=>false);
     },
@@ -333,7 +373,7 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
         const message=JSON.parse(row.payload_json);
         if(row.topic==='feed-jobs'&&env.SOURCE_MANAGEMENT_ENABLED==='true'
           &&!await admitDiscovery(env,message.taskId,message.attempt,timestamp))return false;
-        await target.send(message,{contentType:'json'});
+        await sendPersistedOutbox(env,target,row,timestamp);
         await env.DB.prepare(`UPDATE outbox SET state='sent',attempts=attempts+1,last_error=NULL,updated_at=?
           WHERE id=? AND state='queued' AND available_at<=?`).bind(timestamp,row.id,timestamp).run();
         return true;
@@ -389,7 +429,10 @@ export async function handleFeedJobs(batch,env,dependencies={}){
       if(message.body?.type==='send-mail')await handleMailMessage(message.body,env,dependencies);
       else if(['check-ready','event-ready','match-source','source-associated'].includes(message.body?.type))
         await handleFeedEvent(env,message,dependencies);
-      else await runtime.startJob(message.body);
+      else {
+        const started=await runtime.startJob(message.body);
+        if(started.retryDelaySeconds){message.retry({delaySeconds:started.retryDelaySeconds});continue;}
+      }
       await recordOutboxReceipt(env,message.body,'processed',dependencies.now?.()??Date.now()).catch(()=>{});
       message.ack();
     }catch(error){
@@ -529,9 +572,14 @@ async function finishTask(env,kind,taskId,attemptNo,result,now=()=>Date.now()){
   const maxDelayMs=boundedDuration(env.TASK_RETRY_MAX_DELAY_MS,6*60*60*1000,baseDelayMs,7*24*60*60*1000);
   const retryFrom=kind==='backfill'?(await env.DB.prepare('SELECT backfill_retry_from FROM tasks WHERE id=?').bind(taskId).first())?.backfill_retry_from??1:1;
   let state='succeeded',errorCode=null,dueAt=timestamp;
-  if(result.superseded&&kind==='backfill')state='cancelled';
-  if(kind==='ocr'&&result.reviewRequired){
+  if((result.superseded&&kind==='backfill')||result.cancel){
+    state='cancelled';
+  }else if(kind==='ocr'&&result.reviewRequired){
     state='blocked';errorCode='ocr_review_required';
+  }else if(kind==='backfill'&&result.paused){
+    state='deferred';errorCode='backfill_paused';
+  }else if(result.originAttemptsExhausted){
+    state='blocked';errorCode=result.code??'origin_attempts_exhausted';
   }else if(result.skipped||result.deferred){
     errorCode=result.ocrBusy?'ocr_busy':result.skipped?'capture_busy':result.code??classifyLimit(result.error);
     state=errorCode==='quota_exhausted'||attemptNo>=1000||attemptNo-retryFrom+1>=maxAttempts?'blocked':'deferred';
@@ -543,7 +591,7 @@ async function finishTask(env,kind,taskId,attemptNo,result,now=()=>Date.now()){
   await env.DB.batch([
     env.DB.prepare(`UPDATE tasks SET state=?,due_at=?,last_error=?,checkpoint_json=?,updated_at=?
       WHERE id=? AND attempt_no=? AND state IN ('starting','running')`)
-      .bind(state,dueAt,result.skipped?'Capture is busy':result.error??null,JSON.stringify(result),timestamp,taskId,attemptNo),
+      .bind(state,dueAt,result.error??(result.skipped?'Capture is busy':null),JSON.stringify(result),timestamp,taskId,attemptNo),
     env.DB.prepare(`UPDATE task_attempts SET state=?,result_json=COALESCE(result_json,?),ended_at=?,error_code=?
       WHERE task_id=? AND attempt_no=? AND state IN ('starting','running')
       AND EXISTS(SELECT 1 FROM tasks WHERE id=? AND attempt_no=? AND state=?)`)

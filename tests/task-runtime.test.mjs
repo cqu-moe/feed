@@ -83,6 +83,7 @@ async function fixture({
   runtimeEnabled=true,
   crawlEnabled=true,
   recheckRuntime=false,
+  queueConsumer=true,
 }={}){
   const provider=oauthProvider();
   const bundle=await build({
@@ -103,6 +104,8 @@ async function fixture({
         globalThis.TASK_RUNTIME_QUEUE_ACKED=[];
         globalThis.TASK_RUNTIME_WORKFLOW_CALLS=[];
         globalThis.TASK_RUNTIME_QUEUE_SENDS=[];
+        globalThis.TASK_RUNTIME_QUEUE_SEND_OPTIONS=[];
+        globalThis.TASK_RUNTIME_QUEUE_RETRY_OPTIONS=[];
         globalThis.TASK_RUNTIME_QUEUE_MODE='real';
         globalThis.TASK_RUNTIME_DB_FAULTS={sqlIncludes:'',times:0,error:'Injected D1 failure'};
         globalThis.TASK_RUNTIME_CREATE_FAILURES_REMAINING=0;
@@ -118,6 +121,7 @@ async function fixture({
         const workflow={
           async create({id,params}){
             globalThis.TASK_RUNTIME_WORKFLOW_CALLS.push({op:'create',id});
+            if(globalThis.TASK_RUNTIME_WORKFLOW_MODE==='unavailable')throw new Error('Workflow binding unavailable');
             if(instances.has(id))throw new Error('Workflow instance already exists');
             if(globalThis.TASK_RUNTIME_WORKFLOW_MODE==='platform'){
               instances.set(id,{status:'running',error:null});
@@ -184,7 +188,8 @@ async function fixture({
         }
         function prepareEnv(rawEnv){
           const actualQueue=rawEnv.FEED_JOBS;
-          const env={...rawEnv,DB:instrumentDb(rawEnv.DB),CAPTURE:workflow,FEED_JOBS:{
+          const env={...rawEnv,DB:instrumentDb(rawEnv.DB),CAPTURE:workflow,
+            COLLECTION_EXECUTOR:globalThis.TASK_RUNTIME_EXECUTION_MODE==='workflow'?'workflow':'queue',FEED_JOBS:{
             async send(body,options){
               if(globalThis.TASK_RUNTIME_QUEUE_MODE==='fail')throw new Error('Injected queue send failure');
               if(globalThis.TASK_RUNTIME_EXECUTION_MODE==='legacy'){
@@ -193,6 +198,7 @@ async function fixture({
                   .bind(body.taskId,body.attempt,'task-'+body.taskId+'-a'+body.attempt,Date.now()).run();
               }
               globalThis.TASK_RUNTIME_QUEUE_SENDS.push(body);
+              globalThis.TASK_RUNTIME_QUEUE_SEND_OPTIONS.push(options);
               if(globalThis.TASK_RUNTIME_QUEUE_MODE==='hold')return;
               return await actualQueue.send(body,options);
             },
@@ -212,6 +218,8 @@ async function fixture({
               messages:globalThis.TASK_RUNTIME_QUEUE_BODIES,
               acked:globalThis.TASK_RUNTIME_QUEUE_ACKED,
               sends:globalThis.TASK_RUNTIME_QUEUE_SENDS,
+              sendOptions:globalThis.TASK_RUNTIME_QUEUE_SEND_OPTIONS,
+              retryOptions:globalThis.TASK_RUNTIME_QUEUE_RETRY_OPTIONS,
             });
           }
           if(url.pathname==='/fixture/scrape-mode'){
@@ -250,8 +258,12 @@ async function fixture({
           if(url.pathname==='/fixture/replay'){
             const body=await request.json();
             let acked=false,retried=false;
-            const message={body,attempt:1,ack(){acked=true;},retry(){retried=true;}};
+            const message={body,attempt:1,ack(){acked=true;},retry(options){
+              retried=true;
+              globalThis.TASK_RUNTIME_QUEUE_RETRY_OPTIONS.push(options);
+            }};
             await handleFeedJobs({messages:[message]},env,{workflow});
+            await Promise.all(globalThis.TASK_RUNTIME_ACTIVE_WORKFLOWS.splice(0));
             return Response.json({acked,retried});
           }
           return null;
@@ -310,8 +322,8 @@ async function fixture({
     },
     d1Databases:['DB'],serviceBindings:{AUTH:request=>provider.fetch(request)},
     r2Buckets:['ARCHIVE'],
-    queueProducers:{FEED_JOBS:{queueName:'feed-jobs'}},
-    queueConsumers:{'feed-jobs':{maxBatchSize:1,maxRetries:3,deadLetterQueue:'feed-jobs-dlq'}},
+    queueProducers:queueConsumer?{FEED_JOBS:{queueName:'feed-jobs'}}:{},
+    ...(queueConsumer?{queueConsumers:{'feed-jobs':{maxBatchSize:1,maxRetries:3,deadLetterQueue:'feed-jobs-dlq'}}}:{}),
   }));
   const db=await mf.getD1Database('DB'),bucket=await mf.getR2Bucket('ARCHIVE');
   for(const name of ['0001_feed.sql','0002_auth.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql',
@@ -537,6 +549,53 @@ test('outbox remains replayable when Queue accepts a message before its sent rec
     assert.deepEqual(queue.sends[0],queue.sends[1]);
     assert.deepEqual(queue.messages,[payload]);
     assert.equal((await scrapes(mf)).calls.length,1);
+  }finally{
+    await mf.dispose();
+  }
+});
+
+test('a scheduled launch waits in Queue and an early delivery returns to Queue without handoff',async()=>{
+  const {mf,db,admin}=await fixture({queueConsumer:false});
+  try{
+    await mf.dispatchFetch('https://feed.test/fixture/queue',{method:'POST',body:JSON.stringify({mode:'hold'})});
+    const create=await mf.dispatchFetch('https://feed.test/internal/capture-tasks',{
+      method:'POST',
+      headers:{...admin.headers,'Content-Type':'application/json'},
+      body:JSON.stringify({articleId,requestId:'scheduled-launch-1'}),
+    });
+    assert.equal(create.status,202);
+    const created=await create.json();
+    const outbox=await db.prepare('SELECT id FROM outbox').first();
+    const sentAt=Date.now();
+    await db.batch([
+      db.prepare('UPDATE tasks SET due_at=? WHERE id=?')
+        .bind(sentAt+48*60*1000,created.task.id),
+      db.prepare("UPDATE outbox SET state='queued',available_at=?,updated_at=? WHERE id=? AND attempts=1")
+        .bind(sentAt,sentAt,outbox.id),
+    ]);
+
+    const recovered=await(await mf.dispatchFetch('https://feed.test/fixture/recover')).json();
+    assert.deepEqual(recovered.dispatched,[outbox.id]);
+    const queue=await(await mf.dispatchFetch('https://feed.test/fixture/queue')).json();
+    assert.ok(Math.abs(queue.sendOptions.at(-1).delaySeconds-2880)<=1);
+    assert.deepEqual(queue.retryOptions,[]);
+
+    const payload=queue.sends.at(-1);
+    const early=await(await mf.dispatchFetch('https://feed.test/fixture/replay',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(payload),
+    })).json();
+    assert.deepEqual(early,{acked:false,retried:true});
+    const retried=await(await mf.dispatchFetch('https://feed.test/fixture/queue')).json();
+    assert.ok(Math.abs(retried.retryOptions[0].delaySeconds-2880)<=1);
+    const current=await db.prepare(`SELECT state,attempt_no AS attemptNo FROM tasks WHERE id=?`)
+      .bind(created.task.id).first();
+    assert.deepEqual(current,{state:'queued',attemptNo:1});
+    assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM task_attempts WHERE task_id=?')
+      .bind(created.task.id).first()).n,0);
+    assert.equal((await scrapes(mf)).calls.length,0);
+    assert.deepEqual((await(await mf.dispatchFetch('https://feed.test/fixture/workflows')).json()).calls,[]);
   }finally{
     await mf.dispose();
   }
@@ -985,6 +1044,235 @@ test('Queue capacity defers the exact attempt without charging a source retry',a
   }finally{await mf.dispose();}
 });
 
+test('cutover resumes a capacity-queued Queue attempt in Workflow without a new business attempt',async()=>{
+  const {mf,db,admin}=await fixture({queueConsumer:false});
+  try{
+    await mf.dispatchFetch('https://feed.test/fixture/queue',{method:'POST',body:JSON.stringify({mode:'hold'})});
+    await mf.dispatchFetch('https://feed.test/fixture/scrape-mode',{method:'POST',body:JSON.stringify({mode:'capacity'})});
+    const id=await createCaptureTask(mf,admin,'cutover-capacity');
+    const payload=(await(await mf.dispatchFetch('https://feed.test/fixture/queue')).json()).sends[0];
+    const deliver=()=>mf.dispatchFetch('https://feed.test/fixture/replay',{method:'POST',body:JSON.stringify(payload)}).then(r=>r.json());
+    assert.deepEqual(await deliver(),{acked:true,retried:false});
+    let current=await(await mf.dispatchFetch('https://feed.test/internal/capture-tasks/'+id,{headers:admin.headers})).json();
+    assert.equal(current.task.state,'queued');
+    assert.equal(current.attempt.state,'deferred');
+    assert.equal(current.attempt.workflowInstanceId,`queue-${id}-a1`);
+    await mf.dispatchFetch('https://feed.test/fixture/execution-mode',{method:'POST',body:JSON.stringify({mode:'workflow'})});
+    await mf.dispatchFetch('https://feed.test/fixture/scrape-mode',{method:'POST',body:JSON.stringify({mode:'success'})});
+    await db.prepare('UPDATE tasks SET due_at=0 WHERE id=?').bind(id).run();
+    // Capacity has been recorded, but the old invocation has not finished releasing its site.
+    await db.prepare('UPDATE site_execution_leases SET owner_task_id=?,owner_attempt_no=1,acquired_at=1,lease_until=?').bind(id,Date.now()+60_000).run();
+    assert.deepEqual(await deliver(),{acked:false,retried:true});
+    assert.equal((await task(db,id)).state,'queued');
+    assert.deepEqual((await(await mf.dispatchFetch('https://feed.test/fixture/workflows')).json()).instances,[]);
+    await db.prepare('UPDATE site_execution_leases SET owner_task_id=NULL,owner_attempt_no=NULL,acquired_at=NULL,lease_until=0,generation=generation+1').run();
+    await Promise.all([deliver(),deliver()]);
+    await waitFor(async()=>{
+      current=await(await mf.dispatchFetch('https://feed.test/internal/capture-tasks/'+id,{headers:admin.headers})).json();
+      assert.equal(current.task.state,'succeeded');
+    });
+    assert.equal(current.task.attemptNo,1);
+    assert.equal(current.attempt.workflowInstanceId,`task-${id}-a1`);
+    assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM task_attempts WHERE task_id=?').bind(id).first()).n,1);
+    assert.equal((await scrapes(mf)).calls.length,2,'one capacity refusal and one successful capture');
+    assert.equal((await db.prepare('SELECT attempts FROM articles WHERE id=?').bind(articleId).first()).attempts,1);
+    assert.deepEqual(await deliver(),{acked:true,retried:false});
+    assert.equal((await scrapes(mf)).calls.length,2,'completed work is not captured again');
+  }finally{await mf.dispose();}
+});
+
+test('cutover can redeliver a failed Workflow launch after a processed Queue capacity receipt',async()=>{
+  const {mf,db,admin}=await fixture({queueConsumer:false});
+  try{
+    await mf.dispatchFetch('https://feed.test/fixture/queue',{method:'POST',body:JSON.stringify({mode:'hold'})});
+    await mf.dispatchFetch('https://feed.test/fixture/scrape-mode',{method:'POST',body:JSON.stringify({mode:'capacity'})});
+    const id=await createCaptureTask(mf,admin,'cutover-launch-outage');
+    const payload=(await(await mf.dispatchFetch('https://feed.test/fixture/queue')).json()).sends[0];
+    const deliver=()=>mf.dispatchFetch('https://feed.test/fixture/replay',{method:'POST',body:JSON.stringify(payload)}).then(r=>r.json());
+    assert.deepEqual(await deliver(),{acked:true,retried:false});
+    await mf.dispatchFetch('https://feed.test/fixture/execution-mode',{method:'POST',body:JSON.stringify({mode:'workflow'})});
+    await mf.dispatchFetch('https://feed.test/fixture/workflow-mode',{method:'POST',body:JSON.stringify({mode:'unavailable'})});
+    await db.prepare('UPDATE tasks SET due_at=0 WHERE id=?').bind(id).run();
+    await db.prepare("UPDATE outbox SET available_at=0 WHERE topic='feed-jobs'").run();
+    await mf.dispatchFetch('https://feed.test/fixture/recover');
+    assert.deepEqual(await deliver(),{acked:false,retried:true});
+    assert.equal((await db.prepare('SELECT state FROM outbox_receipts WHERE outbox_id=?').bind(payload.outboxId).first()).state,'failed');
+    await db.prepare('UPDATE outbox SET updated_at=? WHERE id=?').bind(Date.now()-16*60_000,payload.outboxId).run();
+    const recovery=await(await mf.dispatchFetch('https://feed.test/fixture/recover')).json();
+    assert.deepEqual(recovery.dispatched,[payload.outboxId],'a lost launch still has a recoverable handoff');
+    await mf.dispatchFetch('https://feed.test/fixture/workflow-mode',{method:'POST',body:JSON.stringify({mode:'run'})});
+    await mf.dispatchFetch('https://feed.test/fixture/scrape-mode',{method:'POST',body:JSON.stringify({mode:'success'})});
+    assert.deepEqual(await deliver(),{acked:true,retried:false});
+    assert.equal((await task(db,id)).state,'succeeded');
+    assert.equal((await task(db,id)).attemptNo,1);
+  }finally{await mf.dispose();}
+});
+
+test('cutover leaves an in-flight Queue owner alone until its saved result is complete',async()=>{
+  const {mf,db,admin}=await fixture();
+  try{
+    await mf.dispatchFetch('https://feed.test/fixture/scrape-mode',{method:'POST',body:JSON.stringify({mode:'hang'})});
+    const id=await createCaptureTask(mf,admin,'cutover-live-owner');
+    await waitFor(async()=>assert.equal((await scrapes(mf)).calls.length,1));
+    await mf.dispatchFetch('https://feed.test/fixture/execution-mode',{method:'POST',body:JSON.stringify({mode:'workflow'})});
+    const payload=(await(await mf.dispatchFetch('https://feed.test/fixture/queue')).json()).sends[0];
+    const replay=await mf.dispatchFetch('https://feed.test/fixture/replay',{method:'POST',body:JSON.stringify(payload)});
+    assert.deepEqual(await replay.json(),{acked:true,retried:false});
+    const recovery=await mf.dispatchFetch('https://feed.test/internal/operations/tasks/'+id+'/recover',{method:'POST',headers:admin.headers});
+    assert.equal((await recovery.json()).recovered,0);
+    assert.equal((await task(db,id)).state,'running');
+    assert.deepEqual((await(await mf.dispatchFetch('https://feed.test/fixture/workflows')).json()).instances,[]);
+    assert.equal((await scrapes(mf)).calls.length,1);
+    await mf.dispatchFetch('https://feed.test/fixture/scrape-mode',{method:'POST',body:JSON.stringify({mode:'success'})});
+    await waitFor(async()=>assert.equal((await task(db,id)).state,'succeeded'));
+    const status=await(await mf.dispatchFetch('https://feed.test/internal/capture-tasks/'+id,{headers:admin.headers})).json();
+    assert.equal(status.attempt.workflowInstanceId,`queue-${id}-a1`);
+    assert.equal(status.task.attemptNo,1);
+  }finally{
+    await mf.dispatchFetch('https://feed.test/fixture/scrape-mode',{method:'POST',body:JSON.stringify({mode:'success'})});
+    await mf.dispose();
+  }
+});
+
+test('cutover returns a launch to Queue when its old owner defers after the task was read',async()=>{
+  const {mf,db,admin}=await fixture({queueConsumer:false});
+  try{
+    await mf.dispatchFetch('https://feed.test/fixture/queue',{method:'POST',body:JSON.stringify({mode:'hold'})});
+    const id=await createCaptureTask(mf,admin,'cutover-concurrent-capacity');
+    const payload=(await(await mf.dispatchFetch('https://feed.test/fixture/queue')).json()).sends[0];
+    const at=Date.now();
+    await db.prepare("UPDATE tasks SET state='running' WHERE id=?").bind(id).run();
+    await db.prepare(`INSERT INTO task_attempts(task_id,attempt_no,workflow_instance_id,state,started_at,handed_off_at)
+      VALUES (?,1,?,'running',?,?)`).bind(id,`queue-${id}-a1`,at,at).run();
+    let deferred=false;
+    const raceDb={prepare(sql){
+      const wrap=statement=>new Proxy(statement,{get(target,key){
+        if(key==='bind')return (...args)=>wrap(target.bind(...args));
+        if(key==='first')return async(...args)=>{
+          const row=await target.first(...args);
+          if(!deferred&&row?.id===id&&row.kind==='capture'&&row.state==='running'){
+            deferred=true;
+            await db.batch([
+              db.prepare("UPDATE tasks SET state='queued',due_at=? WHERE id=?").bind(at+120_000,id),
+              db.prepare("UPDATE task_attempts SET state='deferred' WHERE task_id=?").bind(id),
+            ]);
+          }
+          return row;
+        };
+        const value=Reflect.get(target,key);
+        return typeof value==='function'?value.bind(target):value;
+      }});
+      return wrap(db.prepare(sql));
+    },batch:statements=>db.batch(statements)};
+    const {handleFeedJobs}=await taskRuntimeModule();
+    let acked=false;
+    const retries=[],workflows=[];
+    await handleFeedJobs({messages:[{body:payload,attempts:1,ack(){acked=true;},retry(options){retries.push(options);}}]},
+      {DB:raceDb,COLLECTION_EXECUTOR:'workflow'},{now:()=>at,workflow:{async create(input){workflows.push(input);throw new Error('Unexpected Workflow');}}});
+    assert.equal(deferred,true);
+    assert.equal(acked,false);
+    assert.deepEqual(retries,[{delaySeconds:120}]);
+    assert.deepEqual(workflows,[]);
+    assert.equal((await task(db,id)).state,'queued');
+    assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM outbox_receipts').first()).n,0);
+  }finally{await mf.dispose();}
+});
+
+test('launch recovery rechecks current task and delivery facts at its atomic write',async t=>{
+  const {createTaskRuntime}=await taskRuntimeModule();
+  const changes={
+    'new planned start':(db,id,at)=>db.prepare('UPDATE tasks SET due_at=? WHERE id=?').bind(at+48*60_000,id).run(),
+    'confirmed handoff':async(db,id,at)=>{
+      const launch=await db.prepare("SELECT payload_json FROM outbox WHERE topic='feed-jobs'").first();
+      await createTaskRuntime({DB:db,COLLECTION_EXECUTOR:'workflow',CAPTURE:{async create(){return {async status(){return {status:'queued'};}};}}},{now:()=>at})
+        .startJob(JSON.parse(launch.payload_json));
+    },
+    'processed receipt':(db,id,at)=>db.prepare(`INSERT INTO outbox_receipts(outbox_id,topic,state,created_at,updated_at)
+      SELECT id,topic,'processed',?,? FROM outbox WHERE topic='feed-jobs'`).bind(at,at).run(),
+    'recent send':(db,id,at)=>db.prepare("UPDATE outbox SET updated_at=? WHERE topic='feed-jobs'").bind(at).run(),
+    'recent replay':(db,id,at)=>db.prepare(`INSERT INTO outbox_receipts(outbox_id,topic,state,last_replayed_at,created_at,updated_at)
+      SELECT id,topic,'queued',?,?,? FROM outbox WHERE topic='feed-jobs'`).bind(at,at,at).run(),
+    'superseded attempt':(db,id)=>db.prepare('UPDATE tasks SET attempt_no=2 WHERE id=?').bind(id).run(),
+    'completed task':(db,id)=>db.prepare("UPDATE tasks SET state='succeeded' WHERE id=?").bind(id).run(),
+  };
+  for(const mode of ['manual','automatic requeue','automatic exhausted'])for(const [name,change] of Object.entries(changes))await t.test(mode+': '+name,async()=>{
+    const {mf,db,admin}=await fixture({queueConsumer:false});
+    try{
+      await mf.dispatchFetch('https://feed.test/fixture/queue',{method:'POST',body:JSON.stringify({mode:'hold'})});
+      const id=await createCaptureTask(mf,admin,'manual-recovery-race');
+      const at=Date.now();
+      await db.prepare("UPDATE outbox SET updated_at=? WHERE topic='feed-jobs'").bind(at-16*60_000).run();
+      await db.prepare('UPDATE tasks SET due_at=? WHERE id=?').bind(at-16*60_000,id).run();
+      const attempts=mode==='automatic exhausted'?5:1;
+      await db.prepare("UPDATE outbox SET attempts=? WHERE topic='feed-jobs'").bind(attempts).run();
+      let raced=false;
+      const beforeWrite=async()=>{
+        if(raced)return;
+        raced=true;
+        await change(db,id,at);
+      };
+      const raceDb={
+        prepare(sql){
+          const wrap=statement=>new Proxy(statement,{get(target,key){
+            if(key==='bind')return (...args)=>wrap(target.bind(...args));
+            if(['run','all','first','raw'].includes(key))return async(...args)=>{
+              if(/^\s*(?:UPDATE|INSERT|DELETE)/i.test(sql))await beforeWrite();
+              return target[key](...args);
+            };
+            return Reflect.get(target,key);
+          }});
+          return wrap(db.prepare(sql));
+        },
+        async batch(statements){await beforeWrite();return db.batch(statements);},
+      };
+      const sends=[];
+      const runtime=createTaskRuntime({DB:raceDb,CRAWL_ENABLED:'true',TASK_RUNTIME_ENABLED:'true',CAPTURE:{async get(){return {async status(){return {status:'queued'};}};}}},{now:()=>at,queue:{async send(...args){sends.push(args);}}});
+      const result=await (mode==='manual'?runtime.recoverTask(id):runtime.recover());
+      assert.equal(raced,true,'delivery facts change after the initial read and before its first write');
+      assert.equal(result.recovered,0);
+      assert.deepEqual(sends,[]);
+      const outbox=await db.prepare("SELECT state,attempts FROM outbox WHERE topic='feed-jobs'").first();
+      assert.deepEqual(outbox,{state:'sent',attempts});
+      assert.notEqual((await task(db,id)).state,'blocked');
+      if(name==='confirmed handoff')assert.equal((await task(db,id)).state,'starting');
+    }finally{await mf.dispose();}
+  });
+});
+
+test('automatic and manual launch recovery share one send reservation while Queue acknowledgement is pending',async t=>{
+  for(const automatic of [false,true])await t.test(automatic?'automatic first':'manual first',async()=>{
+  const {mf,db,admin}=await fixture({queueConsumer:false});
+  let release,first;
+  const pending=new Promise(resolve=>{release=resolve;});
+  try{
+    await mf.dispatchFetch('https://feed.test/fixture/queue',{method:'POST',body:JSON.stringify({mode:'hold'})});
+    const id=await createCaptureTask(mf,admin,'manual-recovery-reservation');
+    const at=Date.now(),old=at-16*60_000;
+    await db.batch([
+      db.prepare("UPDATE outbox SET updated_at=? WHERE topic='feed-jobs'").bind(old),
+      db.prepare('UPDATE tasks SET due_at=? WHERE id=?').bind(old,id),
+    ]);
+    const {createTaskRuntime}=await taskRuntimeModule();
+    const sends=[];
+    const runtime=createTaskRuntime({DB:db,CRAWL_ENABLED:'true',TASK_RUNTIME_ENABLED:'true'},{now:()=>at,queue:{
+      async send(body){sends.push(body);if(sends.length===1)await pending;},
+    }});
+    first=automatic?runtime.recover():runtime.recoverTask(id);
+    await waitFor(async()=>assert.equal(sends.length,1));
+    const second=await runtime.recoverTask(id);
+    assert.deepEqual((await runtime.recover()).dispatched,[]);
+    const replay=await mf.dispatchFetch('https://feed.test/internal/operations/replay',{method:'POST',headers:{...admin.headers,'Content-Type':'application/json'},body:JSON.stringify({outboxId:sends[0].outboxId,topic:'feed-jobs'})});
+    assert.equal(replay.status,409,'manual replay shares the current delivery grace window');
+    release();
+    const completed=await first;
+    assert.equal(automatic?completed.dispatched.length:completed.recovered,1);
+    assert.equal(second.recovered,0);
+    assert.equal(sends.length,1);
+    assert.equal((await runtime.recoverTask(id)).recovered,0,'the acknowledgement starts another delivery grace window');
+  }finally{release();await first;await mf.dispose();}
+  });
+});
+
 test('Queue crash recovery waits for expiry, preserves backoff and stops after three attempts',async()=>{
   const {mf,db,admin}=await fixture();
   try{
@@ -1051,4 +1339,10 @@ async function applyMigration(db,sql){
     .map(statement=>statement.trim())
     .filter(statement=>statement&&!/^PRAGMA\b/i.test(statement));
   for(const statement of statements)await db.prepare(statement).run();
+}
+
+let runtimeModulePromise;
+function taskRuntimeModule(){
+  return runtimeModulePromise??=build({entryPoints:['worker/task-runtime.mjs'],bundle:true,write:false,format:'esm',platform:'node',plugins:[workersPlugin]})
+    .then(bundle=>import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`));
 }

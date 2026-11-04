@@ -41,7 +41,7 @@ const server=createServer(async(request,response)=>{
       ||/CDP timeout|Browser (connection closed|closed)|fetch failed|net::ERR_|startup timeout/.test(error.message);
     response.end(JSON.stringify({success:false,
       error:String(error.message).replace(/https?:\/\/\S+/g,'[URL omitted]').slice(0,200),
-      code:error.code??(retryable?'browser_transient':'capture_failed'),retryable,httpStatus:error.httpStatus}));
+      code:error.code??(retryable?'browser_transient':'capture_failed'),retryable,httpStatus:error.httpStatus,retryAfter:error.retryAfter}));
   }finally{
     clearInterval(heartbeat);
     response.removeListener('close',disconnected);

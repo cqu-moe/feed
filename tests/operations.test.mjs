@@ -70,9 +70,9 @@ async function fixture({bindings={}}={}){
       function wrap(rawEnv,name){
         const actual=rawEnv[name];
         return {
-          async send(body){
+          async send(body,options){
             globalThis.OPERATIONS_QUEUE_SENDS[name]??=[];
-            globalThis.OPERATIONS_QUEUE_SENDS[name].push(body);
+            globalThis.OPERATIONS_QUEUE_SENDS[name].push({body,options:options??{contentType:'json'}});
             if(globalThis.OPERATIONS_QUEUE_MODE.startsWith('consume')){
               await handleFeedJobs({messages:[{body,attempts:1,ack(){},retry(){throw new Error('Consumer retried');}}]},rawEnv);
             }
@@ -341,7 +341,9 @@ test('operations DLQ replay is targeted and preserves the persisted business ide
     });
     assert.equal(replay.status,202,await replay.text());
     const sent=await getSends(mf);
-    assert.deepEqual(sent.FEED_MAIL,[JSON.parse(await outboxPayload(db,ids.mailOutbox))]);
+    assert.deepEqual(sent.FEED_MAIL,[{
+      body:JSON.parse(await outboxPayload(db,ids.mailOutbox)),options:{contentType:'json'},
+    }]);
     const receipt=await db.prepare('SELECT state,attempts,replay_count FROM outbox_receipts WHERE outbox_id=?')
       .bind(ids.mailOutbox).first();
     assert.deepEqual(receipt,{state:'queued',attempts:2,replay_count:1});
@@ -379,7 +381,7 @@ test('targeted task recovery does not duplicate active workflows and retries onl
     assert.deepEqual(await launch.json(),{id:ids.launchTask,state:'queued',recovered:1,workflowStatus:null});
     const launchSends=(await getSends(mf)).FEED_JOBS;
     assert.equal(launchSends.length,1);
-    assert.deepEqual(launchSends[0],{
+    assert.deepEqual(launchSends[0].body,{
       v:1,type:'start-job',outboxId:ids.launchOutbox,taskId:ids.launchTask,attempt:1,
     });
 
@@ -392,7 +394,42 @@ test('targeted task recovery does not duplicate active workflows and retries onl
     assert.equal(row.state,'queued');
     const sends=(await getSends(mf)).FEED_JOBS;
     assert.equal(sends.length,2);
-    assert.deepEqual({taskId:sends[1].taskId,attempt:sends[1].attempt},{taskId:ids.activeTask,attempt:2});
+    assert.deepEqual({taskId:sends[1].body.taskId,attempt:sends[1].body.attempt},{taskId:ids.activeTask,attempt:2});
+  }finally{
+    await mf.dispose();
+  }
+});
+
+test('planned launch replay waits in Queue until its task is due',async()=>{
+  const {mf,db,admin}=await fixture();
+  try{
+    await db.prepare('UPDATE tasks SET due_at=? WHERE id=?').bind(now+28*60*1000,ids.launchTask).run();
+    await db.prepare("UPDATE outbox SET state='sent',updated_at=? WHERE id=?").bind(now-45*60*1000,ids.launchOutbox).run();
+    const diagnostics=await mf.dispatchFetch('https://feed.test/internal/operations/diagnostics',{
+      headers:admin.headers,
+    }).then(response=>response.json());
+    assert.equal(diagnostics.queues.find(queue=>queue.topic==='feed-jobs')
+      .deadLetters.filter(item=>item.outboxId===ids.launchOutbox).length,0);
+
+    const replay=await adminPost(mf,admin,'/internal/operations/replay',{outboxId:ids.launchOutbox,topic:'feed-jobs'});
+    assert.equal(replay.status,409);
+    const recovered=await adminPost(mf,admin,`/internal/operations/tasks/${ids.launchTask}/recover`);
+    assert.equal(recovered.status,202);
+    assert.deepEqual(await recovered.json(),{
+      id:ids.launchTask,state:'queued',recovered:0,workflowStatus:null,
+    });
+    assert.deepEqual((await getSends(mf)).FEED_JOBS??[],[]);
+
+    await db.prepare("UPDATE outbox SET state='sent',updated_at=? WHERE id=?").bind(now-45*60*1000,ids.launchOutbox).run();
+    await db.prepare('UPDATE tasks SET due_at=? WHERE id=?').bind(now-30*60*1000,ids.launchTask).run();
+    const dueReplay=await adminPost(mf,admin,'/internal/operations/replay',{outboxId:ids.launchOutbox,topic:'feed-jobs'});
+    assert.equal(dueReplay.status,202);
+    const sends=(await getSends(mf)).FEED_JOBS;
+    assert.equal(sends.length,1);
+    assert.deepEqual(sends[0],{
+      body:{v:1,type:'start-job',outboxId:ids.launchOutbox,taskId:ids.launchTask,attempt:1},
+      options:{contentType:'json'},
+    });
   }finally{
     await mf.dispose();
   }
@@ -438,7 +475,7 @@ test('live discovery replay uses Queue capacity instead of the retired admission
     assert.deepEqual(await recovered.json(),{
       id:ids.launchTask,state:'queued',recovered:1,workflowStatus:null,
     });
-    assert.deepEqual((await getSends(mf)).FEED_JOBS.map(message=>message.taskId).sort(),[ids.discoverTask,ids.launchTask].sort());
+    assert.deepEqual((await getSends(mf)).FEED_JOBS.map(message=>message.body.taskId).sort(),[ids.discoverTask,ids.launchTask].sort());
     assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM discovery_admissions').first()).n,0);
     assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM outbox_receipts WHERE outbox_id=?').bind(ids.jobOutbox).first()).n,1);
   }finally{
@@ -480,7 +517,9 @@ test('replay atomically starts a fresh retry window for simultaneous and repeate
     // Expire only the new replay window; the original outbox identity and age stay unchanged.
     await db.prepare('UPDATE outbox_receipts SET last_replayed_at=? WHERE outbox_id=?').bind(now-16*60_000,ids.mailOutbox).run();
     assert.equal((await replay()).status,202);
-    assert.deepEqual((await getSends(mf)).FEED_MAIL,Array(2).fill(JSON.parse(await outboxPayload(db,ids.mailOutbox))));
+    assert.deepEqual((await getSends(mf)).FEED_MAIL,Array(2).fill({
+      body:JSON.parse(await outboxPayload(db,ids.mailOutbox)),options:{contentType:'json'},
+    }));
     assert.equal((await db.prepare('SELECT replay_count FROM outbox_receipts WHERE outbox_id=?').bind(ids.mailOutbox).first()).replay_count,2);
     await db.prepare('UPDATE outbox_receipts SET last_replayed_at=? WHERE outbox_id=?').bind(now-16*60_000,ids.mailOutbox).run();
     await adminPost(mf,admin,'/fixture/queue-mode',{mode:'fail'});

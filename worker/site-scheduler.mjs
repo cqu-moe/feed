@@ -75,14 +75,19 @@ export async function releaseOwnedSiteExecution(env,taskId,attemptNo,now=Date.no
   return releaseSiteExecution(env,{siteId:lease.site_id,generation:lease.generation,taskId,attemptNo},now);
 }
 
-// Reuse the persisted launch outbox; a successor claims the site atomically
-// when delivered. No second queue or container polling is needed.
+// Keep the existing launch identity for both queued and handed-off successors.
+// Dispatching an already sent outbox is a no-op; its Workflow claims the site.
 export async function handoffOrReleaseSiteExecution(env,admission,now=Date.now()){
   const released=await releaseSiteExecution(env,admission,now);
   if(!released)return {released:false};
   const next=await env.DB.prepare(`SELECT o.id FROM outbox o JOIN tasks t ON t.id=json_extract(o.payload_json,'$.taskId')
-    WHERE o.topic='feed-jobs' AND o.state='queued' AND o.available_at<=? AND t.due_at<=?
-      AND t.state='queued' AND t.attempt_no=json_extract(o.payload_json,'$.attempt')
+    WHERE o.topic='feed-jobs' AND o.available_at<=? AND t.due_at<=?
+      AND (t.state='queued' AND o.state IN ('queued','sent') OR t.state IN ('starting','running')
+        AND EXISTS(SELECT 1 FROM task_attempts a WHERE a.task_id=t.id AND a.attempt_no=t.attempt_no
+          AND a.state IN ('starting','running') AND a.handed_off_at IS NOT NULL AND a.result_json IS NULL
+          AND a.workflow_instance_id='task-'||t.id||'-a'||t.attempt_no)
+        AND NOT EXISTS(SELECT 1 FROM articles ar WHERE ar.id=t.article_id AND ar.lease_until>?))
+      AND t.id<>? AND t.attempt_no=json_extract(o.payload_json,'$.attempt')
       AND (
         t.kind IN ('capture','recheck')
         OR t.kind='discover'
@@ -91,23 +96,51 @@ export async function handoffOrReleaseSiteExecution(env,admission,now=Date.now()
           AND ${backfillTaskSql()}
       )
       AND COALESCE(json_extract(t.payload_json,'$.source.siteId'),(SELECT s.site_id FROM sources s WHERE s.id=t.source_id))=?
-    ORDER BY t.priority,t.due_at,t.id LIMIT 1`).bind(now,now,admission.siteId).first();
+    ORDER BY t.priority,t.due_at,t.id LIMIT 1`).bind(now,now,now,admission.taskId,admission.siteId).first();
   return {released:true,outboxId:next?.id};
 }
 
 export async function runSiteTask(env,step,taskId,attemptNo,name,timeout,run){
-  for(let wait=0;;wait++){
-    const result=await step.do(`${name}${wait?`-capacity-${wait}`:''}`,{retries:{limit:0,delay:'5 seconds'},timeout},async()=>{
+  const maxAttempts=Math.min(10,Math.max(1,Number(env.MAX_TASK_ATTEMPTS)||3));
+  const baseDelay=Math.max(60000,Number(env.TASK_RETRY_BASE_DELAY_MS)||900000);
+  const maxDelay=Math.max(baseDelay,Number(env.TASK_RETRY_MAX_DELAY_MS)||21600000);
+  let originTries=attemptNo===1?0:await step.do(`${name}-source-budget`,async()=>{
+    const rows=await env.DB.prepare(`SELECT a.result_json FROM task_attempts a JOIN tasks t ON t.id=a.task_id
+      WHERE t.id=? AND t.attempt_no=? AND a.attempt_no<?
+        AND a.attempt_no>=CASE WHEN t.kind='backfill' THEN t.backfill_retry_from ELSE 1 END`)
+      .bind(taskId,attemptNo,attemptNo).all();
+    return rows.results.filter(row=>{
+      const result=JSON.parse(row.result_json??'{}');
+      return result.error&&!result.capacity&&!result.skipped&&!result.paused&&!result.cancel&&!result.superseded
+        &&!result.resumeSaved&&!result.savedPage;
+    }).length;
+  }),archiveTries=0;
+  if(originTries>=maxAttempts)return {deferred:true,error:'Source attempt budget exhausted',code:'origin_attempts_exhausted',originAttemptsExhausted:true};
+  for(let n=0;;n++){
+    const result=await step.do(n?`${name}-try-${n}`:name,{retries:{limit:0,delay:'5 seconds'},timeout},async()=>{
       const task=await env.DB.prepare("SELECT * FROM tasks WHERE id=? AND attempt_no=? AND state='running'").bind(taskId,attemptNo).first();
       if(!task)return {superseded:true};
       const admission=await claimSiteExecution(env,task);
       if(!admission.admitted)return {capacity:true,retryAfterMs:30000};
       try{return await run(admission);}
-      catch(error){if(captureFailure(error).capacity)return captureFailure(error);throw error;}
-      finally{await releaseOwnedSiteExecution(env,taskId,attemptNo);}
+      catch(error){return captureFailure(error);}
+      finally{await releaseSiteExecution(env,admission);}
     });
-    if(!result?.capacity)return result;
-    const delayMs=Math.max(result.retryAfterMs??0,Math.min(30000*(wait+1),15*60000));
-    await step.sleep(`${name}-capacity-wait-${wait}`,delayMs);
+    // Pause, quota and permanent errors must reach the owning task unchanged.
+    if(result?.cancel||result?.superseded||result?.paused)return result;
+    const transient=result?.retryable||result?.code==='rate_limited'||result?.code==='browser_transient';
+    const waiting=result?.capacity||result?.skipped;
+    const saved=result?.resumeSaved||result?.savedPage;
+    if(!waiting&&!transient&&!saved)return result;
+    if(!waiting&&(saved?++archiveTries:++originTries)>=maxAttempts)
+      return {...result,originAttemptsExhausted:true};
+    const delay=waiting?Math.min(30000*(n+1),900000):Math.min(baseDelay*2**Math.max(0,(saved?archiveTries:originTries)-1),maxDelay);
+    const waitMs=Math.max(delay,result.retryAfterMs??0);
+    if(!waiting||result.code==='container_capacity')await step.do(`${name}-retry-due-${n}`,async()=>{
+      const at=Date.now();
+      await env.DB.prepare("UPDATE tasks SET due_at=?,updated_at=? WHERE id=? AND attempt_no=? AND state='running'")
+        .bind(at+waitMs,at,taskId,attemptNo).run();
+    });
+    await step.sleep(`${name}-wait-${n}`,waitMs);
   }
 }

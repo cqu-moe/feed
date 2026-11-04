@@ -60,7 +60,7 @@ export function createArchive(env,{
               attempts=attempts-?,lease_until=0,error=CASE WHEN ? THEN error ELSE ? END
           WHERE id=? AND capture_fence=?`)
           .bind(versioned?1:0,deferred?'pending':'failed',unconsumed?1:0,versioned?1:0,message,article.id,lease.capture_fence).run();
-        return {...failure,...(deferred?{deferred:true}:{})};
+        return {...failure,...(deferred?{deferred:true}:{}),...(savedResult?{resumeSaved:true}:{})};
       }
     },
     extract(articleId,options){
