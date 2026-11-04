@@ -99,7 +99,7 @@ export async function runSiteTask(env,step,taskId,attemptNo,name,timeout,run){
   const maxAttempts=Math.min(10,Math.max(1,Number(env.MAX_TASK_ATTEMPTS)||3));
   const baseDelay=Math.max(60000,Number(env.TASK_RETRY_BASE_DELAY_MS)||900000);
   const maxDelay=Math.max(baseDelay,Number(env.TASK_RETRY_MAX_DELAY_MS)||21600000);
-  let originTries=0;
+  let originTries=0,archiveTries=0;
   for(let n=0;;n++){
     const result=await step.do(n?`${name}-try-${n}`:name,{retries:{limit:0,delay:'5 seconds'},timeout},async()=>{
       const task=await env.DB.prepare("SELECT * FROM tasks WHERE id=? AND attempt_no=? AND state='running'").bind(taskId,attemptNo).first();
@@ -112,9 +112,11 @@ export async function runSiteTask(env,step,taskId,attemptNo,name,timeout,run){
     });
     // Pause, quota and permanent errors must reach the owning task unchanged.
     const transient=result?.retryable||result?.code==='rate_limited'||result?.code==='browser_transient';
-    if(!result?.capacity&&!transient)return result;
-    if(!result.capacity&&++originTries>=maxAttempts)return {...result,originAttemptsExhausted:true};
-    const delay=result.capacity?Math.min(30000*(n+1),900000):Math.min(baseDelay*2**(originTries-1),maxDelay);
+    const waiting=result?.capacity||result?.skipped;
+    if(!waiting&&!transient&&!result?.resumeSaved)return result;
+    if(!waiting&&(result.resumeSaved?++archiveTries:++originTries)>=maxAttempts)
+      return {...result,originAttemptsExhausted:true};
+    const delay=waiting?Math.min(30000*(n+1),900000):Math.min(baseDelay*2**Math.max(0,(result.resumeSaved?archiveTries:originTries)-1),maxDelay);
     await step.sleep(`${name}-wait-${n}`,Math.max(delay,result.retryAfterMs??0));
   }
 }

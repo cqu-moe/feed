@@ -95,7 +95,7 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
       const priorAttempt=await env.DB.prepare('SELECT * FROM task_attempts WHERE task_id=? AND attempt_no=?')
         .bind(task.id,message.attempt).first();
       const workflowExecution=env.COLLECTION_EXECUTOR==='workflow'
-        &&task.kind==='discover';
+        &&['discover','capture','recheck'].includes(task.kind);
       if(browserTaskKind(task.kind)){
         if(!priorAttempt&&!workflowExecution)return runtime.runJobInQueue(message,task);
         if(priorAttempt&&isQueueInstance(priorAttempt.workflow_instance_id)){
