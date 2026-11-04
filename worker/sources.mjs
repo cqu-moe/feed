@@ -7,7 +7,7 @@ import {launchOutboxId,launchOutboxStatement} from './task-statements.mjs';
 import {articleSourceAssociationStatements} from './notifications.mjs';
 import {articleId,cleanError,cutoffDate,sha} from './utils.mjs';
 
-const sourceSelect=`SELECT s.*,st.origin AS site_origin,st.enabled AS site_enabled
+const sourceSelect=`SELECT s.*,st.name AS site_name,st.origin AS site_origin,st.enabled AS site_enabled
   FROM sources s JOIN sites st ON st.id=s.site_id`;
 const trackingParameters=[/^utm_/i,/^fbclid$/i,/^gclid$/i,/^spm$/i];
 
@@ -534,7 +534,7 @@ function rowFromDb(row){
   const config=safeJson(row.config_json,{});
   const cursor=safeJson(row.backfill_cursor,null);
   return {
-    id:row.id,siteId:row.site_id,name:row.name,url:row.site_origin??row.url,listUrl:row.list_url??row.url,
+    id:row.id,siteId:row.site_id,siteName:row.site_name,name:row.name,url:row.site_origin??row.url,listUrl:row.list_url??row.url,
     articlePattern:config.articlePattern,listUrls:config.listUrls??[row.list_url??row.url],
     adapterKey:row.adapter_key,config:{
       articlePattern:config.articlePattern??'^/info/\\d+/\\d+\\.htm$',

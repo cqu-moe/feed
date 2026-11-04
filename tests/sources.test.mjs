@@ -352,6 +352,9 @@ test('two discovered columns share one notification and capture while all finite
     await waitFor(async()=>{
       const tasks=(await request(mf,admin,'/internal/capture-tasks')).data.tasks;
       assert.equal(tasks.filter(task=>task.kind==='discover').length,6);
+      const column=tasks.find(task=>task.sourceId===a);
+      assert.deepEqual([column.siteId,column.siteName,column.sourceName,column.listUrl],
+        [site.data.site.id,'多栏目站点','栏目 A','https://a.test/list-a.htm']);
       assert.ok(tasks.filter(task=>['discover','capture'].includes(task.kind)).every(task=>task.state==='succeeded'),JSON.stringify(tasks));
       assert.equal(tasks.filter(task=>task.kind==='capture').length,1);
     });
@@ -968,6 +971,7 @@ test('rate limiting defers only the failing source and pausing a source stops sc
       const publicSources=await(await read('/api/sources')).json();
       const failing=publicSources.sources.find(source=>source.id===b);
       assert.match(failing.error,/429|rate limit/i);
+      assert.equal(failing.siteName,'独立失败站点');
       assert.equal(failing.enabled,true);
       assert.equal(failing.siteEnabled,true);
       assert.equal(failing.validationState,'verified');

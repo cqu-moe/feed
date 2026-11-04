@@ -355,53 +355,6 @@ body {
   overflow-wrap: anywhere;
 }
 
-.feed-source-grid.feed-source-ledger {
-  grid-template-columns: minmax(0, 1fr);
-  gap: 0;
-  border-top: 1px solid var(--border);
-}
-
-.feed-source-ledger .feed-source-card {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: var(--space-4) var(--space-8);
-  padding: var(--space-5) 0;
-  border: 0;
-  border-bottom: 1px solid var(--border);
-  border-radius: 0;
-  background: transparent;
-}
-
-.feed-source-ledger .feed-source-heading {
-  display: flex;
-  align-items: center;
-}
-
-.feed-source-ledger .feed-source-card h2 {
-  margin: 0;
-  font-size: var(--text-base);
-}
-
-.feed-source-ledger .feed-source-meta {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  align-self: center;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  justify-content: space-between;
-}
-
-.feed-source-ledger .feed-source-meta > div { min-width: 0; }
-
-.feed-source-ledger .feed-source-card > [role='alert'] {
-  grid-column: 1 / -1;
-}
-
-@media (max-width: 768px) {
-  .feed-source-ledger .feed-source-card { grid-template-columns: minmax(0, 1fr); }
-}
-
 .feed-subscription-activity {
   margin-top: var(--space-4);
   padding-top: var(--space-4);

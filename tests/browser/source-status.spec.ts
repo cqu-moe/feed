@@ -5,7 +5,8 @@ test('source status distinguishes paused sources from active collection health',
     sources: [{
       id: 'civil',
       siteId: 'civil-site',
-      name: '土木学院',
+      siteName: '土木学院',
+      name: '土木学院 · 公告',
       url: 'https://civil.example.edu/',
       listUrl: 'https://civil.example.edu/notices.htm',
       enabled: false,
@@ -20,16 +21,22 @@ test('source status distinguishes paused sources from active collection health',
   });
   await page.goto('/sources');
 
-  const paused = page.locator('article', { has: page.getByRole('heading', { level: 2, name: '土木学院' }) });
-  await expect(paused).toBeVisible();
-  await expect(paused.locator('..')).toContainText('采集已暂停');
-  await expect(paused.locator('..')).toContainText('最近检查');
-  await expect(paused.locator('..')).toContainText('上次采集失败：列表页暂时不可访问');
-  await expect(paused.locator('..')).not.toContainText('运行正常');
-  await expect(page.getByRole('link', { name: /栏目列表/ })).toHaveAttribute(
-    'href',
-    'https://civil.example.edu/notices.htm',
-  );
+  const site = page.locator('.directory-site > summary');
+  const column = page.locator('.directory-column > summary');
+  await expect(site).toContainText('土木学院');
+  await expect(site).toContainText('暂停 1');
+  await expect(column).not.toBeVisible();
+  await site.focus();
+  await site.press('Enter');
+  await expect(column).toContainText('公告');
+  await expect(column).not.toContainText('土木学院');
+  await expect(column).toContainText('采集已暂停');
+  await expect(page.getByRole('link', { name: '打开原栏目' })).not.toBeVisible();
+  await column.press('Space');
+  await expect(page.locator('.directory-detail dt')).toHaveText(['最近检查', '已存档']);
+  await expect(page.getByText('12 条')).toBeVisible();
+  await expect(page.getByText('上次采集失败：列表页暂时不可访问')).toBeVisible();
+  await expect(page.getByRole('link', { name: '打开原栏目' })).toHaveAttribute('href', 'https://civil.example.edu/notices.htm');
 });
 
 test('source status reflects overdue, validation and legacy API states', async ({ page }) => {
@@ -61,19 +68,24 @@ test('source status reflects overdue, validation and legacy API states', async (
   });
   await page.goto('/sources');
 
-  const news = page.locator('article', { has: page.getByRole('heading', { level: 2, name: '新闻网' }) });
-  await expect(news).toContainText('检查已超期');
-  await expect(news).toContainText('最近成功检查');
-  await expect(page.locator('article', { has: page.getByRole('heading', { level: 2, name: '待整点扫描' }) })).toContainText('运行正常');
-  const draft = page.locator('article', { has: page.getByRole('heading', { level: 2, name: '新栏目' }) });
-  await expect(draft).toContainText('配置待验证');
-  const legacy = page.locator('article', { has: page.getByRole('heading', { level: 2, name: '旧接口' }) });
-  await expect(legacy).toContainText('运行正常');
-  await expect(legacy).toContainText('最近检查');
+  const sites = page.locator('.directory-site');
+  await expect(sites).toHaveCount(2);
+  const news = sites.filter({ hasText: 'news.example.edu' });
+  await expect(news.locator('.directory-totals')).toHaveText('待检查 2正常 1');
+  await news.locator(':scope > summary').click();
+  await expect(news.locator('.directory-badge')).toHaveText(['检查已超期', '运行正常', '配置待验证']);
+  await news.locator('.directory-column > summary').first().click();
+  await expect(news.getByText('最近成功检查', {exact:true}).first()).toBeVisible();
+  const legacy = sites.filter({ hasText: 'legacy.example.edu' });
+  await legacy.locator(':scope > summary').click();
+  await expect(legacy.locator('.directory-badge')).toHaveText('运行正常');
+  await legacy.locator('.directory-column > summary').click();
+  await expect(legacy.getByText('最近检查', {exact:true})).toBeVisible();
 });
 
 test('invalid source timestamps and four-item metadata remain readable across layouts and themes', async ({ page }) => {
   await installReadingRoutes(page, {
+    admin: true,
     sources: [{
       id: 'invalid', siteId: 'invalid-site', name: '时间异常', url: 'https://invalid.example.edu/',
       listUrl: 'https://invalid.example.edu/list.htm', enabled: true, siteEnabled: true,
@@ -85,15 +97,19 @@ test('invalid source timestamps and four-item metadata remain readable across la
   for (const layout of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
     await page.setViewportSize(layout);
     await page.goto('/sources');
-    const card = page.locator('article', { has: page.getByRole('heading', { level: 2, name: '时间异常' }) });
-    await expect(card).toContainText('状态未知');
+    await page.locator('.directory-site > summary').click();
+    await page.locator('.directory-column > summary').click();
+    await expect(page.locator('.directory-badge')).toHaveText('状态未知');
+    await expect(page.locator('.directory-detail dt')).toHaveText(['最近检查', '刷新间隔', '已存档', '下次检查']);
+    await expect(page.getByText('时间无效')).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   }
 
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.evaluate(() => localStorage.setItem('cqu-moe-theme', 'dark'));
   await page.reload();
-  const status = page.locator('article', { has: page.getByRole('heading', { level: 2, name: '时间异常' }) }).locator('.feed-source-state');
+  await page.locator('.directory-site > summary').click();
+  const status = page.locator('.directory-badge');
   await expect(status).toBeVisible();
   expect(await status.evaluate(node => {
     const style = getComputedStyle(node);
