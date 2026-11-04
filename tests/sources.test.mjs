@@ -76,6 +76,8 @@ const browserPlugin={
           if(globalThis.SOURCES_FAIL_LIST&&url===globalThis.SOURCES_FAIL_LIST){
             throw new Error(globalThis.SOURCES_LIST_OPTIONS.error??'Firecrawl HTTP 429: rate limit exceeded');
           }
+          const failure=globalThis.SOURCES_LIST_OPTIONS.failureUrl===url?globalThis.SOURCES_LIST_OPTIONS.failures?.shift():null;
+          if(failure)throw Object.assign(new Error(failure.message),failure);
           const path=new URL(url).pathname;
           const page=/\\/list(?:-[ab])?(?:-2)?\\.htm$/.test(path)?(path.includes('-2')?2:1):0;
           const value=page?list(url,page):body(url);
@@ -95,7 +97,7 @@ const browserPlugin={
   },
 };
 
-async function fixture({versioned=false,notifications=false,discoveryPages=2,env={}}={}){
+async function fixture({versioned=false,notifications=false,discoveryPages=2,workflow=false,env={}}={}){
   const bundle=await build({
     stdin:{
       contents:`
@@ -104,6 +106,25 @@ async function fixture({versioned=false,notifications=false,discoveryPages=2,env
         import {createTaskRuntime,handleFeedJobs} from './worker/task-runtime.mjs';
         import {replayMatchOutbox} from './tests/helpers/notification-replay.mjs';
         import {issueGrant} from './worker/bridge.mjs';
+        import {DiscoveryWorkflow} from './worker/discovery-workflow.mjs';
+        import {CaptureWorkflow} from './worker/capture-workflow.mjs';
+
+        globalThis.SOURCES_WAITS=[];
+        // Persist real platform steps; only wall-clock waiting is accelerated.
+        function testStep(step,env){return {
+          do(...args){return step.do(...args);},
+          async sleep(name,duration){
+            globalThis.SOURCES_WAITS.push({name,duration});
+            await env.TEST_WAIT.fetch('https://gate.test/?name='+name);
+            return step.sleep(name,1);
+          },
+        };}
+        export class FixtureDiscoveryWorkflow extends DiscoveryWorkflow{
+          async run(event,step){this.env=prepareEnv(this.env);return super.run(event,testStep(step,this.env));}
+        }
+        export class FixtureCaptureWorkflow extends CaptureWorkflow{
+          async run(event,step){this.env=prepareEnv(this.env);return super.run(event,testStep(step,this.env));}
+        }
 
         const nativeNow=Date.now;
         let fixedNow=null;
@@ -136,10 +157,10 @@ async function fixture({versioned=false,notifications=false,discoveryPages=2,env
             const result=await database.batch(entries.map(entry=>entry.statement));
             if(globalThis.SOURCES_FAIL_BATCH){globalThis.SOURCES_FAIL_BATCH=false;throw new Error('Injected lost D1 commit response');}
             return result;
-          }},CAPTURE:workflow,DISCOVERY:workflow,FEED_JOBS:{
+          }},CAPTURE:rawEnv.CAPTURE??workflow,DISCOVERY:rawEnv.DISCOVERY??workflow,FEED_JOBS:{
             async send(body,options){
               const task=await database.prepare('SELECT kind,source_id AS sourceId FROM tasks WHERE id=?').bind(body.taskId??'').first();
-              globalThis.SOURCES_SENT.push({...body,...task});return await actualQueue.send(body,options);},
+              globalThis.SOURCES_SENT.push({...body,...task,options});return await actualQueue.send(body,options);},
           }};
           globalThis.SOURCES_ENV=env;
           return env;
@@ -147,6 +168,12 @@ async function fixture({versioned=false,notifications=false,discoveryPages=2,env
         export default {
           async fetch(request,rawEnv){
             const env=prepareEnv(rawEnv),url=new URL(request.url);
+            if(url.pathname==='/fixture/waits')return Response.json(globalThis.SOURCES_WAITS);
+            if(url.pathname==='/fixture/workflow-status')return Response.json(await (await env.DISCOVERY.get(url.searchParams.get('id'))).status());
+            if(url.pathname==='/fixture/redeliver'){
+              const {v,type,outboxId,taskId,attempt}=await request.json();
+              return Response.json(await createTaskRuntime(env,{now:runtimeNow}).startJob({v,type,outboxId,taskId,attempt}));
+            }
             if(url.pathname==='/fixture/clock'){fixedNow=(await request.json()).now;return Response.json({now:fixedNow});}
             if(url.pathname==='/fixture/list-options'){globalThis.SOURCES_LIST_OPTIONS=await request.json();return Response.json({ok:true});}
             if(url.pathname==='/fixture/sent')return Response.json(globalThis.SOURCES_SENT);
@@ -211,11 +238,12 @@ async function fixture({versioned=false,notifications=false,discoveryPages=2,env
       resolveDir:process.cwd(),
       sourcefile:'sources-fixture.mjs',
     },
-    bundle:true,write:false,format:'esm',platform:'browser',external:['node:buffer','node:*'],
-    plugins:[workersPlugin,browserPlugin],
+    bundle:true,write:false,format:'esm',platform:'browser',external:['node:buffer','node:*','cloudflare:workers'],
+    plugins:workflow?[browserPlugin]:[workersPlugin,browserPlugin],
   });
   const provider=oauthProvider();
   const gate={url:null,held:false,release:null};
+  const waits={hold:false,held:false,release:null};
   const commits={ready:{},association:{},start:{},match:{}};
   const policyScript=`
     import {WorkerEntrypoint} from 'cloudflare:workers';
@@ -237,7 +265,11 @@ async function fixture({versioned=false,notifications=false,discoveryPages=2,env
     }
     export default{async fetch(){return new Response('Not found',{status:404});}};
   `;
-  const feedServiceBindings={AUTH:request=>provider.fetch(request),TEST_COMMIT_GATE:request=>{
+  const feedServiceBindings={AUTH:request=>provider.fetch(request),TEST_WAIT:request=>{
+    if(!waits.hold||!new URL(request.url).searchParams.get('name')?.startsWith('discover-page'))return new Response('ready');
+    waits.held=true;
+    return new Promise(resolve=>{waits.release=()=>{waits.hold=false;waits.held=false;resolve(new Response('ready'));};});
+  },TEST_COMMIT_GATE:request=>{
     const url=new URL(request.url),hold=commits[url.searchParams.get('kind')];
     if(!hold?.hold||hold.sourceId&&hold.sourceId!==url.searchParams.get('sourceId'))return new Response('ready');
     hold.hold=false;hold.held=true;
@@ -254,8 +286,12 @@ async function fixture({versioned=false,notifications=false,discoveryPages=2,env
     serviceBindings:feedServiceBindings,
     bindings:{...provider.bindings,BASE_URL:'https://feed.test',BRIDGE_SECRET:'test-bridge-secret',
       FEED_AUTH_RPC_CLIENT_ID:'feed-rpc-client',FEED_AUTH_RPC_CLIENT_SECRET:'feed-rpc-secret',
-      ARCHIVE_VERSIONS_ENABLED:String(versioned),ARCHIVE_READS_ENABLED:String(versioned),SOURCE_MANAGEMENT_ENABLED:'true',CRAWL_ENABLED:'true',TASK_RUNTIME_ENABLED:'true',PDF_OCR_ENABLED:'false',MAX_DISCOVERY_PAGES_PER_RUN:String(discoveryPages),
+      COLLECTION_EXECUTOR:workflow?'workflow':'queue',ARCHIVE_VERSIONS_ENABLED:String(versioned),ARCHIVE_READS_ENABLED:String(versioned),SOURCE_MANAGEMENT_ENABLED:'true',CRAWL_ENABLED:'true',TASK_RUNTIME_ENABLED:'true',PDF_OCR_ENABLED:'false',MAX_DISCOVERY_PAGES_PER_RUN:String(discoveryPages),
       MAX_LIVE_DISCOVERY_TASKS_PER_RUN:String(env.liveBudget??20),MAX_BACKFILL_TASKS_PER_RUN:String(env.backfillBudget??5),MAX_TASK_ATTEMPTS:String(env.maxAttempts??3),MAX_BACKFILL_PAGES_PER_RUN:String(env.backfillPages??100),DEFAULT_BACKFILL_WINDOW_DAYS:String(env.backfillWindowDays??365),DISCOVERY_ADMISSION_RETENTION_MS:String(env.admissionRetentionMs??7*24*60*60*1000)},
+    ...(workflow?{workflows:{
+      DISCOVERY:{name:'fixture-discovery',className:'FixtureDiscoveryWorkflow'},
+      CAPTURE:{name:'fixture-capture',className:'FixtureCaptureWorkflow'},
+    }}:{}),
     d1Databases:['DB'],r2Buckets:['ARCHIVE'],
     queueProducers:{FEED_JOBS:{queueName:'feed-jobs'},FEED_EVENTS:{queueName:'feed-events'}},
     queueConsumers:{'feed-jobs':{maxBatchSize:1,maxConcurrency:10,maxRetries:3,deadLetterQueue:'feed-jobs-dlq'},'feed-events':{maxBatchSize:1,maxConcurrency:10,maxRetries:3,deadLetterQueue:'feed-events-dlq'}},
@@ -277,7 +313,7 @@ async function fixture({versioned=false,notifications=false,discoveryPages=2,env
   }
   await applyMigration(db,await readFile('migrations/0015_history_backfill.sql','utf8'));
   const admin=await loginAdmin(mf,provider,'sources-admin');
-  return {mf,db,provider,admin,gate,commitGate(kind,{arm,release,sourceId}={}){
+  return {mf,db,provider,admin,gate,waits,commitGate(kind,{arm,release,sourceId}={}){
     if(arm)Object.assign(commits[kind],{hold:true,held:false,sourceId});
     if(release)commits[kind].release?.();
     return {held:commits[kind].held===true};
@@ -388,7 +424,7 @@ test('two discovered columns share one notification and capture while all finite
 });
 
 test('backfill stops at its finite page cap with a resumable cursor instead of claiming completion',async()=>{
-  const {mf,admin}=await fixture({versioned:true,env:{backfillPages:2,backfillBudget:10}});
+  const {mf,admin}=await fixture({workflow:true,versioned:true,env:{backfillPages:2,backfillBudget:10}});
   try{
     const site=await request(mf,admin,'/internal/sites',{method:'POST',body:{name:'有限分页',origin:'https://a.test'}});
     const sourceId=await createHistorySource(mf,admin,site.data.site.id,'https://a.test/list.htm');
@@ -410,7 +446,7 @@ test('backfill stops at its finite page cap with a resumable cursor instead of c
 });
 
 test('the hard thousand-page ceiling retains evidence without queueing an unreachable continuation',async()=>{
-  const {mf,db,admin}=await fixture({versioned:true,env:{backfillPages:1000}});
+  const {mf,db,admin}=await fixture({workflow:true,versioned:true,env:{backfillPages:1000}});
   const bucket=await mf.getR2Bucket('ARCHIVE');
   try{
     const site=await request(mf,admin,'/internal/sites',{method:'POST',body:{name:'硬上限站点',origin:'https://a.test'}});
@@ -448,7 +484,7 @@ test('the hard thousand-page ceiling retains evidence without queueing an unreac
 
 test('terminal history failures remain visible and manual recovery continues the same saved page',async t=>{
   for(const message of ['Provider parser unavailable','Firecrawl HTTP 429: rate limit exceeded','Firecrawl HTTP 402: insufficient credits'])await t.test(message,async()=>{
-    const {mf,admin}=await fixture({versioned:true,env:{backfillBudget:20,maxAttempts:2}});
+    const {mf,admin}=await fixture({workflow:true,versioned:true,env:{backfillBudget:20,maxAttempts:2}});
     try{
       const site=await request(mf,admin,'/internal/sites',{method:'POST',body:{name:'失败恢复',origin:'https://a.test'}});
       const sourceId=await createHistorySource(mf,admin,site.data.site.id,'https://a.test/list.htm');
@@ -461,10 +497,6 @@ test('terminal history failures remain visible and manual recovery continues the
         failedTask=tasks.find(task=>task.kind==='backfill'&&['failed','blocked','deferred'].includes(task.state));
         assert.ok(failedTask,JSON.stringify(tasks));
       });
-      if(message.includes('429')){
-        assert.equal(failedTask.state,'deferred');
-        await control(mf,'recover',{});
-      }
       await waitFor(async()=>{
         const source=(await request(mf,admin,`/internal/sources/${sourceId}`)).data.source;
         assert.equal(source.backfill.state,'failed',JSON.stringify(source.backfill));
@@ -481,7 +513,7 @@ test('terminal history failures remain visible and manual recovery continues the
       await waitFor(async()=>assert.equal((await request(mf,admin,`/internal/sources/${sourceId}`)).data.source.backfill.state,'completed'));
       const task=(await request(mf,admin,`/internal/capture-tasks/${failedTask.id}`)).data.task;
       assert.equal(task.state,'succeeded');
-      assert.equal(task.attemptNo,message.includes('429')?3:2);
+      assert.equal(task.attemptNo,2);
       const calls=(await control(mf,'scrapes',{})).calls;
       assert.equal(calls.filter(url=>url==='https://a.test/list.htm').length,2,'verification and initial history page only');
     }finally{await mf.dispose();}
@@ -490,7 +522,7 @@ test('terminal history failures remain visible and manual recovery continues the
 
 test('current source and site controls fence history before fetching and during publication',async t=>{
   for(const target of ['source','site'])for(const phase of ['before-fetch','before-commit'])await t.test(target+' '+phase,async()=>{
-    const {mf,gate, admin }=await fixture({versioned:true});
+    const {mf,gate, admin }=await fixture({workflow:true,versioned:true});
     try{
       const site=await request(mf,admin,'/internal/sites',{method:'POST',body:{name:'控制围栏',origin:'https://a.test'}});
       const sourceId=await createHistorySource(mf,admin,site.data.site.id,'https://a.test/list.htm');
@@ -535,7 +567,7 @@ test('disabling a site during backfill start atomically leaves the source idle w
 });
 
 test('semantic source changes cancel old history work and allow a new verified run without deleting history',async()=>{
-  const {mf,gate, admin }=await fixture({versioned:true});
+  const {mf,gate, admin }=await fixture({workflow:true,versioned:true});
   try{
     const site=await request(mf,admin,'/internal/sites',{method:'POST',body:{name:'重新配置',origin:'https://a.test'}});
     const sourceId=await createHistorySource(mf,admin,site.data.site.id,'https://a.test/list.htm');
@@ -573,7 +605,7 @@ test('history windows use source-local calendar days across DST and reject futur
     {timezone:'America/New_York',now:'2026-04-01T04:30:00Z',days:90,start:'2026-01-01',before:'2025-12-31',today:'2026-04-01',future:'2026-04-02'},
     {timezone:'Asia/Shanghai',now:'2026-10-12T00:30:00Z',days:365,start:'2025-10-12',before:'2025-10-11',today:'2026-10-12',future:'2026-10-13'},
   ])await t.test(scenario.timezone,async()=>{
-    const {mf,admin}=await fixture({versioned:true,env:{backfillWindowDays:scenario.days}});
+    const {mf,admin}=await fixture({workflow:true,versioned:true,env:{backfillWindowDays:scenario.days}});
     try{
       const site=await request(mf,admin,'/internal/sites',{method:'POST',body:{name:'来源时区',origin:'https://a.test'}});
       const saved=await request(mf,admin,'/internal/sources',{method:'POST',body:{...sourceCommand(site.data.site.id,'https://a.test/list.htm'),timezone:scenario.timezone}});
@@ -594,7 +626,7 @@ test('history windows use source-local calendar days across DST and reject futur
 });
 
 test('history backfill uses a durable one-year cursor without creating mail candidates',async()=>{
-  const {mf,db,read,provider, admin }=await fixture({versioned:true,notifications:true});
+  const {mf,db,read,provider, admin }=await fixture({workflow:true,versioned:true,notifications:true});
   try{
     const site=await request(mf,admin,'/internal/sites',{method:'POST',body:{name:'历史补抓站点',origin:'https://a.test'}});
     const sourceId=await createHistorySource(mf,admin,site.data.site.id,'https://a.test/list.htm');
@@ -633,6 +665,9 @@ test('history backfill uses a durable one-year cursor without creating mail cand
     assert.equal(progress.processedArticles,2);
     assert.equal(progress.seenPages,2);
     assert.equal(progress.remainingUrls,0);
+    const launches=(await control(mf,'sent',{})).filter(message=>message.kind==='backfill');
+    assert.equal(new Set(launches.map(message=>message.taskId)).size,2);
+    assert.ok(launches.every(message=>(message.options.delaySeconds??0)===0));
 
     const reading=await(await read(`/api/articles?source=${sourceId}`)).json();
     assert.equal(reading.total,2);
@@ -671,8 +706,114 @@ test('history backfill uses a durable one-year cursor without creating mail cand
   }finally{await mf.dispose();}
 });
 
+test('a Workflow retries a partial history checkpoint without Cron or another source request',async t=>{
+  for(const fault of ['fault-before-commit','fault-commit'])await t.test(fault,async()=>{
+    const {mf,admin}=await fixture({workflow:true,versioned:true});
+    try{
+      const site=await request(mf,admin,'/internal/sites',{method:'POST',body:{name:'检查点恢复',origin:'https://a.test'}});
+      const sourceId=await createHistorySource(mf,admin,site.data.site.id,'https://a.test/list.htm');
+      await control(mf,'list-options',{chainPages:2});
+      const before=(await control(mf,'scrapes',{})).calls.length;
+      await control(mf,fault,{});
+      const started=await request(mf,admin,`/internal/sources/${sourceId}/backfill`,{method:'POST',body:{requestId:'workflow-partial-checkpoint'}});
+      await waitFor(async()=>{
+        const task=(await request(mf,admin,`/internal/capture-tasks/${started.data.task.id}`)).data.task;
+        assert.equal(task.state,'succeeded',JSON.stringify(task));
+        assert.equal(task.attemptNo,1);
+      });
+      await waitFor(async()=>assert.equal((await request(mf,admin,`/internal/sources/${sourceId}`)).data.source.backfill.state,'completed'));
+      const source=(await request(mf,admin,`/internal/sources/${sourceId}`)).data.source;
+      assert.equal(source.backfill.state,'completed');
+      assert.equal(source.backfill.seenPages,2);
+      assert.equal(source.backfill.processedArticles,1);
+      assert.equal((await control(mf,'scrapes',{})).calls.slice(before).filter(url=>url.includes('/list')).length,2);
+      const status=await completedWorkflow(mf,started.data.task.id);
+      const message=(await control(mf,'sent',{})).find(message=>message.taskId===started.data.task.id);
+      await control(mf,'redeliver',message);
+      assert.equal((await request(mf,admin,`/internal/sources/${sourceId}`)).data.source.backfill.seenPages,2);
+      assert.equal((await request(mf,admin,`/internal/sources/${sourceId}/discoveries`)).data.discoveries.length,1);
+      const tasks=(await request(mf,admin,'/internal/capture-tasks')).data.tasks;
+      assert.equal(tasks.filter(task=>task.kind==='capture').length,1);
+      assert.equal(status.output.page,1);
+    }finally{await mf.dispose();}
+  });
+});
+
+test('a human pause fences the next Workflow retry and preserves the published history cursor',async()=>{
+  const {mf,admin,waits}=await fixture({workflow:true,versioned:true,env:{maxAttempts:2}});
+  try{
+    const site=await request(mf,admin,'/internal/sites',{method:'POST',body:{name:'重试中暂停',origin:'https://a.test'}});
+    const sourceId=await createHistorySource(mf,admin,site.data.site.id,'https://a.test/list.htm');
+    const secondPage='https://a.test/list.htm?page=2';
+    await control(mf,'list-options',{chainPages:2,failureUrl:secondPage,failures:[{message:'Origin HTTP 429',httpStatus:429,retryAfterMs:1200000}]});
+    waits.hold=true;
+    const started=await request(mf,admin,`/internal/sources/${sourceId}/backfill`,{method:'POST',body:{requestId:'pause-native-retry'}});
+    await waitFor(async()=>assert.equal(waits.held,true));
+    const before=(await request(mf,admin,`/internal/sources/${sourceId}`)).data.source;
+    assert.equal(before.backfill.seenPages,1);
+    assert.deepEqual(before.backfillCursor.nextUrls,[secondPage]);
+    const message=(await control(mf,'sent',{})).find(message=>message.kind==='backfill'&&message.taskId!==started.data.task.id);
+    assert.ok(message);
+    const calls=(await control(mf,'scrapes',{})).calls;
+    await request(mf,admin,`/internal/sources/${sourceId}/backfill/pause`,{method:'POST'});
+    await control(mf,'redeliver',message);
+    await control(mf,'recover',{});
+    waits.release();
+    const paused=await completedWorkflow(mf,message.taskId);
+    assert.equal(paused.output.paused,true);
+    assert.deepEqual((await control(mf,'scrapes',{})).calls,calls,'retry wakeup must not visit the source while paused');
+    await control(mf,'recover',{});
+    const task=(await request(mf,admin,`/internal/capture-tasks/${message.taskId}`)).data.task;
+    assert.equal(task.state,'deferred');
+    assert.equal(task.attemptNo,1);
+    const after=(await request(mf,admin,`/internal/sources/${sourceId}`)).data.source;
+    assert.deepEqual(after.backfillCursor,before.backfillCursor);
+    assert.equal(after.backfill.seenPages,1);
+    // One remaining origin error plus success still fits the full two-try budget.
+    await control(mf,'list-options',{chainPages:2,failureUrl:secondPage,failures:[{message:'Origin HTTP 429',httpStatus:429}]});
+    assert.equal((await request(mf,admin,`/internal/sources/${sourceId}/backfill/resume`,{method:'POST'})).status,202);
+    await waitFor(async()=>{
+      const source=(await request(mf,admin,`/internal/sources/${sourceId}`)).data.source;
+      assert.equal(source.backfill.state,'completed');
+      assert.equal(source.backfill.runId,before.backfill.runId);
+      assert.equal(source.backfill.seenPages,2);
+      assert.equal(source.backfill.processedArticles,1);
+    });
+    const resumed=await completedWorkflow(mf,message.taskId,2);
+    assert.equal(resumed.output.page,2);
+    assert.equal((await request(mf,admin,`/internal/sources/${sourceId}/discoveries`)).data.discoveries.length,1);
+    assert.equal((await control(mf,'scrapes',{})).calls.filter(url=>url===secondPage).length,3);
+    const sleeps=await control(mf,'waits',{});
+    assert.ok(sleeps.some(wait=>wait.duration===1200000),'Retry-After must survive the Workflow boundary');
+  }finally{waits.release?.();await mf.dispose();}
+});
+
+test('native history capacity waits leave the origin retry budget available in the same Workflow',async()=>{
+  const {mf,admin}=await fixture({workflow:true,versioned:true,env:{maxAttempts:2}});
+  try{
+    const site=await request(mf,admin,'/internal/sites',{method:'POST',body:{name:'容量与源站重试',origin:'https://a.test'}});
+    const sourceId=await createHistorySource(mf,admin,site.data.site.id,'https://a.test/list.htm');
+    await control(mf,'list-options',{chainPages:1,failureUrl:'https://a.test/list.htm',failures:[
+      {message:'Platform unavailable',code:'container_capacity'},
+      {message:'Platform unavailable',code:'container_capacity'},
+      {message:'Platform unavailable',code:'container_capacity'},
+      {message:'Origin HTTP 503',httpStatus:503,retryable:true},
+    ]});
+    const started=await request(mf,admin,`/internal/sources/${sourceId}/backfill`,{method:'POST',body:{requestId:'native-capacity-budget'}});
+    const result=await completedWorkflow(mf,started.data.task.id);
+    assert.equal(result.output.page,1);
+    const task=(await request(mf,admin,`/internal/capture-tasks/${started.data.task.id}`)).data.task;
+    assert.equal(task.state,'succeeded');
+    assert.equal(task.attemptNo,1);
+    const source=(await request(mf,admin,`/internal/sources/${sourceId}`)).data.source;
+    assert.equal(source.backfill.state,'completed');
+    assert.equal(source.backfill.seenPages,1);
+    assert.equal(source.backfill.lastError,null);
+  }finally{await mf.dispose();}
+});
+
 test('pausing a persisted backfill prevents paid work and resumes the same task',async()=>{
-  const {mf,db,admin}=await fixture({versioned:true});
+  const {mf,db,admin}=await fixture({workflow:true,versioned:true});
   try{
     const site=await request(mf,admin,'/internal/sites',{method:'POST',body:{name:'暂停恢复站点',origin:'https://a.test'}});
     const sourceId=await createHistorySource(mf,admin,site.data.site.id,'https://a.test/list.htm');
@@ -713,15 +854,15 @@ test('pausing a persisted backfill prevents paid work and resumes the same task'
 });
 
 test('pausing an in-flight history page retains its checkpoint and resumes without another scrape',async()=>{
-  const {mf,gate, admin }=await fixture({versioned:true,discoveryPages:1});
+  const {mf,commitGate, admin }=await fixture({workflow:true,versioned:true,discoveryPages:1,env:{maxAttempts:1}});
   try{
     const site=await request(mf,admin,'/internal/sites',{method:'POST',body:{name:'运行中暂停站点',origin:'https://a.test'}});
     const sourceId=await createHistorySource(mf,admin,site.data.site.id,'https://a.test/list-a.htm');
-    gate.url='https://a.test/list-a.htm';
+    commitGate('association',{arm:true});
     const started=await request(mf,admin,`/internal/sources/${sourceId}/backfill`,{method:'POST',body:{requestId:'pause-inflight-page'}});
-    await waitFor(async()=>assert.equal(gate.held,true));
+    await waitFor(async()=>assert.equal(commitGate('association').held,true));
     await request(mf,admin,`/internal/sources/${sourceId}/backfill/pause`,{method:'POST'});
-    gate.release();
+    commitGate('association',{release:true});
     await waitFor(async()=>{
       const task=(await request(mf,admin,`/internal/capture-tasks/${started.data.task.id}`)).data.task;
       assert.equal(task.state,'deferred',JSON.stringify(task));
@@ -729,7 +870,13 @@ test('pausing an in-flight history page retains its checkpoint and resumes witho
     assert.equal((await request(mf,admin,`/internal/sources/${sourceId}/discoveries`)).data.discoveries.length,0);
     const callsBefore=(await(await mf.dispatchFetch('https://feed.test/fixture/scrapes')).json()).calls;
     const firstPages=callsBefore.filter(call=>call==='https://a.test/list-a.htm').length;
-    await request(mf,admin,`/internal/sources/${sourceId}/backfill/resume`,{method:'POST'});
+    await control(mf,'recover',{});
+    assert.equal((await control(mf,'scrapes',{})).calls.length,callsBefore.length);
+    const paused=(await request(mf,admin,`/internal/sources/${sourceId}`)).data.source;
+    assert.equal(paused.backfill.seenPages,0);
+    assert.equal(paused.backfillCursor.page,undefined);
+    const resumes=await Promise.all([1,2].map(()=>request(mf,admin,`/internal/sources/${sourceId}/backfill/resume`,{method:'POST'})));
+    assert.ok(resumes.some(result=>result.status===202));
     await waitFor(async()=>{
       const source=(await request(mf,admin,`/internal/sources/${sourceId}`)).data.source;
       assert.equal(source.backfill.state,'completed',JSON.stringify(source));
@@ -738,11 +885,11 @@ test('pausing an in-flight history page retains its checkpoint and resumes witho
     });
     const callsAfter=(await(await mf.dispatchFetch('https://feed.test/fixture/scrapes')).json()).calls;
     assert.equal(callsAfter.filter(call=>call==='https://a.test/list-a.htm').length,firstPages);
-  }finally{gate.release?.();await mf.dispose();}
+  }finally{commitGate('association',{release:true});await mf.dispose();}
 });
 
 test('live tasks dispatch first while admin starts and continuation pages share durable admission limits',async()=>{
-  const {mf,db,admin}=await fixture({versioned:true,discoveryPages:1,env:{liveBudget:1,backfillBudget:1}});
+  const {mf,db,admin}=await fixture({workflow:true,versioned:true,discoveryPages:1,env:{liveBudget:1,backfillBudget:1}});
   try{
     const site=await request(mf,admin,'/internal/sites',{method:'POST',body:{name:'调度预算站点',origin:'https://a.test'}});
     const live=await createVerifiedSource(mf,admin,site.data.site.id,'https://a.test/list-a.htm');
@@ -1240,6 +1387,14 @@ async function waitFor(check){
     try{return await check();}catch(error){lastError=error;await new Promise(resolve=>setTimeout(resolve,25));}
   }
   throw lastError;
+}
+
+async function completedWorkflow(mf,taskId,attempt=1){
+  return waitFor(async()=>{
+    const status=await (await mf.dispatchFetch('https://feed.test/fixture/workflow-status?id=task-'+taskId+'-a'+attempt)).json();
+    assert.equal(status.status,'complete',JSON.stringify(status));
+    return status;
+  });
 }
 
 async function applyMigration(db,sql){
