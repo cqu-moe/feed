@@ -306,7 +306,7 @@ node scripts/manage.mjs auth-check
 
 ## 6. 旧版采集 Workflow（兼容入口）
 
-下述每日 `FeedIngest` 流程仅保留给旧版兼容入口；当前生产使用每小时到期扫描和 Queue 直接消费，见[采集调度](queue-collection.md)。新增来源与故障排查见 [来源维护](source-maintenance.md)，不要依据旧版五来源清单判断当前生产范围。
+下述每日 `FeedIngest` 流程仅保留给旧版兼容入口；生产配置使用每小时到期扫描，由 Queue 延迟投递、Workflow 执行采集，见[采集调度](queue-collection.md)。新增来源与故障排查见 [来源维护](source-maintenance.md)，不要依据旧版五来源清单判断当前生产范围。
 
 Cron 每天采集的 5 个来源来自 `worker/sources.json`：
 

@@ -20,7 +20,7 @@
     "MAX_ARTICLES_PER_RUN":"5",
     "CRAWL_ENABLED":"true",
     "TASK_RUNTIME_ENABLED":"true",
-    "COLLECTION_EXECUTOR":"queue",
+    "COLLECTION_EXECUTOR":"workflow",
     "MAIL_ENABLED":"true",
     "MAIL_FROM":"CQU Feed <noreply@feed.cqu.moe>",
     "MAX_MAIL_ATTEMPTS":"6",

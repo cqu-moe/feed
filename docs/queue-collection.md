@@ -21,4 +21,4 @@ PostHog 每五分钟记录任务尝试结果、积压与来源新鲜度。没有
 3. 旧执行退出或结果核清后，在目标环境把 `COLLECTION_EXECUTOR` 改为 `workflow` 并部署。保持原队列、数据库、存储桶和 Workflow binding。用 `wrangler queues resume-delivery <采集队列>` 恢复投递，核对未领取的旧任务沿用原 ID，新的尝试由相应的 Workflow 接手。
 4. 如需退回 `queue`，同样先停领，等已由 Workflow 接手的尝试结束并核实其记录，再恢复投递。切换前后不重置历史失败、已阻塞或已成功的任务，不回滚已发布的通知版本或事件。
 
-[隔离演练](../live/FEED-63/rehearsal.md)记录了真实的暂停、排空、恢复和归档对照。仓库的生产配置仍选择 `queue`。
+[隔离演练](../live/FEED-63/rehearsal.md)记录了真实的暂停、排空、恢复和归档对照。生产配置使用 `workflow`。
