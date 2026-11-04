@@ -1,3 +1,4 @@
+import {launchDelaySeconds,sendPersistedOutbox} from './outbox-dispatch.mjs';
 import {admitDiscovery,backfillTaskSql,backfillFailureStatement,retainDiscoveryAdmissions} from './backfill-control.mjs';
 import {createMail,handleMailMessage} from './notification-mail.mjs';
 import {cleanError,sha} from './utils.mjs';
@@ -67,7 +68,7 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
           const message=JSON.parse(row.payload_json);
           if(row.topic==='feed-jobs'&&env.SOURCE_MANAGEMENT_ENABLED==='true'
             &&!await admitDiscovery(env,message.taskId,message.attempt,timestamp))continue;
-          await target.send(message,{contentType:'json'});
+          await sendPersistedOutbox(env,target,row,timestamp);
           // Sending first intentionally permits duplicates after a crash. The consumer owns idempotency.
           await env.DB.prepare(`UPDATE outbox SET state='sent',attempts=attempts+1,last_error=NULL,updated_at=?
             WHERE id=? AND state='queued' AND available_at<=?`).bind(timestamp,row.id,timestamp).run();
@@ -91,6 +92,7 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
       if(message.attempt<task.attempt_no)return {state:task.state,acked:'stale-attempt'};
       if(message.attempt!==task.attempt_no)throw new SchemaError('Future task attempt');
       if(!activeStates.includes(task.state))return {state:task.state,acked:'terminal'};
+      if(task.state==='queued'&&task.due_at>now())return {state:'queued',acked:'not-due',retryDelaySeconds:launchDelaySeconds(task.due_at,now())};
       if(!['capture','recheck','discover','backfill','ocr'].includes(task.kind))throw new SchemaError('Unsupported workflow kind');
       const priorAttempt=await env.DB.prepare('SELECT * FROM task_attempts WHERE task_id=? AND attempt_no=?')
         .bind(task.id,message.attempt).first();
@@ -192,9 +194,11 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
       const stranded=await env.DB.prepare(`SELECT t.id,t.kind,t.attempt_no,o.id AS outbox_id,o.attempts,a.workflow_instance_id FROM tasks t
         LEFT JOIN task_attempts a ON a.task_id=t.id AND a.attempt_no=t.attempt_no
         JOIN outbox o ON o.topic='feed-jobs' AND o.dedupe_key='start:'||t.id||':a'||t.attempt_no
-        WHERE t.state IN ('queued','starting') AND o.state='sent' AND o.updated_at<=?
+        LEFT JOIN outbox_receipts r ON r.outbox_id=o.id
+        WHERE t.state IN ('queued','starting') AND o.state='sent' AND COALESCE(r.state,'')<>'processed'
+          AND ?-MAX(o.updated_at,COALESCE(r.last_replayed_at,0),t.due_at)>=?
         AND NOT EXISTS(SELECT 1 FROM task_attempts a WHERE a.task_id=t.id AND a.attempt_no=t.attempt_no AND a.handed_off_at IS NOT NULL)
-        ORDER BY o.updated_at,o.id LIMIT ?`).bind(timestamp-launchReplayAfterMs,pageSize).all();
+        ORDER BY o.updated_at,o.id LIMIT ?`).bind(timestamp,launchReplayAfterMs,pageSize).all();
       for(const row of stranded.results){
         if(row.workflow_instance_id){
           try{
@@ -265,6 +269,11 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
       requireCrawlRuntime(env);
       let workflowStatus=null;
       if(activeStates.includes(task.state)&&!task.workflow_instance_id){
+        const outbox=await env.DB.prepare(`SELECT o.state,o.updated_at,r.last_replayed_at,r.state AS receipt FROM outbox o
+          LEFT JOIN outbox_receipts r ON r.outbox_id=o.id
+          WHERE o.topic='feed-jobs' AND o.dedupe_key=?`).bind(launchDedupeKey(task.id,task.attempt_no)).first();
+        if(outbox?.state==='sent'&&(outbox.receipt==='processed'||now()-Math.max(outbox.updated_at,outbox.last_replayed_at??0,task.due_at)<launchReplayAfterMs))
+          return {id:task.id,state:task.state,recovered:0,workflowStatus:null};
         const replayed=await runtime.requeueLaunch(task.id,task.attempt_no,now());
         return {id:task.id,state:task.state,recovered:recovered(replayed),workflowStatus:null};
       }
@@ -335,7 +344,7 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
         const message=JSON.parse(row.payload_json);
         if(row.topic==='feed-jobs'&&env.SOURCE_MANAGEMENT_ENABLED==='true'
           &&!await admitDiscovery(env,message.taskId,message.attempt,timestamp))return false;
-        await target.send(message,{contentType:'json'});
+        await sendPersistedOutbox(env,target,row,timestamp);
         await env.DB.prepare(`UPDATE outbox SET state='sent',attempts=attempts+1,last_error=NULL,updated_at=?
           WHERE id=? AND state='queued' AND available_at<=?`).bind(timestamp,row.id,timestamp).run();
         return true;
@@ -391,7 +400,10 @@ export async function handleFeedJobs(batch,env,dependencies={}){
       if(message.body?.type==='send-mail')await handleMailMessage(message.body,env,dependencies);
       else if(['check-ready','event-ready','match-source','source-associated'].includes(message.body?.type))
         await handleFeedEvent(env,message,dependencies);
-      else await runtime.startJob(message.body);
+      else {
+        const started=await runtime.startJob(message.body);
+        if(started.retryDelaySeconds){message.retry({delaySeconds:started.retryDelaySeconds});continue;}
+      }
       await recordOutboxReceipt(env,message.body,'processed',dependencies.now?.()??Date.now()).catch(()=>{});
       message.ack();
     }catch(error){

@@ -83,6 +83,7 @@ async function fixture({
   runtimeEnabled=true,
   crawlEnabled=true,
   recheckRuntime=false,
+  queueConsumer=true,
 }={}){
   const provider=oauthProvider();
   const bundle=await build({
@@ -103,6 +104,8 @@ async function fixture({
         globalThis.TASK_RUNTIME_QUEUE_ACKED=[];
         globalThis.TASK_RUNTIME_WORKFLOW_CALLS=[];
         globalThis.TASK_RUNTIME_QUEUE_SENDS=[];
+        globalThis.TASK_RUNTIME_QUEUE_SEND_OPTIONS=[];
+        globalThis.TASK_RUNTIME_QUEUE_RETRY_OPTIONS=[];
         globalThis.TASK_RUNTIME_QUEUE_MODE='real';
         globalThis.TASK_RUNTIME_DB_FAULTS={sqlIncludes:'',times:0,error:'Injected D1 failure'};
         globalThis.TASK_RUNTIME_CREATE_FAILURES_REMAINING=0;
@@ -193,6 +196,7 @@ async function fixture({
                   .bind(body.taskId,body.attempt,'task-'+body.taskId+'-a'+body.attempt,Date.now()).run();
               }
               globalThis.TASK_RUNTIME_QUEUE_SENDS.push(body);
+              globalThis.TASK_RUNTIME_QUEUE_SEND_OPTIONS.push(options);
               if(globalThis.TASK_RUNTIME_QUEUE_MODE==='hold')return;
               return await actualQueue.send(body,options);
             },
@@ -212,6 +216,8 @@ async function fixture({
               messages:globalThis.TASK_RUNTIME_QUEUE_BODIES,
               acked:globalThis.TASK_RUNTIME_QUEUE_ACKED,
               sends:globalThis.TASK_RUNTIME_QUEUE_SENDS,
+              sendOptions:globalThis.TASK_RUNTIME_QUEUE_SEND_OPTIONS,
+              retryOptions:globalThis.TASK_RUNTIME_QUEUE_RETRY_OPTIONS,
             });
           }
           if(url.pathname==='/fixture/scrape-mode'){
@@ -250,7 +256,10 @@ async function fixture({
           if(url.pathname==='/fixture/replay'){
             const body=await request.json();
             let acked=false,retried=false;
-            const message={body,attempt:1,ack(){acked=true;},retry(){retried=true;}};
+            const message={body,attempt:1,ack(){acked=true;},retry(options){
+              retried=true;
+              globalThis.TASK_RUNTIME_QUEUE_RETRY_OPTIONS.push(options);
+            }};
             await handleFeedJobs({messages:[message]},env,{workflow});
             return Response.json({acked,retried});
           }
@@ -310,8 +319,8 @@ async function fixture({
     },
     d1Databases:['DB'],serviceBindings:{AUTH:request=>provider.fetch(request)},
     r2Buckets:['ARCHIVE'],
-    queueProducers:{FEED_JOBS:{queueName:'feed-jobs'}},
-    queueConsumers:{'feed-jobs':{maxBatchSize:1,maxRetries:3,deadLetterQueue:'feed-jobs-dlq'}},
+    queueProducers:queueConsumer?{FEED_JOBS:{queueName:'feed-jobs'}}:{},
+    ...(queueConsumer?{queueConsumers:{'feed-jobs':{maxBatchSize:1,maxRetries:3,deadLetterQueue:'feed-jobs-dlq'}}}:{}),
   }));
   const db=await mf.getD1Database('DB'),bucket=await mf.getR2Bucket('ARCHIVE');
   for(const name of ['0001_feed.sql','0002_auth.sql','0003_collection_lease.sql','0004_pdf_ocr.sql','0005_task_runtime.sql','0006_sources.sql',
@@ -537,6 +546,53 @@ test('outbox remains replayable when Queue accepts a message before its sent rec
     assert.deepEqual(queue.sends[0],queue.sends[1]);
     assert.deepEqual(queue.messages,[payload]);
     assert.equal((await scrapes(mf)).calls.length,1);
+  }finally{
+    await mf.dispose();
+  }
+});
+
+test('a scheduled launch waits in Queue and an early delivery returns to Queue without handoff',async()=>{
+  const {mf,db,admin}=await fixture({queueConsumer:false});
+  try{
+    await mf.dispatchFetch('https://feed.test/fixture/queue',{method:'POST',body:JSON.stringify({mode:'hold'})});
+    const create=await mf.dispatchFetch('https://feed.test/internal/capture-tasks',{
+      method:'POST',
+      headers:{...admin.headers,'Content-Type':'application/json'},
+      body:JSON.stringify({articleId,requestId:'scheduled-launch-1'}),
+    });
+    assert.equal(create.status,202);
+    const created=await create.json();
+    const outbox=await db.prepare('SELECT id FROM outbox').first();
+    const sentAt=Date.now();
+    await db.batch([
+      db.prepare('UPDATE tasks SET due_at=? WHERE id=?')
+        .bind(sentAt+48*60*1000,created.task.id),
+      db.prepare("UPDATE outbox SET state='queued',available_at=?,updated_at=? WHERE id=? AND attempts=1")
+        .bind(sentAt,sentAt,outbox.id),
+    ]);
+
+    const recovered=await(await mf.dispatchFetch('https://feed.test/fixture/recover')).json();
+    assert.deepEqual(recovered.dispatched,[outbox.id]);
+    const queue=await(await mf.dispatchFetch('https://feed.test/fixture/queue')).json();
+    assert.ok(Math.abs(queue.sendOptions.at(-1).delaySeconds-2880)<=1);
+    assert.deepEqual(queue.retryOptions,[]);
+
+    const payload=queue.sends.at(-1);
+    const early=await(await mf.dispatchFetch('https://feed.test/fixture/replay',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(payload),
+    })).json();
+    assert.deepEqual(early,{acked:false,retried:true});
+    const retried=await(await mf.dispatchFetch('https://feed.test/fixture/queue')).json();
+    assert.ok(Math.abs(retried.retryOptions[0].delaySeconds-2880)<=1);
+    const current=await db.prepare(`SELECT state,attempt_no AS attemptNo FROM tasks WHERE id=?`)
+      .bind(created.task.id).first();
+    assert.deepEqual(current,{state:'queued',attemptNo:1});
+    assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM task_attempts WHERE task_id=?')
+      .bind(created.task.id).first()).n,0);
+    assert.equal((await scrapes(mf)).calls.length,0);
+    assert.deepEqual((await(await mf.dispatchFetch('https://feed.test/fixture/workflows')).json()).calls,[]);
   }finally{
     await mf.dispose();
   }
