@@ -17,7 +17,7 @@ const {createTaskRuntime}=await import(`data:text/javascript;base64,${Buffer.fro
 
 test('a live list launch hands its exact attempt to Workflow without claiming the site',async()=>{
   const db=new DatabaseSync(':memory:');
-  for(const name of ['0001_feed.sql','0005_task_runtime.sql','0006_sources.sql','0019_site_execution_leases.sql']){
+  for(const name of ['0001_feed.sql','0005_task_runtime.sql','0006_sources.sql','0018_outbox_receipts.sql','0019_site_execution_leases.sql']){
     db.exec(await readFile(`migrations/${name}`,'utf8'));
   }
   const now=Date.now(),taskId='111111111111111111111111',outboxId='222222222222222222222222';

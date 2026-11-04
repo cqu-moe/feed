@@ -82,10 +82,11 @@ export async function handoffOrReleaseSiteExecution(env,admission,now=Date.now()
   if(!released)return {released:false};
   const next=await env.DB.prepare(`SELECT o.id FROM outbox o JOIN tasks t ON t.id=json_extract(o.payload_json,'$.taskId')
     WHERE o.topic='feed-jobs' AND o.available_at<=? AND t.due_at<=?
-      AND (t.state='queued' AND o.state='queued' OR t.state IN ('starting','running')
+      AND (t.state='queued' AND o.state IN ('queued','sent') OR t.state IN ('starting','running')
         AND EXISTS(SELECT 1 FROM task_attempts a WHERE a.task_id=t.id AND a.attempt_no=t.attempt_no
-          AND a.state IN ('starting','running') AND a.handed_off_at IS NOT NULL
-          AND a.workflow_instance_id='task-'||t.id||'-a'||t.attempt_no))
+          AND a.state IN ('starting','running') AND a.handed_off_at IS NOT NULL AND a.result_json IS NULL
+          AND a.workflow_instance_id='task-'||t.id||'-a'||t.attempt_no)
+        AND NOT EXISTS(SELECT 1 FROM articles ar WHERE ar.id=t.article_id AND ar.lease_until>?))
       AND t.id<>? AND t.attempt_no=json_extract(o.payload_json,'$.attempt')
       AND (
         t.kind IN ('capture','recheck')
@@ -95,7 +96,7 @@ export async function handoffOrReleaseSiteExecution(env,admission,now=Date.now()
           AND ${backfillTaskSql()}
       )
       AND COALESCE(json_extract(t.payload_json,'$.source.siteId'),(SELECT s.site_id FROM sources s WHERE s.id=t.source_id))=?
-    ORDER BY t.priority,t.due_at,t.id LIMIT 1`).bind(now,now,admission.taskId,admission.siteId).first();
+    ORDER BY t.priority,t.due_at,t.id LIMIT 1`).bind(now,now,now,admission.taskId,admission.siteId).first();
   return {released:true,outboxId:next?.id};
 }
 
