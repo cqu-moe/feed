@@ -28,11 +28,11 @@ export class Probe extends WorkflowEntrypoint{
         return out;
       }
       if(cmd==='dispatch')return createTaskRuntime(env).dispatchDueOutbox();
-      if(!['old','backlog','delay'].includes(cmd))throw new Error('Unknown probe command');
-      const paths=cmd==='old'?[['a','old']]:cmd==='delay'?[['b','delay']]:[['a','one'],['b','one'],['c','one'],['a','two'],['c','delay']];
+      if(!['old','backlog','delay','rate'].includes(cmd))throw new Error('Unknown probe command');
+      const paths=cmd==='old'?[['a','old']]:cmd==='delay'?[['b','delay']]:cmd==='rate'?[['a','rate']]:[['a','one'],['b','one'],['c','one'],['a','two'],['c','delay']];
       const tasks=[];
       for(const [site,path] of paths){
-        const origin='https://'+site+'.feed63.cqu.edu.cn',siteId='probe-'+site,sourceId=siteId+'-'+path,url=origin+'/'+path;
+        const origin='https://'+site+'.feed63.cqu.edu.cn',siteId='probe-'+site,sourceId=siteId+'-'+path,url=origin+'/'+path+(path==='rate'?'?after='+Math.ceil((at+120000)/1000)*1000:'');
         await db.prepare('INSERT OR IGNORE INTO sites(id,name,origin,created_at,updated_at) VALUES (?,?,?,?,?)')
           .bind(siteId,siteId,origin,at,at).run();
         await db.prepare("INSERT OR IGNORE INTO sources(id,name,url,site_id,list_url,next_discovery_at) VALUES (?,?,?,?,?,?)")

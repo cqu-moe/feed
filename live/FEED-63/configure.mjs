@@ -9,11 +9,13 @@ const dir=resolve('work',name),image=join(dir,'fixture');
 await mkdir(dir,{recursive:true});
 await cp('crawler',image,{recursive:true});
 const asset=path=>readFile('live/FEED-63/'+path);
-for(const file of ['origin.mjs','chrome-fixture.sh','start-fixture.sh'])await writeFile(join(image,file),await asset(file));
+const extras=['origin.mjs','chrome-fixture.sh','start-fixture.sh'];
+for(const file of extras)await writeFile(join(image,file),await asset(file));
+await writeFile(join(image,'.dockerignore'),(await readFile('crawler/.dockerignore','utf8'))+'\n'+extras.map(f=>'!'+f).join('\n')+'\n');
 await writeFile(join(image,'Dockerfile'),(await readFile('crawler/Dockerfile','utf8')).replace(/^CMD .*$/m,'')+'\n'+await asset('fixture.Dockerfile'));
 const cfg={name,account_id:prod.account_id,compatibility_date:prod.compatibility_date,compatibility_flags:prod.compatibility_flags,
  main:relative(dir,resolve('live/FEED-63/probe.mjs')),workers_dev:false,preview_urls:false,
- vars:{ENVIRONMENT:'preview',SOURCE_MANAGEMENT_ENABLED:'true',CRAWL_ENABLED:'true',TASK_RUNTIME_ENABLED:'true',MAIL_ENABLED:'false',MAX_DISCOVERY_PAGES_PER_RUN:'1',MAX_TASK_ATTEMPTS:'3',COLLECTION_EXECUTOR:mode},
+ vars:{ENVIRONMENT:'preview',SOURCE_MANAGEMENT_ENABLED:'true',CRAWL_ENABLED:'true',TASK_RUNTIME_ENABLED:'true',MAIL_ENABLED:'false',MAX_DISCOVERY_PAGES_PER_RUN:'1',MAX_TASK_ATTEMPTS:'3',TASK_RETRY_BASE_DELAY_MS:'1000',COLLECTION_EXECUTOR:mode},
  queues:{producers:[{binding:'FEED_JOBS',queue:name+'-jobs'}],consumers:[{queue:name+'-jobs',max_batch_size:1,max_batch_timeout:1,...(mode==='queue'?{max_concurrency:2}:{})}]},
  d1_databases:[{binding:'DB',database_name:name+'-db',database_id:id,migrations_dir:relative(dir,resolve('migrations'))}],
  r2_buckets:[{binding:'ARCHIVE',bucket_name:name+'-archive'}],
