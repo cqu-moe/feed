@@ -330,6 +330,10 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
       }
       if(source?.id!==task.source_id||source?.configVersion===undefined)throw validationError('Discovery source snapshot is invalid');
       const isBackfill=context.mode==='backfill';
+      if(!isBackfill){
+        const control=await liveSourceControl(env,source.id,source.configVersion);
+        if(control)return control;
+      }
       let backfillMaxPages;
       if(isBackfill){
         const control=await readBackfillControl(env,source,context.runId);
@@ -373,6 +377,11 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
       if(isBackfill){
         activeTask.sql+=` AND EXISTS(SELECT 1 FROM sources current_source WHERE current_source.id=? AND current_source.config_version=? AND current_source.backfill_run_id=? AND ${backfillEnabledSql('current_source')})`;
         activeTask.args.push(source.id,source.configVersion,context.runId);
+      }else{
+        activeTask.sql+=` AND EXISTS(SELECT 1 FROM sources current_source JOIN sites current_site ON current_site.id=current_source.site_id
+          WHERE current_source.id=? AND current_source.config_version=? AND current_source.enabled=1
+          AND current_source.validation_state='verified' AND current_site.enabled=1)`;
+        activeTask.args.push(source.id,source.configVersion);
       }
       for(const row of candidates){
         const aid=await articleId(row.url);
@@ -407,6 +416,10 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
         statements.push(...association.statements);
       }
       const continuation=!isBackfill&&nextPageUrls.length&&page<boundedInteger(env.MAX_DISCOVERY_PAGES_PER_RUN,2,1,10);
+      if(!isBackfill){
+        const control=await liveSourceControl(env,source.id,source.configVersion);
+        if(control)return control;
+      }
       const hasBackfillContinuation=isBackfill&&nextPageUrls.length>0;
       const hardPageLimitReached=isBackfill&&page>=1000;
       const pageLimitReached=hasBackfillContinuation&&page>=backfillMaxPages;
@@ -472,6 +485,17 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
       return outcome;
     },
   };
+}
+
+async function liveSourceControl(env,sourceId,configVersion){
+  const row=await env.DB.prepare(`SELECT st.enabled AS site_enabled,s.enabled AS source_enabled
+    FROM sources s JOIN sites st ON st.id=s.site_id
+    WHERE s.id=? AND s.config_version=? AND s.validation_state='verified'`)
+    .bind(sourceId,configVersion).first();
+  if(!row)return {superseded:true,cancel:true,error:'source_configuration_changed'};
+  if(!row.site_enabled)return {skipped:true,cancel:true,error:'site_disabled'};
+  if(!row.source_enabled)return {skipped:true,cancel:true,error:'source_disabled'};
+  return null;
 }
 
 async function discoveryTaskStatements(env,source,context,{timestamp,advanceSource,taskGuard}){

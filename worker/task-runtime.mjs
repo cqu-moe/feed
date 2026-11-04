@@ -96,17 +96,19 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
       if(!['capture','recheck','discover','backfill','ocr'].includes(task.kind))throw new SchemaError('Unsupported workflow kind');
       const priorAttempt=await env.DB.prepare('SELECT * FROM task_attempts WHERE task_id=? AND attempt_no=?')
         .bind(task.id,message.attempt).first();
+      const workflowExecution=env.COLLECTION_EXECUTOR==='workflow'
+        &&task.kind==='discover';
       if(browserTaskKind(task.kind)){
-        if(!priorAttempt)return runtime.runJobInQueue(message,task);
-        if(isQueueInstance(priorAttempt.workflow_instance_id)){
-          if(task.state==='queued')return runtime.runJobInQueue(message,task);
+        if(!priorAttempt&&!workflowExecution)return runtime.runJobInQueue(message,task);
+        if(priorAttempt&&isQueueInstance(priorAttempt.workflow_instance_id)){
+          if(task.state==='queued'&&!workflowExecution)return runtime.runJobInQueue(message,task);
           return {state:task.state,acked:'running'};
         }
       }
       const instanceId=priorAttempt?.workflow_instance_id??workflowInstanceId(task.id,message.attempt),timestamp=now();
       const workflowBinding=selectWorkflow(env,{workflow,workflows},task.kind);
       let siteClaim=null;
-      if(browserTaskKind(task.kind)){
+      if(browserTaskKind(task.kind)&&!workflowExecution&&!priorAttempt){
         siteClaim=await claimSiteExecution(env,{...task,attempt_no:message.attempt},timestamp);
         if(!siteClaim.admitted){
           await delayBusyLaunch(env,task.id,message.attempt,timestamp);
@@ -541,9 +543,12 @@ async function finishTask(env,kind,taskId,attemptNo,result,now=()=>Date.now()){
   const maxDelayMs=boundedDuration(env.TASK_RETRY_MAX_DELAY_MS,6*60*60*1000,baseDelayMs,7*24*60*60*1000);
   const retryFrom=kind==='backfill'?(await env.DB.prepare('SELECT backfill_retry_from FROM tasks WHERE id=?').bind(taskId).first())?.backfill_retry_from??1:1;
   let state='succeeded',errorCode=null,dueAt=timestamp;
-  if(result.superseded&&kind==='backfill')state='cancelled';
   if(kind==='ocr'&&result.reviewRequired){
     state='blocked';errorCode='ocr_review_required';
+  }else if(result.originAttemptsExhausted){
+    state='blocked';errorCode=result.code??'origin_attempts_exhausted';
+  }else if((result.superseded&&kind==='backfill')||result.cancel){
+    state='cancelled';
   }else if(result.skipped||result.deferred){
     errorCode=result.ocrBusy?'ocr_busy':result.skipped?'capture_busy':result.code??classifyLimit(result.error);
     state=errorCode==='quota_exhausted'||attemptNo>=1000||attemptNo-retryFrom+1>=maxAttempts?'blocked':'deferred';
@@ -555,7 +560,7 @@ async function finishTask(env,kind,taskId,attemptNo,result,now=()=>Date.now()){
   await env.DB.batch([
     env.DB.prepare(`UPDATE tasks SET state=?,due_at=?,last_error=?,checkpoint_json=?,updated_at=?
       WHERE id=? AND attempt_no=? AND state IN ('starting','running')`)
-      .bind(state,dueAt,result.skipped?'Capture is busy':result.error??null,JSON.stringify(result),timestamp,taskId,attemptNo),
+      .bind(state,dueAt,result.error??(result.skipped?'Capture is busy':null),JSON.stringify(result),timestamp,taskId,attemptNo),
     env.DB.prepare(`UPDATE task_attempts SET state=?,result_json=COALESCE(result_json,?),ended_at=?,error_code=?
       WHERE task_id=? AND attempt_no=? AND state IN ('starting','running')
       AND EXISTS(SELECT 1 FROM tasks WHERE id=? AND attempt_no=? AND state=?)`)

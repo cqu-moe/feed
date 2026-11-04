@@ -253,6 +253,7 @@ test('container transport distinguishes capacity from executed source failures a
     [()=>new Response('Failed to start container: timeout',{status:500}),{code:'browser_transient',retryable:true,httpStatus:500}],
     [()=>Response.json({success:false,error:'Origin did not become ready (HTTP 503)',code:'origin_unavailable',httpStatus:503,retryable:true}),{code:'origin_unavailable',retryable:true,httpStatus:503}],
     [()=>Response.json({success:false,error:'Origin HTTP 404',code:'origin_http',httpStatus:404,retryable:false}),{code:'origin_http',retryable:false,httpStatus:404}],
+    [()=>Response.json({success:false,error:'Origin HTTP 429',code:'origin_http',httpStatus:429,retryable:true,retryAfter:'120'}),{code:'origin_http',retryable:true,httpStatus:429,retryAfterMs:120000}],
     [()=>new Response('{"success":'),{code:'browser_transient',retryable:true}],
   ]){
     const env={BROWSER:{getByName:()=>({fetch:async()=>response()})}};
