@@ -55,6 +55,8 @@ export async function scrapePage(job,signal){
       const status=browser.documents.at(-1)?.status;
       if(state?.url&&new URL(state.url).origin!==new URL(job.url).origin&&state.url!=='about:blank')
         throw Object.assign(new Error('Unexpected navigation origin'),{code:'origin_redirect'});
+      if(status===429||status===503)throw Object.assign(new Error(`Origin HTTP ${status} (${navigationSummary(browser.documents)})`),
+        {code:'origin_http',httpStatus:status,retryable:true,retryAfter:browser.documents.at(-1).retryAfter});
       if(status===404)throw Object.assign(new Error(`Origin HTTP 404 (${navigationSummary(browser.documents)})`),{code:'origin_http',httpStatus:404});
       if(status>=200&&status<300&&state?.parsed&&state.content){ready=true;break;}
       await delay(500,undefined,{signal});

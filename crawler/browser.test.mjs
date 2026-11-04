@@ -124,6 +124,18 @@ test('HTTP and JavaScript redirects keep the main document status separate from 
   }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
 });
 
+test('a throttled main document returns the source Retry-After without holding the browser',async()=>{
+  const server=createServer((_request,response)=>{
+    response.writeHead(429,{'Retry-After':'120','content-type':'text/html'});response.end('Later');
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  try{
+    await assert.rejects(scrapePage({url:`http://127.0.0.1:${server.address().port}/`,formats:[],
+      actions:[{type:'executeJavascript',script:'({unexpected:true})'}]},AbortSignal.timeout(15000)),
+      {code:'origin_http',httpStatus:429,retryable:true,retryAfter:'120'});
+  }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
+});
+
 test('origin errors identify the final main document without leaking query values or fragments',async()=>{
   const server=createServer((request,response)=>{
     response.setHeader('content-type','text/html; charset=utf-8');

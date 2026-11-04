@@ -50,7 +50,7 @@ export async function scrape(env,url,options={}){
       error.code=capacity?'container_capacity':result?.code??(response.status>=500?'browser_transient':'capture_failed');
       error.httpStatus=result?.httpStatus??response.status;
       error.retryable=result?.retryable===true||capacity||response.status>=500;
-      const after=response.headers.get('retry-after');
+      const after=result?.retryAfter??response.headers.get('retry-after');
       if(after){
         const ms=/^\d+(\.\d+)?$/.test(after)?Number(after)*1000:Date.parse(after)-Date.now();
         if(Number.isFinite(ms))error.retryAfterMs=Math.max(0,ms);
