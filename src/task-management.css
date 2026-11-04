@@ -1,0 +1,23 @@
+.task-page > header { margin-block-end: 0; }
+.feed-task-tabs { display: grid; gap: var(--space-4); min-width: 0; }
+.feed-task-tabs > [role=tablist] { justify-self: start; max-width: 100%; }
+.task-list-tools, .feed-diagnostic-tools, .task-filters, .task-actions {
+  display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap;
+}
+.task-list-tools { justify-content: space-between; color: var(--muted-foreground); font-size: var(--text-xs); }
+.task-filters { margin: var(--space-2) 0 var(--space-4); }
+.task-filters button { font-weight: 400; font-variant-numeric: tabular-nums; }
+.task-filters button[aria-pressed=true] { border-color: var(--foreground); }
+.task-filter-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--status-ink, var(--muted-foreground)); }
+.task-directory > .directory-site > summary { min-height: 44px; }
+.task-directory .directory-column > summary { min-height: 44px; }
+.task-result, .task-refs { margin-block-end: var(--space-3); }
+.task-result > span:first-child, .task-refs { color: var(--muted-foreground); font-size: var(--text-xs); }
+.task-result p { margin-top: var(--space-1); }
+.task-actions { margin-block: var(--space-2); column-gap: var(--space-4); }
+.task-actions a { min-height: 44px; margin: 0; }
+.task-refs summary { cursor: pointer; width: fit-content; padding-block: var(--space-2); }
+.feed-diagnostic-tools { margin-bottom: var(--space-3); }
+@media (pointer: coarse) {
+  .task-filters button, .task-list-tools button, .task-refs summary { min-height: 44px; }
+}

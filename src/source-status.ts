@@ -1,6 +1,6 @@
 import type { Source } from './api';
 
-export type SourceStatusTone = 'is-ok' | 'is-warning' | 'is-error';
+export type SourceStatusTone = 'is-ok' | 'is-paused' | 'is-warning' | 'is-error';
 
 export type SourceStatus = {
   label: string;
@@ -29,10 +29,10 @@ export function sourceStatus(source: Source, now = Date.now()): SourceStatus {
     };
   }
   if (source.siteEnabled === false) {
-    return { label: '站点已暂停', tone: 'is-warning', timeLabel: '最近检查' };
+    return { label: '站点已暂停', tone: 'is-paused', timeLabel: '最近检查' };
   }
   if (source.enabled === false) {
-    return { label: '采集已暂停', tone: 'is-warning', timeLabel: '最近检查' };
+    return { label: '采集已暂停', tone: 'is-paused', timeLabel: '最近检查' };
   }
   if (source.validationState === 'failed') {
     return { label: '配置验证失败', tone: 'is-error', timeLabel: '最近检查' };

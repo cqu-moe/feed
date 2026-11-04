@@ -348,19 +348,23 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
     async status(taskId){
       if(!idPattern.test(taskId??''))return null;
       return env.DB.prepare(`SELECT t.id,t.kind,t.business_key,t.source_id AS sourceId,t.article_id AS articleId,
+        ar.title AS articleTitle,st.id AS siteId,st.name AS siteName,s.name AS sourceName,s.list_url AS listUrl,
         t.state,t.due_at AS dueAt,t.attempt_no AS attemptNo,t.last_error AS lastError,
         t.created_at AS createdAt,t.updated_at AS updatedAt,a.workflow_instance_id AS workflowInstanceId,
         a.state AS attemptState,a.started_at AS startedAt,a.handed_off_at AS handedOffAt,a.ended_at AS endedAt,
         a.error_code AS errorCode,${articleStatus} AS articleStatus,ar.captured_at AS articleCapturedAt
         FROM tasks t LEFT JOIN task_attempts a ON a.task_id=t.id AND a.attempt_no=t.attempt_no
+        LEFT JOIN sources s ON s.id=t.source_id LEFT JOIN sites st ON st.id=s.site_id
         LEFT JOIN articles ar ON ar.id=t.article_id WHERE t.id=?`).bind(taskId).first();
     },
     async list({limit=50}={}){
       const rows=await env.DB.prepare(`SELECT t.id,t.kind,t.state,t.article_id AS articleId,t.source_id AS sourceId,
         t.last_error AS lastError,t.created_at AS createdAt,t.updated_at AS updatedAt,t.due_at AS dueAt,t.attempt_no AS attemptNo,
         a.workflow_instance_id AS workflowInstanceId,a.state AS attemptState,a.result_json AS attemptResultJson,
-        ar.title AS articleTitle,${articleStatus} AS articleStatus
+        ar.title AS articleTitle,st.id AS siteId,st.name AS siteName,s.name AS sourceName,s.list_url AS listUrl,
+        ${articleStatus} AS articleStatus
         FROM tasks t LEFT JOIN task_attempts a ON a.task_id=t.id AND a.attempt_no=t.attempt_no
+        LEFT JOIN sources s ON s.id=t.source_id LEFT JOIN sites st ON st.id=s.site_id
         LEFT JOIN articles ar ON ar.id=t.article_id ORDER BY t.created_at DESC,t.id DESC LIMIT ?`)
         .bind(boundedInteger(limit,50,1,100)).all();
       return Promise.all(rows.results.map(async row=>{
