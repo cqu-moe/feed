@@ -76,8 +76,7 @@ test('FEED04 real mail Queue, signed callbacks, policy and unknown recovery', as
   for (const event of ing.events) expect(s.user_deliveries.filter((r: Row) => r.event_id === event.id)).toHaveLength(1);
   expect(s.notification_matches.filter((r: Row) => ['new', 'update'].includes(r.eligibility_kind)).length).toBeGreaterThanOrEqual(4);
   expect(ing.attempts.every((r: Row) => {
-    const prefix = ing.tasks.find((task: Row) => task.id === r.task_id)?.kind === 'ocr' ? 'task' : 'queue';
-    return r.workflow_instance_id === `${prefix}-${r.task_id}-a${r.attempt_no}` && r.handed_off_at !== null;
+    return r.workflow_instance_id === `task-${r.task_id}-a${r.attempt_no}` && r.handed_off_at !== null;
   })).toBe(true);
   const mainId = ing.articles.find((r: Row) => r.url.endsWith('/1001.htm')).id;
   const initialRevision = ing.articles.find((r: Row) => r.id === mainId).latest_ready_revision_id;

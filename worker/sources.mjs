@@ -478,7 +478,7 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
           .bind(cleanError(error),timestamp(),source.id,source.configVersion).run().catch(()=>{});
         const receipt=await env.DB.prepare('SELECT result_json FROM task_attempts WHERE task_id=? AND attempt_no=?').bind(taskId,attemptNo).first();
         if(receipt?.result_json)return JSON.parse(receipt.result_json);
-        return {deferred:true,error:cleanError(error),savedPage:true};
+        return {deferred:true,error:cleanError(error),savedPage:true,resumeSaved:true};
       }
       if(!committed[checkpointIndex].results?.length){
         if(isBackfill){
