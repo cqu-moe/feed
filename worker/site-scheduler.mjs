@@ -96,18 +96,25 @@ export async function handoffOrReleaseSiteExecution(env,admission,now=Date.now()
 }
 
 export async function runSiteTask(env,step,taskId,attemptNo,name,timeout,run){
-  for(let wait=0;;wait++){
-    const result=await step.do(`${name}${wait?`-capacity-${wait}`:''}`,{retries:{limit:0,delay:'5 seconds'},timeout},async()=>{
+  const maxAttempts=Math.min(10,Math.max(1,Number(env.MAX_TASK_ATTEMPTS)||3));
+  const baseDelay=Math.max(60000,Number(env.TASK_RETRY_BASE_DELAY_MS)||900000);
+  const maxDelay=Math.max(baseDelay,Number(env.TASK_RETRY_MAX_DELAY_MS)||21600000);
+  let originTries=0;
+  for(let n=0;;n++){
+    const result=await step.do(n?`${name}-try-${n}`:name,{retries:{limit:0,delay:'5 seconds'},timeout},async()=>{
       const task=await env.DB.prepare("SELECT * FROM tasks WHERE id=? AND attempt_no=? AND state='running'").bind(taskId,attemptNo).first();
       if(!task)return {superseded:true};
       const admission=await claimSiteExecution(env,task);
       if(!admission.admitted)return {capacity:true,retryAfterMs:30000};
       try{return await run(admission);}
-      catch(error){if(captureFailure(error).capacity)return captureFailure(error);throw error;}
-      finally{await releaseOwnedSiteExecution(env,taskId,attemptNo);}
+      catch(error){return captureFailure(error);}
+      finally{await releaseSiteExecution(env,admission);}
     });
-    if(!result?.capacity)return result;
-    const delayMs=Math.max(result.retryAfterMs??0,Math.min(30000*(wait+1),15*60000));
-    await step.sleep(`${name}-capacity-wait-${wait}`,delayMs);
+    // Pause, quota and permanent errors must reach the owning task unchanged.
+    const transient=result?.retryable||result?.code==='rate_limited'||result?.code==='browser_transient';
+    if(!result?.capacity&&!transient)return result;
+    if(!result.capacity&&++originTries>=maxAttempts)return {...result,originAttemptsExhausted:true};
+    const delay=result.capacity?Math.min(30000*(n+1),900000):Math.min(baseDelay*2**(originTries-1),maxDelay);
+    await step.sleep(`${name}-wait-${n}`,Math.max(delay,result.retryAfterMs??0));
   }
 }
