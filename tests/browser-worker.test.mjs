@@ -156,6 +156,7 @@ test('warm handoff admits live discovery and skips unadmitted backfill',async()=
     FEED_JOBS:{async send(){}},
     DB:await schedulerDb(),
   };
+  const running=taskId=>env.DB.prepare("UPDATE tasks SET state='running' WHERE id=?").bind(taskId).run();
   const siteId='7fd03676e5751e9b6dd95ecb';
   const now=Date.now()-1,snapshot={id:'scheduler',siteId,configVersion:2};
   const insertTask=(id,kind,priority,payload={})=>env.DB.prepare(`INSERT INTO tasks(
@@ -181,6 +182,7 @@ test('warm handoff admits live discovery and skips unadmitted backfill',async()=
   await env.DB.prepare(`UPDATE outbox SET state='sent' WHERE id='535353535353535353535353'`).bind().run();
   const owner=await claimSiteExecution(env,{id:'555555555555555555555555',kind:'capture',attempt_no:1});
   assert.deepEqual(owner,{admitted:true,siteId,generation:1,taskId:'555555555555555555555555',attemptNo:1});
+  await running(owner.taskId);
   const result=await scrape(env,'https://jwc.cqu.edu.cn/info/1082/1.htm',{
     source:snapshot,siteAdmission:owner,
     formats:[],
@@ -191,11 +193,13 @@ test('warm handoff admits live discovery and skips unadmitted backfill',async()=
   assert.equal((await env.DB.prepare(`SELECT state FROM outbox WHERE id='222222222222222222222222'`).bind().first()).state,'queued');
   const discovery=await claimSiteExecution(env,{id:'333333333333333333333333',kind:'discover',attempt_no:1});
   assert.equal(discovery.admitted,true);
+  await running(discovery.taskId);
   await scrape(env,'https://jwc.cqu.edu.cn/list.htm',{source:snapshot,siteAdmission:discovery,formats:[]});
   assert.equal((await env.DB.prepare(`SELECT state FROM outbox WHERE id='222222222222222222222222'`).bind().first()).state,'sent');
   assert.deepEqual(binding.calls.filter(call=>call.path==='/scrape-complete').map(call=>call.body.stop),[false,false]);
   const capture=await claimSiteExecution(env,{id:'444444444444444444444444',kind:'capture',attempt_no:1});
   assert.equal(capture.admitted,true);
+  await running(capture.taskId);
   await scrape(env,'https://jwc.cqu.edu.cn/info/1082/2.htm',{
     source:snapshot,siteAdmission:capture,
     formats:[],
@@ -204,6 +208,7 @@ test('warm handoff admits live discovery and skips unadmitted backfill',async()=
   assert.equal(binding.calls.filter(call=>call.path==='/scrape-complete').map(call=>call.body.stop).at(-1),false);
   const validation=await claimSiteExecution(env,{id:'454545454545454545454545',kind:'discover',attempt_no:1});
   assert.equal(validation.admitted,true);
+  await running(validation.taskId);
   await scrape(env,'https://jwc.cqu.edu.cn/info/1082/3.htm',{source:snapshot,siteAdmission:validation,formats:[]});
   assert.deepEqual(binding.calls.filter(call=>call.path==='/scrape-complete').slice(-2).map(call=>call.body.stop),[false,true]);
 });
