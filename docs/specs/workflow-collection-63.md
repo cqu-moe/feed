@@ -1,6 +1,6 @@
 # #63 采集方案：栏目各算到期，网站错开开工
 
-状态：目标方案，未实施、未上线。[Issue #63](https://github.com/cqu-moe/feed/issues/63) 提出把单任务交给 Workflows。本次讨论修订其中的并发要求：取消跨站“同时最多两项”的业务限制，保留同站一次只抓一项。当前实现见[采集调度](../queue-collection.md)。
+状态：#63 的验收规格。隔离演练与生产切换分开记录。[Issue #63](https://github.com/cqu-moe/feed/issues/63) 提出把单任务交给 Workflows。本次讨论修订其中的并发要求：取消跨站“同时最多两项”的业务限制，保留同站一次只抓一项。当前实现见[采集调度](../queue-collection.md)。
 
 ## 一轮采集怎样跑
 
