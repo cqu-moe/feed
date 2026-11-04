@@ -47,10 +47,12 @@ const browserPlugin={
             {url:origin+'/info/2025/4.htm',title:'一年外通知',publishedAt:'2025-09-30'},
             {url:origin+'/info/2026/4.htm',title:'一年内通知',publishedAt:'2026-04-01'},
           );
+          const options=globalThis.SOURCES_LIST_OPTIONS;
           return {
             title:'通知列表',
-            articles:globalThis.SOURCES_LIST_OPTIONS.articles??articles,
-            next:globalThis.SOURCES_LIST_OPTIONS.chainPages ? (Number(new URL(url).searchParams.get('page')??1)<globalThis.SOURCES_LIST_OPTIONS.chainPages?[origin+'/list.htm?page='+(Number(new URL(url).searchParams.get('page')??1)+1)]:[]) : page===1?[url.replace(/\\.htm$/,'-2.htm')]:[],
+            articles:options.articles??articles,
+            next:options.chainPages ? (Number(new URL(url).searchParams.get('page')??1)<options.chainPages?[origin+'/list.htm?page='+(Number(new URL(url).searchParams.get('page')??1)+1)]:[]) : page===1?[url.replace(/\\.htm$/,'-2.htm')]:[],
+            explicitlyEmpty:options.explicitlyEmpty===true,
           };
         };
         const body=(url)=>{
@@ -986,6 +988,92 @@ test('rate limiting defers only the failing source and pausing a source stops sc
     const stopped=await(await mf.dispatchFetch('https://feed.test/fixture/advance-schedule',{method:'POST',body:JSON.stringify({advanceMs:3600001})})).json();
     assert.equal(stopped.scheduled.length,0);
     assert.equal((await(await read(`/api/articles?source=${b}`)).json()).total,1);
+  }finally{await mf.dispose();}
+});
+
+test('current source and site controls fence live discovery before fetching and during publication',async t=>{
+  for(const target of ['source','site'])for(const phase of ['before-fetch','before-commit'])await t.test(target+' '+phase,async()=>{
+    const {mf,gate,admin}=await fixture({versioned:true,discoveryPages:1});
+    try{
+      const site=await request(mf,admin,'/internal/sites',{method:'POST',body:{name:'定时列表围栏',origin:'https://a.test'}});
+      const sourceId=await createVerifiedSource(mf,admin,site.data.site.id,'https://a.test/list.htm');
+      const scheduled=await control(mf,'schedule-only',{});
+      const taskId=scheduled.scheduled[0];
+      gate.url=phase==='before-fetch'?'queue-'+taskId:'https://a.test/list.htm';
+      await control(mf,'dispatch',{});
+      await waitFor(async()=>assert.equal(gate.held,true));
+      const path=target==='source'?`/internal/sources/${sourceId}`:`/internal/sites/${site.data.site.id}`;
+      const before=(await request(mf,admin,`/internal/sources/${sourceId}`)).data.source;
+      assert.equal((await request(mf,admin,path,{method:'PATCH',body:{enabled:false}})).status,200);
+      const scrapesBefore=(await control(mf,'scrapes',{})).calls.length;
+      gate.release();
+      await waitFor(async()=>{
+        const task=(await request(mf,admin,`/internal/capture-tasks/${taskId}`)).data.task;
+        assert.equal(task.state,'cancelled',JSON.stringify(task));
+        assert.equal(task.lastError,target==='site'?'site_disabled':'source_disabled');
+      });
+      const after=(await request(mf,admin,`/internal/sources/${sourceId}`)).data.source;
+      assert.equal(after.lastRunAt,before.lastRunAt);
+      assert.equal(after.nextDiscoveryAt,before.nextDiscoveryAt);
+      assert.equal((await request(mf,admin,`/internal/sources/${sourceId}/discoveries`)).data.discoveries.length,0);
+      const tasks=(await request(mf,admin,'/internal/capture-tasks')).data.tasks;
+      assert.equal(tasks.filter(task=>task.kind==='capture').length,0);
+      assert.equal((await control(mf,'scrapes',{})).calls.length,scrapesBefore);
+    }finally{gate.release?.();await mf.dispose();}
+  });
+});
+
+test('replacing a verified configuration fences queued live discovery and permits manual verification',async t=>{
+  for(const phase of ['before-fetch','before-commit'])await t.test(phase,async()=>{
+    const {mf,gate,admin}=await fixture({versioned:true,discoveryPages:1});
+    try{
+      const site=await request(mf,admin,'/internal/sites',{method:'POST',body:{name:'配置版本围栏',origin:'https://a.test'}});
+      const sourceId=await createVerifiedSource(mf,admin,site.data.site.id,'https://a.test/list.htm');
+      const scheduled=await control(mf,'schedule-only',{});
+      const taskId=scheduled.scheduled[0];
+      gate.url=phase==='before-fetch'?'queue-'+taskId:'https://a.test/list.htm';
+      await control(mf,'dispatch',{});
+      await waitFor(async()=>assert.equal(gate.held,true));
+      const before=(await request(mf,admin,`/internal/sources/${sourceId}`)).data.source;
+      const scrapesBefore=(await control(mf,'scrapes',{})).calls.length;
+      await request(mf,admin,`/internal/sources/${sourceId}`,{method:'PATCH',body:{enabled:false}});
+      const edited=await request(mf,admin,`/internal/sources/${sourceId}`,{method:'PATCH',body:{listUrl:'https://a.test/list-b.htm'}});
+      assert.equal(edited.status,200,JSON.stringify(edited));
+      assert.equal(edited.data.source.configVersion,before.configVersion+1);
+      gate.release();
+      await waitFor(async()=>{
+        const task=(await request(mf,admin,`/internal/capture-tasks/${taskId}`)).data.task;
+        assert.equal(task.state,'cancelled',JSON.stringify(task));
+        assert.equal(task.lastError,'source_configuration_changed');
+      });
+      const after=(await request(mf,admin,`/internal/sources/${sourceId}`)).data.source;
+      assert.equal(after.lastRunAt,before.lastRunAt);
+      assert.equal(after.nextDiscoveryAt,before.nextDiscoveryAt);
+      assert.equal((await request(mf,admin,`/internal/sources/${sourceId}/discoveries`)).data.discoveries.length,0);
+      assert.equal((await request(mf,admin,'/internal/capture-tasks')).data.tasks.filter(task=>task.kind==='capture').length,0);
+      assert.equal((await control(mf,'scrapes',{})).calls.length,scrapesBefore);
+      await verify(mf,admin,sourceId,'verify-replaced-live-configuration');
+      assert.equal((await request(mf,admin,`/internal/sources/${sourceId}`)).data.source.validationState,'verified');
+    }finally{gate.release?.();await mf.dispose();}
+  });
+});
+
+test('a browser-recognized empty list records a successful live check',async()=>{
+  const {mf,admin}=await fixture({versioned:true,discoveryPages:1});
+  try{
+    const site=await request(mf,admin,'/internal/sites',{method:'POST',body:{name:'有效空列表',origin:'https://a.test'}});
+    const sourceId=await createVerifiedSource(mf,admin,site.data.site.id,'https://a.test/list.htm');
+    await control(mf,'list-options',{articles:[],chainPages:1,explicitlyEmpty:true});
+    const scheduled=await request(mf,admin,'/internal/sources/schedule',{method:'POST'});
+    await waitFor(async()=>{
+      const task=(await request(mf,admin,`/internal/capture-tasks/${scheduled.data.scheduled[0]}`)).data.task;
+      assert.equal(task.state,'succeeded',JSON.stringify(task));
+    });
+    const source=(await request(mf,admin,`/internal/sources/${sourceId}`)).data.source;
+    assert.ok(source.lastRunAt);
+    assert.equal(source.error,null);
+    assert.equal((await request(mf,admin,`/internal/sources/${sourceId}/discoveries`)).data.discoveries.length,0);
+    assert.equal((await request(mf,admin,'/internal/capture-tasks')).data.tasks.filter(task=>task.kind==='capture').length,0);
   }finally{await mf.dispose();}
 });
 
