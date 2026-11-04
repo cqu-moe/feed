@@ -102,32 +102,43 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
         if(!priorAttempt&&!workflowExecution)return runtime.runJobInQueue(message,task);
         if(priorAttempt&&isQueueInstance(priorAttempt.workflow_instance_id)){
           if(task.state==='queued'&&!workflowExecution)return runtime.runJobInQueue(message,task);
-          return {state:task.state,acked:'running'};
+          if(!workflowExecution||priorAttempt.state!=='deferred'||priorAttempt.result_json)
+            return {state:task.state,acked:'running'};
         }
       }
-      const instanceId=priorAttempt?.workflow_instance_id??workflowInstanceId(task.id,message.attempt),timestamp=now();
+      const instanceId=workflowExecution&&isQueueInstance(priorAttempt?.workflow_instance_id)
+        ?workflowInstanceId(task.id,message.attempt)
+        :priorAttempt?.workflow_instance_id??workflowInstanceId(task.id,message.attempt),timestamp=now();
       const workflowBinding=selectWorkflow(env,{workflow,workflows},task.kind);
-      let siteClaim=null;
-      if(browserTaskKind(task.kind)&&!workflowExecution&&!priorAttempt){
-        siteClaim=await claimSiteExecution(env,{...task,attempt_no:message.attempt},timestamp);
-        if(!siteClaim.admitted){
-          await delayBusyLaunch(env,task.id,message.attempt,timestamp);
-          return {state:task.state,acked:'site-busy'};
-        }
-      }
       await env.DB.batch([
-        env.DB.prepare(`UPDATE tasks SET state='starting',updated_at=? WHERE id=? AND state='queued' AND attempt_no=?`)
-          .bind(timestamp,task.id,message.attempt),
+        env.DB.prepare(`UPDATE tasks SET state='starting',updated_at=? WHERE id=? AND state='queued' AND attempt_no=? AND due_at<=?
+          AND (?=0 OR NOT EXISTS(SELECT 1 FROM task_attempts a JOIN site_execution_leases l
+            ON l.owner_task_id=a.task_id AND l.owner_attempt_no=a.attempt_no
+            WHERE a.task_id=tasks.id AND a.attempt_no=tasks.attempt_no
+              AND a.workflow_instance_id LIKE 'queue-%' AND l.lease_until>?))`)
+          .bind(timestamp,task.id,message.attempt,timestamp,workflowExecution?1:0,timestamp),
         env.DB.prepare(`INSERT INTO task_attempts(task_id,attempt_no,workflow_instance_id,state,started_at)
           SELECT id,attempt_no,?,'starting',? FROM tasks WHERE id=? AND attempt_no=? AND state IN ('starting','running')
-          ON CONFLICT(task_id,attempt_no) DO NOTHING`).bind(instanceId,timestamp,task.id,message.attempt),
+          ON CONFLICT(task_id,attempt_no) DO UPDATE SET workflow_instance_id=excluded.workflow_instance_id,
+            state='starting',started_at=excluded.started_at,handed_off_at=NULL,ended_at=NULL,error_code=NULL
+          WHERE ? AND task_attempts.workflow_instance_id LIKE 'queue-%' AND task_attempts.state='deferred'
+            AND task_attempts.result_json IS NULL
+            AND EXISTS(SELECT 1 FROM tasks WHERE id=task_attempts.task_id AND attempt_no=task_attempts.attempt_no AND state='starting')`)
+          .bind(instanceId,timestamp,task.id,message.attempt,workflowExecution?1:0),
+        ...(workflowExecution?[env.DB.prepare(`UPDATE outbox_receipts SET state='queued',processed_at=NULL,last_error=NULL,updated_at=?
+          WHERE outbox_id=? AND changes()>0`).bind(timestamp,message.outboxId)]:[]),
       ]);
       task=await env.DB.prepare('SELECT * FROM tasks WHERE id=?').bind(task.id).first();
       if(task.attempt_no!==message.attempt||!activeStates.includes(task.state))return {state:task.state,acked:'superseded'};
-      if(siteClaim && (!siteClaim.siteId || siteClaim.generation===undefined))throw new Error('Site execution claim is missing');
+      if(task.state==='queued'&&task.due_at>now())return {state:'queued',acked:'not-due',retryDelaySeconds:launchDelaySeconds(task.due_at,now())};
       const attempt=await env.DB.prepare('SELECT * FROM task_attempts WHERE task_id=? AND attempt_no=?')
         .bind(task.id,message.attempt).first();
-      if(attempt?.workflow_instance_id!==instanceId)throw new Error('Workflow attempt ledger is missing');
+      if(!attempt)throw new Error('Workflow attempt ledger is missing');
+      if(attempt.workflow_instance_id!==instanceId){
+        if(task.state==='queued'&&isQueueInstance(attempt.workflow_instance_id)&&attempt.state==='deferred')
+          return {state:task.state,acked:'site-releasing',retryDelaySeconds:30};
+        return {state:task.state,acked:'running'};
+      }
       const instance=attempt.handed_off_at!==null
         ?await workflowBinding.get(instanceId)
         :await ensureWorkflow(workflowBinding,instanceId,{taskId:task.id,attempt:message.attempt});
@@ -324,11 +335,26 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
 
     async requeueLaunch(taskId,attemptNo,timestamp){
       const key=launchDedupeKey(taskId,attemptNo);
-      await env.DB.prepare(`UPDATE outbox SET state='queued',available_at=?,updated_at=?
-        WHERE topic='feed-jobs' AND dedupe_key=? AND state='sent'`)
-        .bind(timestamp,timestamp,key).run();
-      const row=await env.DB.prepare('SELECT id FROM outbox WHERE topic=? AND dedupe_key=?')
-        .bind('feed-jobs',key).first();
+      const claimed=await env.DB.batch([
+        env.DB.prepare(`INSERT INTO outbox_receipts(outbox_id,topic,state,attempts,replay_count,last_error,last_replayed_at,created_at,updated_at)
+          SELECT o.id,o.topic,'queued',0,1,NULL,?,?,? FROM outbox o
+          WHERE o.topic='feed-jobs' AND o.dedupe_key=? AND EXISTS(
+            SELECT 1 FROM tasks t LEFT JOIN task_attempts a ON a.task_id=t.id AND a.attempt_no=t.attempt_no
+            LEFT JOIN outbox_receipts r ON r.outbox_id=o.id
+            WHERE t.id=? AND t.attempt_no=? AND t.state IN ('queued','starting') AND a.handed_off_at IS NULL
+              AND COALESCE(r.state,'')<>'processed'
+              AND ((o.state='queued' AND o.available_at<=?) OR (o.state='sent'
+                AND ?-MAX(o.updated_at,COALESCE(r.last_replayed_at,0),t.due_at)>=?)))
+          ON CONFLICT(outbox_id) DO UPDATE SET state='queued',replay_count=replay_count+1,last_error=NULL,
+            last_replayed_at=excluded.last_replayed_at,updated_at=excluded.updated_at
+          WHERE outbox_receipts.state<>'processed'
+            AND (outbox_receipts.last_replayed_at IS NULL OR outbox_receipts.last_replayed_at<=?)
+          RETURNING outbox_id AS id`)
+          .bind(timestamp,timestamp,timestamp,key,taskId,attemptNo,timestamp,timestamp,launchReplayAfterMs,timestamp-launchReplayAfterMs),
+        env.DB.prepare(`UPDATE outbox SET state='queued',available_at=?,updated_at=?
+          WHERE topic='feed-jobs' AND dedupe_key=? AND changes()>0`).bind(timestamp,timestamp,key),
+      ]);
+      const row=claimed[0].results[0];
       if(!row)return false;
       return await runtime.dispatchOutbox(row.id).catch(()=>false);
     },
