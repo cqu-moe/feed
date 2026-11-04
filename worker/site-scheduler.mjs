@@ -81,7 +81,7 @@ export async function handoffOrReleaseSiteExecution(env,admission,now=Date.now()
   const released=await releaseSiteExecution(env,admission,now);
   if(!released)return {released:false};
   const next=await env.DB.prepare(`SELECT o.id FROM outbox o JOIN tasks t ON t.id=json_extract(o.payload_json,'$.taskId')
-    WHERE o.topic='feed-jobs' AND o.state='queued' AND o.available_at<=? AND t.due_at<=?
+    WHERE o.topic='feed-jobs' AND o.state IN ('queued','sent') AND o.available_at<=? AND t.due_at<=?
       AND t.state='queued' AND t.attempt_no=json_extract(o.payload_json,'$.attempt')
       AND (
         t.kind IN ('capture','recheck')
