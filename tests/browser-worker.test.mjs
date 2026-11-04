@@ -14,7 +14,7 @@ const successBody=JSON.stringify({success:true,data:{metadata:{statusCode:200}}}
 
 async function schedulerDb(){
   const db=new DatabaseSync(':memory:');
-  for(const name of ['0001_feed.sql','0005_task_runtime.sql','0006_sources.sql','0015_history_backfill.sql','0019_site_execution_leases.sql']){
+  for(const name of ['0001_feed.sql','0003_collection_lease.sql','0005_task_runtime.sql','0006_sources.sql','0015_history_backfill.sql','0019_site_execution_leases.sql']){
     db.exec(await readFile(`migrations/${name}`,'utf8'));
   }
   return {
