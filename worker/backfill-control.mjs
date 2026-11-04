@@ -15,7 +15,7 @@ export async function readBackfillControl(env,source,runId){
     FROM sources s WHERE s.id=? AND s.config_version=? AND s.backfill_run_id=?`)
     .bind(source.id,source.configVersion,runId).first();
   if(!row)return {superseded:true};
-  if(!row.allowed)return {deferred:true,error:'Backfill is paused or source/site is disabled or unverified',retryAfterMs:12*60*60*1000};
+  if(!row.allowed)return {deferred:true,paused:true,error:'Backfill is paused or source/site is disabled or unverified',retryAfterMs:12*60*60*1000};
   return {maxPages:row.backfill_max_pages};
 }
 

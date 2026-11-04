@@ -97,7 +97,7 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
       const priorAttempt=await env.DB.prepare('SELECT * FROM task_attempts WHERE task_id=? AND attempt_no=?')
         .bind(task.id,message.attempt).first();
       const workflowExecution=env.COLLECTION_EXECUTOR==='workflow'
-        &&['discover','capture','recheck'].includes(task.kind);
+        &&browserTaskKind(task.kind);
       if(browserTaskKind(task.kind)){
         if(!priorAttempt&&!workflowExecution)return runtime.runJobInQueue(message,task);
         if(priorAttempt&&isQueueInstance(priorAttempt.workflow_instance_id)){
@@ -545,6 +545,8 @@ async function finishTask(env,kind,taskId,attemptNo,result,now=()=>Date.now()){
   let state='succeeded',errorCode=null,dueAt=timestamp;
   if(kind==='ocr'&&result.reviewRequired){
     state='blocked';errorCode='ocr_review_required';
+  }else if(kind==='backfill'&&result.paused){
+    state='deferred';errorCode='backfill_paused';
   }else if(result.originAttemptsExhausted){
     state='blocked';errorCode=result.code??'origin_attempts_exhausted';
   }else if((result.superseded&&kind==='backfill')||result.cancel){
