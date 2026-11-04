@@ -1,6 +1,7 @@
 import {directPdfReport} from './direct-pdf.mjs';
 import {setTimeout as delay} from 'node:timers/promises';
 import {openBrowser} from './browser.mjs';
+import {articleContent,fileTarget} from './article-content.mjs';
 import {isExplicitlyEmptyList} from './list-state.mjs';
 
 export function validateJob(input){
@@ -33,8 +34,13 @@ export async function scrapePage(job,signal){
         const value=await directPdfReport(browser.directPdf,job.directPdf,signal);
         return {actions:{javascriptReturns:[{value}]},metadata:{provider:'browser-container',statusCode:200,elapsedMs:Date.now()-start}};
       }
+      state=null;
       try{state=await browser.evaluate(`(() => {
         const input=${readiness};
+        if('articleTitle' in input)return {
+          url:location.href,parsed:document.readyState!=='loading',
+          content:Boolean((${articleContent.toString()})(input.articleTitle,${fileTarget.toString()})),
+        };
         const isExplicitlyEmptyList=${isExplicitlyEmptyList.toString()};
         const pattern=input.articlePattern?new RegExp(input.articlePattern):null;
         const content=pattern?[...document.querySelectorAll('a[href]')].some(anchor=>{

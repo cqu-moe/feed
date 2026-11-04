@@ -254,7 +254,7 @@ export function ArticleDetailPage() {
           ? { ...nextState, historical: Boolean(selectedRevisionId), transitioningTo: undefined }
           : nextState);
         const operation = openOperation.current;
-        if (result.ok && operation && (!result.data.revision || result.data.revision.state === 'ready')) {
+        if (result.ok && operation && (!result.data.revision || result.data.revision.readable)) {
           captureFeedEvent('feed_item_opened', {
             operation: 'article_read',
             flow: 'reading',
@@ -330,7 +330,7 @@ export function ArticleDetailPage() {
     ? revision ?? revisions.find((item) => item.id === selectedRevisionId)
     : undefined;
   const activeRevisionId = revision?.id ?? selectedRevision?.id ?? currentRevisionId;
-  const canReadRevision = !revision || revision.state === 'ready';
+  const canReadRevision = !revision || revision.readable;
   const partialSnapshot = revision && !canReadRevision
     && requirements?.some(item => item.kind === 'snapshot' && item.state === 'fulfilled')
     && article.snapshotUrl === `/api/articles/${article.id}/revisions/${revision.id}/snapshot`
@@ -378,7 +378,7 @@ export function ArticleDetailPage() {
         <div className="feed-reading-actions">
           {selectedRevisionId && (
             <Button type="button" variant="outline" size="sm" onClick={() => selectRevision(null)}>
-              返回最新完整版本
+              {currentRevisionId ? '返回最新完整版本' : '返回当前版本'}
             </Button>
           )}
           <Button type="button" variant="ghost" size="sm" data-detail-panel="history" onClick={() => setOpenPanel('history')}>
@@ -408,7 +408,7 @@ export function ArticleDetailPage() {
         <Alert className="feed-revision-alert">
           <AlertTitle>新版本暂未就绪</AlertTitle>
           <AlertDescription>
-            最新观察版本{newestRevision.state === 'blocked' ? '有必需项未完成' : '仍在核对'}，当前继续显示最后一个完整版本。
+            {newestRevision.readable ? <>新版本有附件暂时缺失。<Link to={`?revision=${newestRevision.id}`}>阅读新版本</Link></> : <>最新观察版本{newestRevision.state === 'blocked' ? '有必需项未完成' : '仍在核对'}，当前继续显示最后一个完整版本。</>}
           </AlertDescription>
         </Alert>
       )}
@@ -877,8 +877,7 @@ function AttachmentRow({
           <h3>{attachment.name}</h3>
         )}
         <p>
-          {format} · {formatBytes(attachment.bytes)}
-          {attachment.error ? ` · ${attachment.error}` : ''}
+          {format} · {attachment.downloadUrl ? formatBytes(attachment.bytes) : '暂时缺失'}
         </p>
       </div>
       {canRead && attachment.url && isPdf(attachment) && (

@@ -21,7 +21,7 @@ test('source verification accepts the matching Youth content endpoint and reject
     };
     let saved;
     const sources={async find(){return source;},async recordValidation(_id,_version,evidence){saved=evidence;return evidence;},async recordValidationFailure(){}};
-    const scrape=async(_env,url,options)=>({actions:{javascriptReturns:[{value:options.readiness
+    const scrape=async(_env,url,options)=>({actions:{javascriptReturns:[{value:options.readiness?.articlePattern
       ?{articles:[{url:original,title:'公开通知'}],next:[]}
       :{
         bodyRecognized:true,page:{url:pageUrl},bodyText:'公开通知正文',

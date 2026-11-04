@@ -123,7 +123,8 @@ before(async () => {
             bodyText: body,
             errors: [],
             artifacts,
-            attachmentCandidates: [{ url: attachmentUrl, name: '通知附件.pdf', role: 'attachment' }],
+            attachmentCandidates: [{ url: attachmentUrl, name: '通知附件.pdf', role: 'attachment' },
+              ...(variant === 'missing-file' ? [{ url: attachmentUrl + '&second', name: '安全承诺书.pdf', role: 'attachment' }] : [])],
             downloads: incomplete ? [] : [
               { url: attachmentUrl, originalFile: true, saved: { name: 'attachment-1.pdf' } },
             ],
@@ -526,6 +527,26 @@ test('immutable revisions preserve A-B-A bytes, reject incomplete defaults, and 
   }
 
   assert.equal(await browserCalls(), 4);
+});
+
+test('one unavailable attachment leaves the current article and saved file readable', async () => {
+  const id = '2922d5edce5feb6996830772';
+  await db.prepare(`INSERT INTO articles(id,source_id,url,title,published_at,discovered_at)
+    VALUES (?,'jwc',?,'足球联赛通知','2026-11-04','2026-11-04')`).bind(id, 'https://jwc.cqu.edu.cn/info/1082/25316.htm').run();
+  const captured = await capture('request-missing-file', 'missing-file', id);
+  const cookie = await login();
+  const current = await detail(id, undefined, cookie);
+  assert.equal(current.article.status, 'partial');
+  assert.match(current.article.bodyText, /版本 MISSING-FILE 的中文正文/);
+  const [saved, missing] = current.attachments;
+  assert.equal(missing.name, '安全承诺书.pdf');
+  assert.equal(missing.downloadUrl, null);
+  const fetchFile = (path, headers) => miniflare.dispatchFetch(feedOrigin + path, {headers});
+  assert.equal((await fetchFile(saved.downloadUrl, {})).status, 401);
+  assert.equal(await (await fetchFile(saved.downloadUrl, {Cookie:cookie})).text(), '%PDF-1.7\nimmutable-missing-file\n');
+  assert.equal((await fetchFile(`/api/articles/${id}/revisions/${captured.revisionId}/files/${missing.filename}`, {Cookie:cookie})).status, 404);
+  const snapshot = await fetchFile(current.article.snapshotUrl, {Cookie:cookie});
+  assert.match(await snapshot.text(), new RegExp(`/reader/${id}/revisions/${captured.revisionId}/attachment-1\\.pdf`));
 });
 
 test('a PDF-only observation with an unavailable required original remains blocked', { concurrency: false }, async () => {
