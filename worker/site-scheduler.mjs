@@ -104,7 +104,18 @@ export async function runSiteTask(env,step,taskId,attemptNo,name,timeout,run){
   const maxAttempts=Math.min(10,Math.max(1,Number(env.MAX_TASK_ATTEMPTS)||3));
   const baseDelay=Math.max(60000,Number(env.TASK_RETRY_BASE_DELAY_MS)||900000);
   const maxDelay=Math.max(baseDelay,Number(env.TASK_RETRY_MAX_DELAY_MS)||21600000);
-  let originTries=0,archiveTries=0;
+  let originTries=attemptNo===1?0:await step.do(`${name}-source-budget`,async()=>{
+    const rows=await env.DB.prepare(`SELECT a.result_json FROM task_attempts a JOIN tasks t ON t.id=a.task_id
+      WHERE t.id=? AND t.attempt_no=? AND a.attempt_no<?
+        AND a.attempt_no>=CASE WHEN t.kind='backfill' THEN t.backfill_retry_from ELSE 1 END`)
+      .bind(taskId,attemptNo,attemptNo).all();
+    return rows.results.filter(row=>{
+      const result=JSON.parse(row.result_json??'{}');
+      return result.error&&!result.capacity&&!result.skipped&&!result.paused&&!result.cancel&&!result.superseded
+        &&!result.resumeSaved&&!result.savedPage;
+    }).length;
+  }),archiveTries=0;
+  if(originTries>=maxAttempts)return {deferred:true,error:'Source attempt budget exhausted',code:'origin_attempts_exhausted',originAttemptsExhausted:true};
   for(let n=0;;n++){
     const result=await step.do(n?`${name}-try-${n}`:name,{retries:{limit:0,delay:'5 seconds'},timeout},async()=>{
       const task=await env.DB.prepare("SELECT * FROM tasks WHERE id=? AND attempt_no=? AND state='running'").bind(taskId,attemptNo).first();
@@ -116,6 +127,7 @@ export async function runSiteTask(env,step,taskId,attemptNo,name,timeout,run){
       finally{await releaseSiteExecution(env,admission);}
     });
     // Pause, quota and permanent errors must reach the owning task unchanged.
+    if(result?.cancel||result?.superseded||result?.paused)return result;
     const transient=result?.retryable||result?.code==='rate_limited'||result?.code==='browser_transient';
     const waiting=result?.capacity||result?.skipped;
     const saved=result?.resumeSaved||result?.savedPage;

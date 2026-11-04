@@ -130,6 +130,7 @@ async function fixture({versioned=false,notifications=false,discoveryPages=2,wor
         let fixedNow=null;
         Date.now=()=>fixedNow??nativeNow();
         globalThis.SOURCES_SENT=[];
+        globalThis.SOURCES_SEND_FAILURES=0;
         let clockOffset=0;
         const runtimeNow=()=>Date.now()+clockOffset;
         const notificationsEnabled=${notifications};
@@ -159,6 +160,7 @@ async function fixture({versioned=false,notifications=false,discoveryPages=2,wor
             return result;
           }},CAPTURE:rawEnv.CAPTURE??workflow,DISCOVERY:rawEnv.DISCOVERY??workflow,FEED_JOBS:{
             async send(body,options){
+              if(globalThis.SOURCES_SEND_FAILURES>0){globalThis.SOURCES_SEND_FAILURES--;throw new Error('Queue send unavailable');}
               const task=await database.prepare('SELECT kind,source_id AS sourceId FROM tasks WHERE id=?').bind(body.taskId??'').first();
               globalThis.SOURCES_SENT.push({...body,...task,options});return await actualQueue.send(body,options);},
           }};
@@ -176,6 +178,7 @@ async function fixture({versioned=false,notifications=false,discoveryPages=2,wor
             }
             if(url.pathname==='/fixture/clock'){fixedNow=(await request.json()).now;return Response.json({now:fixedNow});}
             if(url.pathname==='/fixture/list-options'){globalThis.SOURCES_LIST_OPTIONS=await request.json();return Response.json({ok:true});}
+            if(url.pathname==='/fixture/send-failures'){globalThis.SOURCES_SEND_FAILURES=(await request.json()).count;return Response.json({ok:true});}
             if(url.pathname==='/fixture/sent')return Response.json(globalThis.SOURCES_SENT);
             if(url.pathname==='/fixture/schedule-only')return Response.json(await createSources(env,{now:runtimeNow}).scheduleDue(await request.json()));
             if(url.pathname==='/fixture/cron'){
@@ -996,7 +999,9 @@ test('hourly scans stagger each site from the original Cron hour across batches 
     await control(mf,'cron',{cron:'0 * * * *',scheduledTime});
     await control(mf,'cron',{cron:'0 * * * *',scheduledTime});
     const sent=(await control(mf,'sent',{})).slice(sentBefore).filter(row=>row.kind==='discover');
-    assert.deepEqual(sent.map(row=>row.sourceId).sort(),[a,b].sort());
+    assert.deepEqual(sent.map(row=>row.sourceId),[b],'Cron sends only its newly created launch');
+    await control(mf,'dispatch',{});
+    assert.deepEqual((await control(mf,'sent',{})).slice(sentBefore).map(row=>row.sourceId).sort(),[a,b].sort());
     assert.ok(sent.every(row=>row.options.delaySeconds===2571));
     const tasks=(await request(mf,admin,'/internal/capture-tasks')).data.tasks.filter(row=>row.kind==='discover');
     assert.equal(tasks.filter(row=>[a,b].includes(row.sourceId)&&row.state==='queued').length,2);
@@ -1011,6 +1016,43 @@ test('hourly scans stagger each site from the original Cron hour across batches 
     const nextColumns=plans.filter(row=>[a,b].includes(row.sourceId));
     assert.deepEqual(nextColumns.map(row=>row.sourceId).sort(),[a,b].sort());
     assert.ok(nextColumns.every(row=>row.dueAt===Date.parse('2026-11-03T11:09:38Z')));
+  }finally{await mf.dispose();}
+});
+
+test('hourly Cron immediately sends every newly scheduled launch across pages and retains failed sends',async()=>{
+  const {mf,db,admin}=await fixture();
+  try{
+    const site=await request(mf,admin,'/internal/sites',{method:'POST',body:{requestId:'hourly-stagger-site',name:'分页派发',origin:'https://a.test'}});
+    const sourceId=await createVerifiedSource(mf,admin,site.data.site.id,'https://a.test/list.htm');
+    const scheduledTime=Date.parse('2026-11-03T10:00:00Z');
+    await control(mf,'clock',{now:scheduledTime});
+    await db.prepare('UPDATE sources SET next_discovery_at=0').run();
+    for(let i=1;i<107;i++)await db.prepare(`INSERT INTO sources(id,site_id,name,url,list_url,config_json,config_version,enabled,
+      validation_state,refresh_interval_sec,next_discovery_at,source_timezone,created_at,updated_at)
+      SELECT ?,site_id,name,url,list_url,config_json,config_version,enabled,validation_state,refresh_interval_sec,0,source_timezone,created_at,updated_at
+      FROM sources WHERE id=?`).bind(i.toString(16).padStart(24,'0'),sourceId).run();
+    const prior=(await control(mf,'schedule-only',{limit:2,scheduledTime})).scheduled;
+    await db.prepare("UPDATE outbox SET state='sent',attempts=1 WHERE json_extract(payload_json,'$.taskId')=?").bind(prior[0]).run();
+    const before=(await control(mf,'sent',{})).length;
+    const scrapes=(await control(mf,'scrapes',{})).calls;
+    await control(mf,'send-failures',{count:1});
+    await control(mf,'cron',{cron:'0 * * * *',scheduledTime});
+    const sent=(await control(mf,'sent',{})).slice(before);
+    assert.equal(sent.length,104,'105 new launches are attempted immediately, including one failed send');
+    assert.ok(sent.every(row=>!prior.includes(row.taskId)&&row.options.delaySeconds===2991));
+    const rows=(await db.prepare(`SELECT t.id,t.state,t.due_at,o.state AS delivery,o.attempts,o.last_error
+      FROM tasks t JOIN outbox o ON o.dedupe_key='start:'||t.id||':a1' WHERE t.kind='discover' AND t.state='queued'`).all()).results;
+    assert.equal(rows.length,107,'all due columns are scheduled across the 100-row boundary');
+    const failed=rows.filter(row=>!prior.includes(row.id)&&row.delivery==='queued');
+    assert.equal(failed.length,1);
+    assert.equal(failed[0].attempts,1);
+    assert.match(failed[0].last_error,/Queue send unavailable/);
+    assert.deepEqual(prior.map(id=>{const row=rows.find(row=>row.id===id);return [row.delivery,row.attempts];}),[['sent',1],['queued',0]]);
+    assert.ok(rows.every(row=>row.due_at===scheduledTime+2991_000));
+    await control(mf,'cron',{cron:'0 * * * *',scheduledTime});
+    assert.equal((await control(mf,'sent',{})).length,before+104,'a repeated Cron does not resend existing outboxes');
+    assert.deepEqual((await control(mf,'scrapes',{})).calls,scrapes);
+    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM task_attempts WHERE task_id IN (SELECT id FROM tasks WHERE state='queued' AND kind='discover')").first()).n,0);
   }finally{await mf.dispose();}
 });
 
@@ -1233,7 +1275,7 @@ test('rate limiting defers only the failing source and pausing a source stops sc
 
 test('current source and site controls fence live discovery before fetching and during publication',async t=>{
   for(const target of ['source','site'])for(const phase of ['before-fetch','before-commit'])await t.test(target+' '+phase,async()=>{
-    const {mf,gate,admin}=await fixture({versioned:true,discoveryPages:1});
+    const {mf,gate,admin}=await fixture({versioned:true,discoveryPages:1,workflow:true});
     try{
       const site=await request(mf,admin,'/internal/sites',{method:'POST',body:{name:'定时列表围栏',origin:'https://a.test'}});
       const sourceId=await createVerifiedSource(mf,admin,site.data.site.id,'https://a.test/list.htm');
@@ -1252,6 +1294,8 @@ test('current source and site controls fence live discovery before fetching and 
         assert.equal(task.state,'cancelled',JSON.stringify(task));
         assert.equal(task.lastError,target==='site'?'site_disabled':'source_disabled');
       });
+      assert.equal((await completedWorkflow(mf,taskId)).output.cancel,true);
+      assert.deepEqual(await control(mf,'waits',{}),[],'cancellation completes without sleeping');
       const after=(await request(mf,admin,`/internal/sources/${sourceId}`)).data.source;
       assert.equal(after.lastRunAt,before.lastRunAt);
       assert.equal(after.nextDiscoveryAt,before.nextDiscoveryAt);

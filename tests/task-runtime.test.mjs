@@ -1178,12 +1178,15 @@ test('cutover returns a launch to Queue when its old owner defers after the task
   }finally{await mf.dispose();}
 });
 
-test('manual launch recovery rechecks current task and delivery facts at its atomic write',async t=>{
+test('launch recovery rechecks current task and delivery facts at its atomic write',async t=>{
   const {createTaskRuntime}=await taskRuntimeModule();
   const changes={
     'new planned start':(db,id,at)=>db.prepare('UPDATE tasks SET due_at=? WHERE id=?').bind(at+48*60_000,id).run(),
-    'confirmed handoff':(db,id,at)=>db.prepare(`INSERT INTO task_attempts(task_id,attempt_no,workflow_instance_id,state,started_at,handed_off_at)
-      VALUES (?,1,?,'starting',?,?)`).bind(id,`task-${id}-a1`,at,at).run(),
+    'confirmed handoff':async(db,id,at)=>{
+      const launch=await db.prepare("SELECT payload_json FROM outbox WHERE topic='feed-jobs'").first();
+      await createTaskRuntime({DB:db,COLLECTION_EXECUTOR:'workflow',CAPTURE:{async create(){return {async status(){return {status:'queued'};}};}}},{now:()=>at})
+        .startJob(JSON.parse(launch.payload_json));
+    },
     'processed receipt':(db,id,at)=>db.prepare(`INSERT INTO outbox_receipts(outbox_id,topic,state,created_at,updated_at)
       SELECT id,topic,'processed',?,? FROM outbox WHERE topic='feed-jobs'`).bind(at,at).run(),
     'recent send':(db,id,at)=>db.prepare("UPDATE outbox SET updated_at=? WHERE topic='feed-jobs'").bind(at).run(),
@@ -1192,7 +1195,7 @@ test('manual launch recovery rechecks current task and delivery facts at its ato
     'superseded attempt':(db,id)=>db.prepare('UPDATE tasks SET attempt_no=2 WHERE id=?').bind(id).run(),
     'completed task':(db,id)=>db.prepare("UPDATE tasks SET state='succeeded' WHERE id=?").bind(id).run(),
   };
-  for(const [name,change] of Object.entries(changes))await t.test(name,async()=>{
+  for(const mode of ['manual','automatic requeue','automatic exhausted'])for(const [name,change] of Object.entries(changes))await t.test(mode+': '+name,async()=>{
     const {mf,db,admin}=await fixture({queueConsumer:false});
     try{
       await mf.dispatchFetch('https://feed.test/fixture/queue',{method:'POST',body:JSON.stringify({mode:'hold'})});
@@ -1200,6 +1203,8 @@ test('manual launch recovery rechecks current task and delivery facts at its ato
       const at=Date.now();
       await db.prepare("UPDATE outbox SET updated_at=? WHERE topic='feed-jobs'").bind(at-16*60_000).run();
       await db.prepare('UPDATE tasks SET due_at=? WHERE id=?').bind(at-16*60_000,id).run();
+      const attempts=mode==='automatic exhausted'?5:1;
+      await db.prepare("UPDATE outbox SET attempts=? WHERE topic='feed-jobs'").bind(attempts).run();
       let raced=false;
       const beforeWrite=async()=>{
         if(raced)return;
@@ -1221,18 +1226,21 @@ test('manual launch recovery rechecks current task and delivery facts at its ato
         async batch(statements){await beforeWrite();return db.batch(statements);},
       };
       const sends=[];
-      const runtime=createTaskRuntime({DB:raceDb,CRAWL_ENABLED:'true',TASK_RUNTIME_ENABLED:'true'},{now:()=>at,queue:{async send(...args){sends.push(args);}}});
-      const result=await runtime.recoverTask(id);
+      const runtime=createTaskRuntime({DB:raceDb,CRAWL_ENABLED:'true',TASK_RUNTIME_ENABLED:'true',CAPTURE:{async get(){return {async status(){return {status:'queued'};}};}}},{now:()=>at,queue:{async send(...args){sends.push(args);}}});
+      const result=await (mode==='manual'?runtime.recoverTask(id):runtime.recover());
       assert.equal(raced,true,'delivery facts change after the initial read and before its first write');
       assert.equal(result.recovered,0);
       assert.deepEqual(sends,[]);
       const outbox=await db.prepare("SELECT state,attempts FROM outbox WHERE topic='feed-jobs'").first();
-      assert.deepEqual(outbox,{state:'sent',attempts:1});
+      assert.deepEqual(outbox,{state:'sent',attempts});
+      assert.notEqual((await task(db,id)).state,'blocked');
+      if(name==='confirmed handoff')assert.equal((await task(db,id)).state,'starting');
     }finally{await mf.dispose();}
   });
 });
 
-test('manual launch recovery reserves one send while the first Queue acknowledgement is pending',async()=>{
+test('automatic and manual launch recovery share one send reservation while Queue acknowledgement is pending',async t=>{
+  for(const automatic of [false,true])await t.test(automatic?'automatic first':'manual first',async()=>{
   const {mf,db,admin}=await fixture({queueConsumer:false});
   let release,first;
   const pending=new Promise(resolve=>{release=resolve;});
@@ -1249,15 +1257,20 @@ test('manual launch recovery reserves one send while the first Queue acknowledge
     const runtime=createTaskRuntime({DB:db,CRAWL_ENABLED:'true',TASK_RUNTIME_ENABLED:'true'},{now:()=>at,queue:{
       async send(body){sends.push(body);if(sends.length===1)await pending;},
     }});
-    first=runtime.recoverTask(id);
+    first=automatic?runtime.recover():runtime.recoverTask(id);
     await waitFor(async()=>assert.equal(sends.length,1));
     const second=await runtime.recoverTask(id);
+    assert.deepEqual((await runtime.recover()).dispatched,[]);
+    const replay=await mf.dispatchFetch('https://feed.test/internal/operations/replay',{method:'POST',headers:{...admin.headers,'Content-Type':'application/json'},body:JSON.stringify({outboxId:sends[0].outboxId,topic:'feed-jobs'})});
+    assert.equal(replay.status,409,'manual replay shares the current delivery grace window');
     release();
-    assert.equal((await first).recovered,1);
+    const completed=await first;
+    assert.equal(automatic?completed.dispatched.length:completed.recovered,1);
     assert.equal(second.recovered,0);
     assert.equal(sends.length,1);
     assert.equal((await runtime.recoverTask(id)).recovered,0,'the acknowledgement starts another delivery grace window');
   }finally{release();await first;await mf.dispose();}
+  });
 });
 
 test('Queue crash recovery waits for expiry, preserves backoff and stops after three attempts',async()=>{

@@ -85,11 +85,12 @@ const runtimeBundle=await build({stdin:{resolveDir:process.cwd(),contents:`
   }
   export default {async fetch(request,env){
     const url=new URL(request.url),id=url.searchParams.get('id');
+    const {attempt_no:attempt}=await env.DB.prepare('SELECT attempt_no FROM tasks WHERE id=?').bind(id).first();
     if(url.pathname==='/start'){
-      const outbox=await env.DB.prepare('SELECT id FROM outbox WHERE dedupe_key=?').bind('start:'+id+':a1').first();
-      return Response.json(await createTaskRuntime(env).startJob({v:1,type:'start-job',taskId:id,attempt:1,outboxId:outbox.id}));
+      const outbox=await env.DB.prepare('SELECT id FROM outbox WHERE dedupe_key=?').bind('start:'+id+':a'+attempt).first();
+      return Response.json(await createTaskRuntime(env).startJob({v:1,type:'start-job',taskId:id,attempt,outboxId:outbox.id}));
     }
-    const instance=await env.DISCOVERY.get('task-'+id+'-a1');
+    const instance=await env.DISCOVERY.get('task-'+id+'-a'+attempt);
     return Response.json(await instance.status());
   }};
 `},bundle:true,write:false,format:'esm',platform:'neutral',external:['cloudflare:workers','node:*']});
@@ -128,7 +129,7 @@ async function liveFixture(t,{limit=3,fault='',responses=[]}={}){
           const sleep=await request.json();
           const lease=await db.prepare('SELECT owner_task_id FROM site_execution_leases WHERE site_id=?').bind(siteId).first();
           assert.notEqual(lease?.owner_task_id,sleep.taskId,'sleep must release its own site lease');
-          const receipt=await db.prepare('SELECT result_json FROM task_attempts WHERE task_id=? AND attempt_no=1').bind(sleep.taskId).first();
+          const receipt=await db.prepare('SELECT a.result_json FROM task_attempts a JOIN tasks t ON t.id=a.task_id AND t.attempt_no=a.attempt_no WHERE t.id=?').bind(sleep.taskId).first();
           assert.equal(receipt.result_json,null,'transient results must not become terminal receipts');
           sleeps.push(sleep);await hooks.onSleep?.(sleep);return new Response('ok');
         }catch(error){errors.push(error);return new Response('Observation failed',{status:500});}
@@ -152,7 +153,7 @@ async function liveFixture(t,{limit=3,fault='',responses=[]}={}){
   await db.prepare(`INSERT INTO outbox(id,topic,dedupe_key,payload_json,state,available_at,created_at,updated_at)
     VALUES ('222222222222222222222222','feed-jobs',?,?,'queued',?,?,?)`).bind(`start:${taskId}:a1`,JSON.stringify({v:1,type:'start-job',taskId,attempt:1,outboxId:'222222222222222222222222'}),now,now,now).run();
   return {mf,db,calls,sleeps,completions,hooks,async start(id=taskId){
-    await db.prepare("UPDATE outbox SET state='sent' WHERE dedupe_key=?").bind('start:'+id+':a1').run();
+    await db.prepare("UPDATE outbox SET state='sent' WHERE dedupe_key='start:'||?||':a'||(SELECT attempt_no FROM tasks WHERE id=?)").bind(id,id).run();
     const start=await mf.dispatchFetch('https://fixture.test/start?id='+id);
     assert.equal(start.status,200,await start.clone().text());
   },async run(id=taskId){await this.start(id);return this.wait(id);},async wait(id=taskId){
@@ -225,6 +226,38 @@ test('native list retries preserve the source budget, Retry-After and terminal r
     assert.equal(Boolean(JSON.parse(attempt.result_json).originAttemptsExhausted),['rate_limited','browser_transient'].includes(scenario.code));
     assert.equal((await f.db.prepare('SELECT COUNT(*) AS n FROM task_attempts').first()).n,1);
     assert.ok(f.completions.every(c=>c.stop===true),'a waiting or finished task without a successor requests container stop');
+  });
+});
+
+test('Workflow cutover preserves consumed source tries and explicit backfill budget resets',async t=>{
+  const failure={error:'Origin connection closed',code:'browser_transient',retryable:true,deferred:true};
+  for(const scenario of [
+    {name:'two legacy source failures leave only one access',kind:'discover',prior:[failure,failure],calls:1},
+    {name:'capacity, pause, lease wait and archive-only retries spend no source tries',kind:'backfill',prior:[
+      {error:'No Container available',code:'container_capacity',capacity:true,deferred:true},
+      {skipped:true},{error:'Backfill paused',paused:true,deferred:true},
+      {error:'Commit unavailable',resumeSaved:true,savedPage:true,deferred:true},failure,
+    ],calls:2},
+    {name:'manual backfill resume starts the explicitly reset budget',kind:'backfill',retryFrom:4,prior:[failure,failure,failure],calls:3},
+  ])await t.test(scenario.name,async t=>{
+    const f=await liveFixture(t,{responses:['network']});
+    const attempt=scenario.prior.length+1;
+    for(const [index,result] of scenario.prior.entries())await f.db.prepare(`INSERT INTO task_attempts(task_id,attempt_no,workflow_instance_id,state,started_at,handed_off_at,ended_at,result_json)
+      VALUES (?,?,?,'deferred',1,1,2,?)`).bind(taskId,index+1,`queue-${taskId}-a${index+1}`,JSON.stringify(result)).run();
+    await f.db.prepare('UPDATE tasks SET attempt_no=?,kind=?,backfill_retry_from=? WHERE id=?')
+      .bind(attempt,scenario.kind,scenario.retryFrom??1,taskId).run();
+    if(scenario.kind==='backfill'){
+      await f.db.prepare("UPDATE sources SET validation_state='verified',backfill_state='running',backfill_run_id='legacy-run',backfill_max_pages=10 WHERE id='runtime69'").run();
+      await f.db.prepare(`UPDATE tasks SET payload_json=json_set(payload_json,'$.mode','backfill','$.runId','legacy-run',
+        '$.windowStart','2025-11-04','$.windowEnd','2026-11-04') WHERE id=?`).bind(taskId).run();
+    }
+    await f.db.prepare(`UPDATE outbox SET dedupe_key=?,payload_json=? WHERE topic='feed-jobs'`).bind(`start:${taskId}:a${attempt}`,JSON.stringify({v:1,type:'start-job',taskId,attempt,outboxId:'222222222222222222222222'})).run();
+    const result=await f.run();
+    assert.equal(f.calls.length,scenario.calls,scenario.name);
+    assert.equal(result.originAttemptsExhausted,true);
+    assert.equal(f.sleeps.length,scenario.calls-1);
+    assert.equal((await f.db.prepare('SELECT state FROM tasks WHERE id=?').bind(taskId).first()).state,'blocked');
+    assert.equal((await f.db.prepare('SELECT COUNT(*) AS n FROM task_attempts WHERE task_id=?').bind(taskId).first()).n,attempt);
   });
 });
 
