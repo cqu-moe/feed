@@ -42,7 +42,7 @@ async function collectArticle(env,source,article,dependencies,captureContext){
     const sites=await env.DB.prepare('SELECT id FROM sites WHERE origin=?').bind(new URL(source.url).origin).all();
     if(sites.results.length===1)source={...source,siteId:sites.results[0].id};
   }
-  const data=await scrapeDependency(env,article.url,{source,...(captureContext?.siteAdmission?{siteAdmission:captureContext.siteAdmission}:{}),formats:['markdown','rawHtml',{type:'screenshot',fullPage:true}],onlyMainContent:true,actions:[{type:'executeJavascript',script:`var __name=value=>value; (${captchaPage.toString()})(${JSON.stringify(input)})`}]});
+  const data=await scrapeDependency(env,article.url,{source,directPdf:{title:input.title,uploadUrl:new URL('/internal/upload',bridgeURL).href,grant:grant.token},...(captureContext?.siteAdmission?{siteAdmission:captureContext.siteAdmission}:{}),formats:['markdown','rawHtml',{type:'screenshot',fullPage:true}],onlyMainContent:true,actions:[{type:'executeJavascript',script:`var __name=value=>value; (${captchaPage.toString()})(${JSON.stringify(input)})`}]});
   let page=data.actions?.javascriptReturns?.[0]?.value;if(typeof page==='string')page=JSON.parse(page);
   if(!page?.bodyRecognized||new URL(page.page.url).origin!==new URL(source.url).origin)throw new Error('Article body not recognized');
   const report={id:article.id,runId,url:article.url,captureFence:fence,capturedAt:new Date().toISOString(),bodyCapturedAt:page.bodyCapturedAt??null,provider:{name:'browser-container',siteId:source.siteId,statusCode:data.metadata?.statusCode,elapsedMs:data.metadata?.elapsedMs},artifacts:[],errors:[...(page.errors??[])]};
@@ -50,6 +50,8 @@ async function collectArticle(env,source,article,dependencies,captureContext){
   for(const item of page.artifacts??[]){
     if(!/^(attachment-\d+\.(pdf|docx?|xlsx?|pptx?|zip|rar|7z|bin)|snapshot\.html|offline\.html)$/.test(item.name))throw new Error('Unexpected artifact');
     const bytes=Buffer.from(item.base64,'base64');
+    if(item.name.endsWith('.html')&&!bytes.length)continue;
+    if(item.name.endsWith('.pdf')&&fileKind(bytes)!=='pdf')throw new Error('Invalid PDF signature');
     if(item.name.startsWith('attachment-')&&!fileKind(bytes))throw new Error('Invalid attachment signature');
     const saved=await put(env,prefix,item.name,bytes,item.contentType);stored.set(item.name,saved);report.artifacts.push(saved);
   }
@@ -90,10 +92,10 @@ async function collectArticle(env,source,article,dependencies,captureContext){
   body=readingText(body);
   // A PDF-only notice is still a real observation when its original cannot be
   // downloaded. Keep the empty HTML body and the failed PDF requirement together.
-  if(!body.trim()&&!(versioned&&page.attachmentCandidates?.some(row=>row.role==='body-pdf'))){
-    throw new Error('Empty article body');
-  }
-  report.artifacts.push(await put(env,prefix,'body.txt',body,'text/plain; charset=utf-8'));
+  const hasBody=!!body.trim()||page.attachmentCandidates?.some(row=>row.role==='body-pdf');
+  if(!body.trim()&&!(versioned&&(hasBody||stored.has('offline.html'))))throw new Error('Empty article body');
+  if(hasBody)report.artifacts.push(await put(env,prefix,'body.txt',body,'text/plain; charset=utf-8'));
+  else report.errors.push('Empty article body');
   if(data.markdown)report.artifacts.push(await put(env,prefix,'body.md',data.markdown,'text/markdown; charset=utf-8'));
   if(data.rawHtml)report.artifacts.push(await put(env,prefix,'rendered.html',data.rawHtml,'text/html; charset=utf-8'));
   let screenshotKey=null;

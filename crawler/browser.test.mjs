@@ -189,3 +189,41 @@ test('an explicitly empty VSB list reaches extraction instead of timing out',asy
     assert.deepEqual(result.actions.javascriptReturns[0].value,{extracted:true});
   }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
 });
+
+test('a one-use notice URL returning PDF bytes becomes a body PDF and readable archive',async()=>{
+  const bytes=Buffer.from('%PDF-1.7\nPDF container handoff\n%%EOF');
+  let requests=0;
+  const server=createServer((req,res)=>{
+    if(req.url!=='/notice/42'){res.writeHead(404);res.end();return;}
+    requests++;
+    res.writeHead(requests===1?200:410,{'content-type':'application/octet-stream','content-disposition':'attachment; filename="notice.pdf"'});
+    res.end(bytes);
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  try{
+    const url=`http://127.0.0.1:${server.address().port}/notice/42`;
+    const result=await scrapePage({url,formats:['rawHtml'],directPdf:{title:'院系通知'},
+      actions:[{type:'executeJavascript',script:'({bodyText:"wrong HTML path"})'}]},AbortSignal.timeout(10000));
+    const report=result.actions.javascriptReturns[0].value;
+    assert.equal(requests,1);
+    assert.equal(report.attachmentCandidates[0].role,'body-pdf');
+    assert.equal(report.attachmentCandidates[0].url,url);
+    assert.deepEqual(Buffer.from(report.artifacts.find(a=>a.name==='attachment-1.pdf').base64,'base64'),bytes);
+    const snapshot=Buffer.from(report.artifacts.find(a=>a.name==='offline.html').base64,'base64').toString();
+    assert.match(snapshot,/data-feed-pdf="attachment-1.pdf"/);
+    assert.equal(report.bodyText,'');
+  }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
+});
+
+test('a denied HTML document labelled as PDF cannot produce an archived original',async()=>{
+  const server=createServer((_req,res)=>{
+    res.writeHead(200,{'content-type':'application/pdf'});
+    res.end('<html>access denied</html>');
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  try{
+    const url=`http://127.0.0.1:${server.address().port}/notice`;
+    await assert.rejects(scrapePage({url,formats:[],directPdf:{title:'通知'},
+      actions:[{type:'executeJavascript',script:'({})'}]},AbortSignal.timeout(10000)),/Invalid PDF document signature/);
+  }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
+});

@@ -27,6 +27,16 @@ export async function captchaPage(input) {
   document.addEventListener('securitypolicyviolation',policy);
   let popup, listener;
   const pending=new Map();
+  function fileTarget(element){
+    const link=new URL(element.getAttribute('href')||element.getAttribute('src')||element.getAttribute('data'),location.href);
+    const file=link.searchParams.get('file');
+    const url=file?new URL(file,link):link;
+    const typedPdf=element.getAttribute('type')?.split(';')[0].trim().toLowerCase()==='application/pdf';
+    const knownViewer=file&&/\/(?:pdfjs\/web\/)?viewer\.html?$/i.test(link.pathname);
+    if(url.origin!==location.origin||!(/^https?:$/.test(url.protocol))||
+      !(typedPdf||knownViewer||/download\.jsp$|\.(?:pdf|docx?|xlsx?|pptx?|zip|rar|7z)$/i.test(url.pathname)))return null;
+    return url;
+  }
   try {
     report.bodyRecognized=false;
     if(!titleMatches())return report;
@@ -39,15 +49,24 @@ export async function captchaPage(input) {
     const candidates=[];
     for(const a of document.querySelectorAll('a[href],iframe[src],embed[src],object[data]')){
       try{
-        let url=new URL(a.getAttribute('href')||a.getAttribute('src')||a.getAttribute('data'),location.href);
-        if(url.searchParams.has('file'))url=new URL(url.searchParams.get('file'),url);
-        if(url.origin!==location.origin||!(/download\.jsp$|\.(?:pdf|docx?|xlsx?|pptx?|zip|rar|7z)$/i.test(url.pathname))||candidates.some(x=>x.url===url.href))continue;
-        candidates.push({url:url.href,name:a.innerText?.trim()||decodeURIComponent(url.pathname.split('/').pop())||'附件',role:a.tagName==='A'?'attachment':'body-pdf'});
+        const url=fileTarget(a);if(!url)continue;
+        const role=a.tagName==='A'?'attachment':'body-pdf';
+        const existing=candidates.find(x=>x.url===url.href);
+        if(existing){if(role==='body-pdf')existing.role=role;continue;}
+        candidates.push({url:url.href,name:a.innerText?.trim()||a.getAttribute('title')||decodeURIComponent(url.pathname.split('/').pop())||'附件',role});
       }catch{}
+    }
+    // Some notices consist solely of a download link; substantive HTML plus
+    // a PDF remains a web notice with an ordinary attachment.
+    if(candidates.length===1&&candidates[0].role==='attachment'&&content!==document.body){
+      const links=[...content.querySelectorAll('a[href]')];
+      if(links.length===1&&fileTarget(links[0])?.href===candidates[0].url&&
+        [links[0].getAttribute('type'),candidates[0].name,candidates[0].url].some(v=>/\.pdf(?:$|[?#])|^application\/pdf$/i.test(v??''))&&
+        report.bodyText.trim()===links[0].innerText.trim())candidates[0].role='body-pdf';
     }
     report.attachmentCandidates=candidates;report.attachmentsDiscovered=candidates.length;
     report.bodyRecognized=(document.body?.innerText?.length??0)>100
-      ||!!document.querySelector(contentSelector)&&candidates.some(item=>item.role==='body-pdf');
+      ||content!==document.body&&(!!report.bodyText||!!content.querySelector('img[src],table')||candidates.some(item=>item.role==='body-pdf'));
     if(!report.bodyRecognized)return report;
     let readyResolve;
     const ready=new Promise(resolve=>{readyResolve=resolve;});
@@ -101,9 +120,9 @@ export async function captchaPage(input) {
           row.attempts.push(attemptReport);
         }
         row.fetchedAt=new Date().toISOString();
-        row.status=response.status;row.originalFile=response.status===200&&!!response.kind;row.kind=response.kind;row.bytes=response.bytes.length;row.contentType=response.type;row.contentDisposition=response.headers.disposition;
+        row.status=response.status;row.originalFile=response.status===200&&!!response.kind&&(item.role!=='body-pdf'||response.kind==='pdf');row.kind=response.kind;row.bytes=response.bytes.length;row.contentType=response.type;row.contentDisposition=response.headers.disposition;
         if(row.originalFile){const ext=response.kind==='pdf'?'pdf':/\.(docx?|xlsx?|pptx?|zip|rar|7z)$/i.exec(item.name)?.[1]?.toLowerCase()??'bin';const name=`attachment-${index+1}.${ext}`;row.saved=response.bytes.length>2*1024*1024?await upload(name,response.bytes):save(name,response.bytes,response.type);}
-        else row.error??='CAPTCHA attempt limit reached';
+        else row.error??=item.role==='body-pdf'&&response.kind?'Expected PDF document':'CAPTCHA attempt limit reached';
       }catch(e){row.error=clean(e);}
     }
   }catch(e){report.errors.push(clean(e));}
@@ -116,7 +135,7 @@ export async function captchaPage(input) {
     try{
       for(const f of document.querySelectorAll('iframe[src],embed[src],object[data]')) {
         try {
-          let url=new URL(f.src||f.data,location.href); if(url.searchParams.has('file')) url=new URL(url.searchParams.get('file'),url);
+          const url=fileTarget(f);if(!url)continue;
           const match=report.downloads.find(d=>d.saved&&d.kind==='pdf'&&d.url===url.href);
           if(match){
             const frame=document.createElement('iframe');
@@ -129,9 +148,28 @@ export async function captchaPage(input) {
           }
         }catch{}
       }
-      (0,eval)(input.bundle);const snapshot=await singlefile.getPageData(input.options);report.snapshot=save('snapshot.html',snapshot.content,'text/html; charset=utf-8');
-      const doc=new DOMParser().parseFromString(snapshot.content,'text/html');let rewritten=0;
-      for(const a of doc.querySelectorAll('a[href]')){const match=report.downloads.find(d=>d.saved&&d.url===new URL(a.getAttribute('href'),input.url).href);if(match){a.setAttribute('href',`/api/files/${input.id}/${match.saved.name}?download=1`);a.removeAttribute('onclick');a.removeAttribute('target');rewritten++;}}
+      let doc;
+      try{
+        (0,eval)(input.bundle);
+        const snapshot=await singlefile.getPageData(input.options);
+        if(!snapshot.content?.trim())throw new Error('Empty HTML snapshot');
+        report.snapshot=save('snapshot.html',snapshot.content,'text/html; charset=utf-8');
+        doc=new DOMParser().parseFromString(snapshot.content,'text/html');
+      }catch(error){
+        // Keep the actual rendered document even if an external resource or
+        // SingleFile failed. The protected snapshot route also strips scripts.
+        report.errors.push('网页资源未完整打包：'+clean(error));
+        doc=new DOMParser().parseFromString(document.documentElement.outerHTML,'text/html');
+        const note=doc.createElement('p');
+        note.textContent='采集时已保存网页结构，部分图片或样式未能离线保存。';
+        doc.body.prepend(note);
+      }
+      let rewritten=0;
+      for(const a of doc.querySelectorAll('a[href]')){
+        let url;try{url=new URL(a.getAttribute('href'),location.href);}catch{continue;}
+        const match=report.downloads.find(d=>d.saved&&d.url===url.href);
+        if(match){a.setAttribute('href',`/api/files/${input.id}/${match.saved.name}?download=1`);a.removeAttribute('onclick');a.removeAttribute('target');rewritten++;}
+      }
       for(const f of doc.querySelectorAll('[data-feed-pdf]')){f.removeAttribute('srcdoc');f.setAttribute('src',`/api/files/${input.id}/${f.getAttribute('data-feed-pdf')}`);}
       const frames=[...document.querySelectorAll('iframe[src],embed[src],object[data]')];
       report.pdfFrames=frames.map((f,index)=>{let url;try{url=new URL(f.src||f.data,location.href);}catch{return null;}if(!url.pathname.endsWith('.pdf'))return null;return {index,url:url.href,width:f.getBoundingClientRect().width,height:f.getBoundingClientRect().height};}).filter(Boolean);

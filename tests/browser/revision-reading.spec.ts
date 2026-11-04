@@ -170,6 +170,7 @@ test('a revision without a snapshot has no fake success link', async ({ page }) 
   await page.goto(`/articles/${articleId}`);
 
   await expect(page.getByText('请根据学校要求开展优异生培养工作。')).toBeVisible();
+  await expect(page.getByText('此版本尚无网页快照')).toBeVisible();
   await expect(page.getByRole('link', { name: '网页快照', exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: '存档信息', exact: true }).click();
   await expect(page.getByRole('dialog', { name: '存档信息' }).getByRole('link', { name: '原貌存档' })).toHaveCount(0);

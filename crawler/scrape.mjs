@@ -1,3 +1,4 @@
+import {directPdfReport} from './direct-pdf.mjs';
 import {setTimeout as delay} from 'node:timers/promises';
 import {openBrowser} from './browser.mjs';
 import {isExplicitlyEmptyList} from './list-state.mjs';
@@ -20,7 +21,7 @@ export function validateJob(input){
 export async function scrapePage(job,signal){
   // CS's list carousel can stall parsing after all notice cards are present.
   const skipCarousel=Boolean(job.readiness?.articlePattern)&&new URL(job.url).hostname==='cs.cqu.edu.cn';
-  const start=Date.now(),browser=await openBrowser({signal,skipCarousel});
+  const start=Date.now(),browser=await openBrowser({signal,skipCarousel,pdfOrigin:job.directPdf?new URL(job.url).origin:null});
   try{
     await browser.navigate(job.url);
     const readyDeadline=Date.now()+120000;
@@ -28,6 +29,10 @@ export async function scrapePage(job,signal){
     const readiness=JSON.stringify(job.readiness??{});
     while(Date.now()<readyDeadline){
       signal.throwIfAborted();
+      if(browser.directPdf){
+        const value=await directPdfReport(browser.directPdf,job.directPdf,signal);
+        return {actions:{javascriptReturns:[{value}]},metadata:{provider:'browser-container',statusCode:200,elapsedMs:Date.now()-start}};
+      }
       try{state=await browser.evaluate(`(() => {
         const input=${readiness};
         const isExplicitlyEmptyList=${isExplicitlyEmptyList.toString()};
@@ -43,7 +48,8 @@ export async function scrapePage(job,signal){
           return input.allowExternalOnly&&url.origin==='https://mp.weixin.qq.com'
             &&/^\\/s(?:\\/|$)/.test(url.pathname)&&/20\\d{2}[年.\\/-]\\s*\\d{1,2}/.test(anchor.closest('li')?.textContent??'');
         }):(document.body?.innerText?.length??0)>100||!!document.querySelector('iframe[src],embed[src],object[data]');
-        return {url:location.href,parsed:document.readyState!=='loading',content:content||(!!pattern&&isExplicitlyEmptyList(document))};
+        const article=!pattern&&document.querySelector('.v_news_content, #vsb_content, #vsb_content_2, article, .article-content, .news_content');
+        return {url:location.href,parsed:document.readyState!=='loading',content:content||Boolean(article&&(article.innerText.trim()||article.querySelector('img[src],table')))||(!!pattern&&isExplicitlyEmptyList(document))};
       })()`);}
       catch(error){if(signal.aborted)throw error;}
       const status=browser.documents.at(-1)?.status;
@@ -63,8 +69,10 @@ export async function scrapePage(job,signal){
     // The page action owns body extraction; navigation text is not a substitute.
     if(job.formats.includes('markdown')&&value?.bodyText)data.markdown=value.bodyText;
     if(job.formats.some(format=>format==='screenshot'||format?.type==='screenshot')){
-      data.screenshot=await browser.screenshot();
-      if(data.screenshot.base64.length>12*1024*1024)throw new Error('Screenshot exceeds limit');
+      try{
+        const shot=await browser.screenshot();
+        if(shot.base64.length<=12*1024*1024)data.screenshot=shot;
+      }catch(error){if(signal.aborted)throw error;} // A PNG is optional; keep the HTML snapshot.
     }
     data.metadata.elapsedMs=Date.now()-start;
     return data;

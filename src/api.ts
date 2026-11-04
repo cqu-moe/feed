@@ -1,3 +1,4 @@
+import type { ReadingCell, ReadingTable } from './reading-tables';
 export type SessionUser = {
   id: string;
   name?: string;
@@ -105,6 +106,7 @@ export type ArticleOcr = {
 export type ArticleDetail = ArticleListItem & {
   bodyText: string;
   bodyHtml: string | null;
+  readingTables: ReadingTable[];
   snapshotUrl: string | null;
   screenshotUrl: string | null;
   attachments: Attachment[];
@@ -782,6 +784,24 @@ export function parseArticleRevisions(value: unknown): ArticleRevisionsResponse 
   return { revisions: value.revisions.map(parseRevision) };
 }
 
+// Treat structure as an optional enhancement. A stale/malformed projection
+// must never remove characters from the plain-text notice.
+function parseReadingTables(value: unknown, text: string): ReadingTable[] {
+  if (!Array.isArray(value)) return [];
+  const tables: ReadingTable[] = [];
+  const integer = (n: unknown, min: number, max: number): n is number =>
+    typeof n === 'number' && Number.isSafeInteger(n) && n >= min && n <= max;
+  const cell = (v: unknown): v is ReadingCell => isRecord(v) && typeof v.text === 'string'
+    && typeof v.header === 'boolean' && integer(v.rowSpan, 0, 65534) && integer(v.colSpan, 1, 1000);
+  for (const t of value) {
+    if (!isRecord(t) || !integer(t.start, tables.at(-1)?.end ?? 0, text.length)
+      || !integer(t.end, t.start + 1, text.length) || !Array.isArray(t.rows)
+      || !t.rows.every(row => Array.isArray(row) && row.every(cell))) return [];
+    tables.push({ start: t.start, end: t.end, rows: t.rows });
+  }
+  return tables;
+}
+
 export function parseArticleDetail(value: unknown): ArticleDetailResponse {
   if (
     !isRecord(value) ||
@@ -807,6 +827,9 @@ export function parseArticleDetail(value: unknown): ArticleDetailResponse {
     ...parseArticleListItem(value.article),
     bodyText: value.article.bodyText,
     bodyHtml: stringOrNull(value.article.bodyHtml),
+    readingTables: parseReadingTables(value.article.readingTables,
+      isRecord(value.article.ocr) && typeof value.article.ocr.htmlText === 'string' && value.article.ocr.htmlText
+        ? value.article.ocr.htmlText : value.article.bodyText),
     snapshotUrl: stringOrNull(value.article.snapshotUrl),
     screenshotUrl: stringOrNull(value.article.screenshotUrl),
     attachments: parsedAttachments,

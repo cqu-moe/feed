@@ -57,3 +57,18 @@ test('Snapshot preserves saved PDF frame and removes executable source content',
   assert.match(r.headers.get('content-security-policy'),/script-src 'none'/);
   assert.match(html, /通知正文/);assert.doesNotMatch(html, /<form/i);
 });
+
+test('detail restores tables from its archived HTML without dropping surrounding prose',async()=>{
+  const body='说明\n\n学院\n\n姓名\n\nA&B\n\n甲\n\n乙\n\n结束。';
+  const key='saved-roster';
+  await db.prepare('UPDATE articles SET body_text=?,snapshot_key=? WHERE id=?').bind(body,key,second).run();
+  await bucket.put(key,'<nav><table><tr><td>栏目</td></tr></table></nav><article><p>说明</p><table><tr><th>学院</th><th>姓名</th></tr><tr><td rowspan="2">A&amp;B</td><td>甲</td></tr><tr><td>乙</td></tr></table><p>结束。</p></article>');
+  const {article}=await (await mf.dispatchFetch('https://feed.test/api/articles/'+second)).json();
+  assert.equal(article.readingTables?.length,1);
+  const [table]=article.readingTables;
+  assert.deepEqual(table.rows.map(row=>row.map(cell=>cell.text)),[['学院','姓名'],['A&B','甲'],['乙']]);
+  assert.equal(table.rows[0][1].header,true);
+  assert.equal(table.rows[1][0].rowSpan,2);
+  assert.equal(body.slice(0,table.start).trim(),'说明');
+  assert.equal(body.slice(table.end).trim(),'结束。');
+});
