@@ -67,18 +67,18 @@ test('FEED03 native Queue ingestion, completeness, replay and recovery', async (
     sourceIds.push(id);
     expect((await admin(`/internal/sources/${id}`, 'PATCH', { enabled: true })).status).toBe(409);
     const validation = await ok(`/internal/sources/${id}/verify`, 'POST', { requestId: `feed03-validate-${lane}` }, 202);
-    await until(`source ${lane} validated through Queue`, async () => {
+    await until(`source ${lane} validated through Workflow`, async () => {
       const source = (await ok(`/internal/sources/${id}`)).source;
       return source.validationState === 'verified' ? source : null;
     });
     const task = await waitTask(validation.task.id, 'succeeded');
-    expect(task.attempt.workflowInstanceId).toBe(`queue-${validation.task.id}-a1`);
+    expect(task.attempt.workflowInstanceId).toBe(`task-${validation.task.id}-a1`);
     const verified = (await ok(`/internal/sources/${id}`)).source;
     expect(verified.validationJson).toMatchObject({ listPages: 2, paginationVerified: true, attachmentSample: true, snapshotSample: true, articleBody: true });
     await ok(`/internal/sources/${id}`, 'PATCH', { enabled: true });
   }
   expect((await state()).articles).toEqual([]);
-  await mark('source validation executes inside the native Queue and does not seed articles');
+  await mark('source validation executes after native Queue handoff to Workflow and does not seed articles');
 
   await ok('/internal/sources/schedule', 'POST', {}, 202);
   let observed = await until('two live ready articles and four associations', async () => {
@@ -152,13 +152,13 @@ test('FEED03 native Queue ingestion, completeness, replay and recovery', async (
   expect(replayTask.task.id).toBe(failed.task.id);
   expect((await state()).calls).toHaveLength(failedCalls);
   await control('ingestion-mode', { mode: 'baseline' });
-  await until('failed Queue attempt is terminal and recoverable', async () => {
+  await until('failed Workflow attempt is terminal and recoverable', async () => {
     const result = await ok(`/internal/operations/tasks/${failed.task.id}/recover`, 'POST', {}, 202);
     return result.recovered === 1 ? result : null;
   });
   const recovered = await waitTask(failed.task.id, 'succeeded');
   expect(recovered.task.attemptNo).toBe(2);
-  expect(recovered.attempt.workflowInstanceId).toBe(`queue-${failed.task.id}-a2`);
+  expect(recovered.attempt.workflowInstanceId).toBe(`task-${failed.task.id}-a2`);
   expect((await state()).events).toHaveLength(2);
   await mark('upstream failure, task idempotency, visible error and native terminal-attempt recovery');
 
@@ -307,9 +307,7 @@ test('FEED03 native Queue ingestion, completeness, replay and recovery', async (
   expect((await reader(browser, `/api/articles/${mainId}`)).revision.id).toBe(beforeInvalid.revision.id);
   expect(observed.tasks.filter(row => row.id === blockedOcr.id)).toHaveLength(1);
   expect(observed.attempts.every(row => {
-    const kind = observed.tasks.find(task => task.id === row.task_id)?.kind;
-    const prefix = kind === 'ocr' ? 'task' : 'queue';
-    return row.workflow_instance_id === `${prefix}-${row.task_id}-a${row.attempt_no}` && row.handed_off_at !== null;
+    return row.workflow_instance_id === `task-${row.task_id}-a${row.attempt_no}` && row.handed_off_at !== null;
   })).toBe(true);
   await mark('uncertain paid OCR response retains receipt, blocks recharge and never publishes incomplete observation');
 });

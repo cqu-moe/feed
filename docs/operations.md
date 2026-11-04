@@ -144,7 +144,7 @@ pnpm exec wrangler d1 migrations apply cqu-feed-mvp --local
 
 ## 4. T03 单篇采集任务运行时
 
-当前使用 `tasks`、`task_attempts` 和 `outbox` 保存单篇采集意图、每次执行与启动消息。新采集直接在 Queue 消费者内执行；旧 Workflow 尝试保留恢复兼容，见[采集调度](queue-collection.md)。Queue payload 只包含 `v/type/outboxId/taskId/attempt`；来源与文章 URL 始终从 D1 权威上下文读取，不接受消息或管理请求中的任意 URL。
+当前使用 `tasks`、`task_attempts` 和 `outbox` 保存单篇采集意图、每次执行与启动消息。执行方式由 `COLLECTION_EXECUTOR` 控制：`queue` 由消费者抓取，`workflow` 由消费者交给单任务 Workflow；同一次尝试保留原执行身份。切换步骤见[采集调度](queue-collection.md)。Queue payload 只包含 `v/type/outboxId/taskId/attempt`；来源与文章 URL 始终从 D1 权威上下文读取，不接受消息或管理请求中的任意 URL。
 
 上线前置条件：
 
@@ -167,7 +167,7 @@ pnpm exec wrangler d1 migrations apply cqu-feed-mvp --local
 任务状态含义：
 
 - `queued`：任务和启动 outbox 已持久化，等待 Queue。
-- `starting`/`running`：队列消费者或旧 Workflow 已接手，采集步骤正在执行。
+- `starting`/`running`：队列消费者或 Workflow 已接手。Workflow 的这次尝试也可能正在等待站点或重试。
 - `succeeded`：这次采集已结束并保存结果；文章可能仍为 partial，不能据此认定版本已完整或允许推送。
 - `deferred`：429、采集占用等暂态原因等待恢复。
 - `blocked`：402/预算耗尽、尝试上限或启动投递耗尽，需要人工处理外部条件。
@@ -175,9 +175,9 @@ pnpm exec wrangler d1 migrations apply cqu-feed-mvp --local
 
 恢复规则由每 5 分钟 cron 和手动 recover 共用：数据库已提交但 Queue 暂不可用时，outbox 保留并在到期后重发；Queue 已接收但 sent 收据未提交时允许重复发送，消费者按持久任务身份幂等。create 结果未知或记账失败时使用同一 `task-<taskId>-a<attempt>` 实例 ID 查询，不创建随机新实例。只有确认旧实例 terminal 后，到期 deferred 才递增 attempt 并原子写入新 outbox。
 
-网络断开、超时和暂态服务错误进入有限退避；确认的 404、解析和文件错误明确失败。源站 429 保存为 `rate_limited` deferred，默认最多 3 次 attempt；402、预算或额度耗尽保存为 `quota_exhausted` blocked，不按分钟级自动重试。`Archive.capture` 抢占失败返回 skipped 时任务只能延期，不能记成功；这可能表示其他有效采集持有 lease。R2 临时产物允许留下，attachment、article 更新和 task attempt receipt 必须由同一 fence、attempt 和提交时间守卫下的 D1 原子批发布；旧 attempt 或过期 fence 不能污染权威数据。
+网络断开、超时和暂态服务错误进入有限退避；确认的 404、解析和文件错误明确失败。Queue 执行方式遇到源站 429 会延期；Workflow 执行方式在同一实例中尊重 Retry-After，默认最多向源站尝试 3 次（含第一次）；402、预算或额度耗尽保存为 `quota_exhausted` blocked，不按分钟级自动重试。`Archive.capture` 抢占失败返回 skipped 时任务只能延期，不能记成功；这可能表示其他有效采集持有 lease。R2 临时产物允许留下，attachment、article 更新和 task attempt receipt 必须由同一 fence、attempt 和提交时间守卫下的 D1 原子批发布；旧 attempt 或过期 fence 不能污染权威数据。
 
-本地测试使用真实 Miniflare D1/R2/Queue、真实业务采集代码、浏览器外部边界替身和可控 Workflow 执行适配器。Miniflare Queue broker 是内存态，本地投递和恢复通过不能证明 Cloudflare 队列留存、DLQ、实际 Workflow 持久步骤或生产账号额度行为；这些属于后续隔离云验收。
+本地测试使用真实 Miniflare D1/R2/Queue、真实业务采集代码、浏览器外部边界替身和可控 Workflow 执行适配器。Miniflare Queue broker 是内存态，本地投递和恢复通过不能证明 Cloudflare 的实际投递时间或平台并发。两项的实测记录见[隔离演练](../live/FEED-63/README.md)；演练未测生产账号额度。
 
 ## 4A. T15 运行诊断与恢复
 
@@ -320,7 +320,7 @@ Cron 每天采集的 5 个来源来自 `worker/sources.json`：
 
 这些路径均相对于各自站点 origin；正文链接必须匹配对应 `articlePattern` 且保持同源。
 
-当前 `0 * * * *` Cron 只为启用、验证通过且到期的栏目写入任务和 outbox；Queue 消费者执行浏览器工作。站点对应一个稳定 Container 身份，同站任务串行，排队和长退避留在 Worker。详见 [按站采集设计](container-collection-rollout.md)。
+当前 `0 * * * *` Cron 只为启用、验证通过且到期的栏目写入任务和 outbox；Queue 在消息的延迟时间结束后交给所配置的执行器。站点对应一个稳定 Container 身份，同站访问串行；Workflow 执行方式在实例内等待重试，不让容器空等。详见 [按站采集设计](container-collection-rollout.md)。
 
 旧 `FeedIngest` 保留平台类供历史实例结束，但调用只返回 retired，不再读取来源或抓取通知。管理入口 `/internal/run` 只调度当前到期栏目并派发既有任务，不补跑历史失败任务、不启动旧 Workflow。
 
@@ -501,7 +501,7 @@ node scripts/compare-ocr.mjs publish textin-xparse-auto
 
 一个 backfill 任务只处理一页。游标、通知发现、去重计数、下一页任务、outbox 与页回执同批提交；文章去重存 `backfill_seen_articles`，不将所有文章 ID 复制进后续 payload。`MAX_BACKFILL_PAGES_PER_RUN` 默认 100，上限 1000；到达页数上限且还有后续页时保存游标并进入 `paused`，不会显示完成。可通过 `/backfill/resume` 显式提交 `{ "maxPages": 200 }` 增加本次总页数上限；最大 1000，仍有后续页时需人工检查分页配置。此时游标与 R2 列表原件保留，页面显示人工检查提示，但不留下无法执行的 page 1001 任务或 outbox。游标 JSON 上限 128 KiB，超出进入可见失败并保留原 R2 列表回执，不截断后假报完成。
 
-日常发现不再使用旧 `MAX_LIVE_DISCOVERY_TASKS_PER_RUN` 每分钟配额；到期栏目直接排队，由 `feed-jobs` 每批一条、最大并发两个限制实际执行。历史补抓保留 `MAX_BACKFILL_TASKS_PER_RUN`（默认 5，范围 0–100，0 暂停新准入），避免历史任务挤占日常采集；`DISCOVERY_ADMISSION_INTERVAL_SEC` 默认 60，范围 60–3600。历史页的管理员启动、分页继续和重试复用 `discovery_admissions` 中的 task/attempt 准入，配额不足时保留原任务与 outbox。派发前优先安排到期 live，不依赖 Queue 完成顺序保证优先级。
+日常发现不再使用旧 `MAX_LIVE_DISCOVERY_TASKS_PER_RUN` 每分钟配额；到期栏目由整点扫描排队。整点扫描按站点错开本小时的定时首页任务，Queue 原生延迟后交接；同站一次抓一项，不设置跨站两项的业务上限。执行方式切换参见[采集调度](queue-collection.md)。历史补抓保留 `MAX_BACKFILL_TASKS_PER_RUN`（默认 5，范围 0–100，0 暂停新准入），避免历史任务挤占日常采集；`DISCOVERY_ADMISSION_INTERVAL_SEC` 默认 60，范围 60–3600。历史页的管理员启动、分页继续和重试复用 `discovery_admissions` 中的 task/attempt 准入，配额不足时保留原任务与 outbox。派发已有任务时优先取日常列表。派发积压不额外扫描到期栏目。
 
 五分钟恢复任务会清理过期的 discovery permit：`DISCOVERY_ADMISSION_RETENTION_MS` 默认 7 天，范围 1 小时–30 天。只有超过保留期，且任务已 `succeeded`/`cancelled`，或 permit 所属 attempt 已被任务当前更大的 attempt 取代时才会删除；活跃 attempt 以及仍可能用于人工恢复的 failed/blocked/deferred 同 attempt permit 保留。每次恢复最多清理 100 条，剩余记录由后续轮次继续处理。
 
