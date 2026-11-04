@@ -191,6 +191,7 @@ export interface ReadingOptions {
   snapshots?: Record<string, Buffer | string>;
   screenshots?: Record<string, Buffer | string>;
   authenticated?: boolean;
+  admin?: boolean;
   entitled?: boolean;
   historyStatus?: number;
   historyDelay?: number;
@@ -237,7 +238,7 @@ export async function installReadingRoutes(page: Page, options: ReadingOptions =
         ? unreadyDetail
         : detail;
     const json = (body: unknown, status = 200) => route.fulfill({ status, json: body });
-    if (path === '/api/session') return json({ authenticated: options.authenticated ?? true, entitled: options.entitled ?? true, user: { id: 'browser-fixture', name: '测试读者' } });
+    if (path === '/api/session') return json({ authenticated: options.authenticated ?? true, entitled: options.entitled ?? true, admin: options.admin ?? false, user: { id: 'browser-fixture', name: '测试读者' } });
     if (options.authenticated === false) return json({ error: 'unauthorized' }, 401);
     if (options.entitled === false) return json({ error: 'forbidden' }, 403);
     if (path === '/api/sources') return json({ sources: options.sources ?? [{ id: 'academic', siteId: 'university', name: '教务处', url: 'https://example.edu/', lastRunAt: null, articleCount: 1 }] });

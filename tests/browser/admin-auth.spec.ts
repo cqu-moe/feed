@@ -97,8 +97,16 @@ test('admins enter task management through the session and never send Bearer hea
   await page.goto('/admin/tasks');
 
   await expect(page.getByRole('heading', { level: 1, name: '采集任务管理' })).toBeVisible();
-  await expect(page.getByText('邮件发送未启用')).toBeVisible();
+  await expect(page.getByText('还没有采集任务。')).toBeVisible();
+  expect(authorizationHeaders).toHaveLength(1);
+  await page.getByRole('button', { name: '手动采集' }).click();
   await expect(page.getByLabel('通知 ID')).toBeVisible();
+  await page.getByRole('tab', { name: '运行诊断' }).click();
+  await expect(page.getByText('三条业务队列没有超过重试窗口的未确认消息。')).toBeVisible();
+  await page.getByRole('tab', { name: '订阅匹配' }).click();
+  await expect(page.getByRole('heading', { name: '通知匹配' })).toBeVisible();
+  await page.getByRole('tab', { name: '邮件投递' }).click();
+  await expect(page.getByText('邮件发送未启用')).toBeVisible();
   await expect(page.getByText('管理员凭据')).toHaveCount(0);
   await expect(page.getByText('Bearer')).toHaveCount(0);
   expect(authorizationHeaders).toHaveLength(4);
