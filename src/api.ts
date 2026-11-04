@@ -40,6 +40,7 @@ export type Session = {
 export type Source = {
   id: string;
   siteId: string;
+  siteName?: string | null;
   name: string;
   url: string;
   listUrl?: string | null;
@@ -321,6 +322,7 @@ function parseSource(value: unknown): Source {
   return {
     id: value.id,
     siteId: value.siteId,
+    siteName: stringOrNull(value.siteName),
     name: value.name,
     url: value.url,
     listUrl: stringOrNull(value.listUrl),

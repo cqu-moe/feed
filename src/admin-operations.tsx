@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { Alert, AlertDescription, AlertTitle, Button, PageState } from '@cqu-moe/ui';
 import { RefreshCw } from 'lucide-react';
+import { recoverListedTask } from './task-recovery';
 import { adminRequestMessage, requestJson } from './api';
 
 type BusinessId = string | null;
@@ -231,12 +232,6 @@ function parseMetrics(value: unknown): Diagnostics['metrics'] {
   return value as Diagnostics['metrics'];
 }
 
-function parseRecoveryResult(value: unknown): { state: string; recovered: number } {
-  if (!isRecord(value) || typeof value.state !== 'string' || !nonNegativeInteger(value.recovered))
-    throw new Error('任务恢复结果不完整。');
-  return { state: value.state, recovered: Number(value.recovered) };
-}
-
 export function AdminOperationsPanel() {
   const [state, setState] = useState<LoadState>({ kind: 'loading' });
   const [reloadKey, setReloadKey] = useState(0);
@@ -293,11 +288,8 @@ export function AdminOperationsPanel() {
   function recoverTask(task: TaskDiagnostic) {
     const key = `task:${task.id}`;
     void runAction(key, async () => {
-      const result = await requestJson(`/internal/operations/tasks/${task.id}/recover`, parseRecoveryResult, {
-        method: 'POST',
-      });
-      if (!result.ok) throw new Error(adminRequestMessage(result.status, '恢复', result.message));
-      setNotice(result.data.recovered === 1
+      const result = await recoverListedTask(task.id);
+      setNotice(result.recovered === 1
         ? `已为任务 ${task.id} 创建第 ${task.attemptNo + 1} 次执行。`
         : `任务 ${task.id} 仍在 ${task.state}，未重复启动。`);
     });

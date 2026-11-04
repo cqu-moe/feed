@@ -1,69 +1,36 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link } from 'react-router';
-import { Alert, AlertDescription, AlertTitle, Button, ContentContainer, Input, Label, PageHeader, PageState } from '@cqu-moe/ui';
-import { RefreshCw } from 'lucide-react';
-import { articleStatusLabel, formatDateTime, StandaloneHeader } from './components';
+import { Alert, AlertDescription, AlertTitle, Button, ContentContainer, Input, Label, PageHeader, Tabs, TabsContent, TabsList, TabsTrigger } from '@cqu-moe/ui';
+import { Plus, RefreshCw } from 'lucide-react';
+import { StandaloneHeader } from './components';
 import { AdminMailPanel } from './admin-mail';
 import { AdminNotificationEvents } from './admin-notifications';
 import { AdminOperationsPanel } from './admin-operations';
 import { adminRequestMessage, requestJson } from './api';
-
-type Task = {
-  id: string; kind?: string; sourceId?: string; articleId: string | null; articleTitle?: string; state: string;
-  attemptNo: number; workflowInstanceId: string | null; attemptState: string | null;
-  articleStatus: string | null; dueAt: number; lastError: string | null;
-  createdAt?: number; updatedAt?: number;
-  missingRequirements?: Array<{ kind: string; name: string | null; filename: string | null; state: string; error: string | null }>;
-};
-const states: Record<string, string> = {
-  queued: '等待接手', starting: '正在交接', running: '执行中', succeeded: '执行结束',
-  deferred: '已延期', blocked: '等待处理', failed: '执行失败', cancelled: '已取消',
-};
-function parseTask(value: unknown): Task {
-  if (!value || typeof value !== 'object') throw new Error('任务数据不完整。');
-  const row = value as Record<string, unknown>;
-  if (typeof row.id !== 'string' || !/^[a-f0-9]{24}$/.test(row.id)
-    || (row.articleId !== null && (typeof row.articleId !== 'string' || !/^[a-f0-9]{24}$/.test(row.articleId)))
-    || typeof row.state !== 'string' || !Object.hasOwn(states, row.state)
-    || !Number.isSafeInteger(row.attemptNo) || typeof row.dueAt !== 'number') throw new Error('任务数据不完整。');
-  for (const key of ['workflowInstanceId', 'attemptState', 'articleStatus', 'lastError']) {
-    if (row[key] !== null && typeof row[key] !== 'string') throw new Error('任务状态不完整。');
-  }
-  if (row.missingRequirements !== undefined && !Array.isArray(row.missingRequirements)) throw new Error('任务缺项数据不完整。');
-  for (const requirement of row.missingRequirements ?? []) {
-    if (!requirement || typeof requirement !== 'object' || typeof requirement.kind !== 'string'
-      || typeof requirement.state !== 'string' || (requirement.name !== null && typeof requirement.name !== 'string')
-      || (requirement.filename !== null && typeof requirement.filename !== 'string')
-      || (requirement.error !== null && typeof requirement.error !== 'string')) throw new Error('任务缺项数据不完整。');
-  }
-  return row as Task;
-}
-function parseList(value: unknown): Task[] {
-  if (!value || typeof value !== 'object' || !('tasks' in value) || !Array.isArray(value.tasks)) throw new Error('任务列表不完整。');
-  return value.tasks.map(parseTask);
-}
-function parseCreated(value: unknown): Task {
-  if (!value || typeof value !== 'object' || !('task' in value)) throw new Error('任务未返回确认结果。');
-  return parseTask(value.task);
-}
-const label = (state: string | null) => state ? states[state] ?? state : '尚未接手';
-const taskTime = (value: number | undefined) => typeof value === 'number' && Number.isFinite(value)
-  ? formatDateTime(new Date(value).toISOString()) : '未记录';
+import { parseList, parseCreated, states, type Task, type TaskState } from './task-list-data';
+import { TaskDirectory } from './task-directory';
+import { recoverListedTask } from './task-recovery';
+import './task-management.css';
 
 export function AdminTasksPage() {
-  const [tasks, setTasks] = useState<Task[]>([]);
+  const [tasks, setTasks] = useState<Task[] | null>(null);
   const [articleId, setArticleId] = useState('');
   const [selected, setSelected] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const intent = useRef<{ articleId: string; requestId: string } | null>(null);
-  const activeTask = tasks.find(task => task.id === selected);
+  const [diagnosticRevision, setDiagnosticRevision] = useState(0);
+  const [tab, setTab] = useState('tasks');
+  const [showForm, setShowForm] = useState(false);
+  const [filter, setFilter] = useState<TaskState | 'all'>('failed');
+  const [initialLoading, setInitialLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
     requestJson('/internal/capture-tasks', parseList).then(result => {
       if (cancelled) return;
+      setInitialLoading(false);
       if (!result.ok) setError(adminRequestMessage(result.status, '读取', result.message));
       else setTasks(result.data);
     });
@@ -76,7 +43,7 @@ export function AdminTasksPage() {
     setTasks(result.data);
   }
   async function action(run: () => Promise<void>) {
-    if (busy) return;
+    if (busy || initialLoading) return;
     setBusy(true); setError(''); setNotice('');
     try { await run(); } catch (cause) { setError(cause instanceof Error ? cause.message : '操作未确认，请稍后重试。'); }
     finally { setBusy(false); }
@@ -92,9 +59,17 @@ export function AdminTasksPage() {
       });
       if (!result.ok) throw new Error(adminRequestMessage(result.status, '提交', result.message));
       setSelected(result.data.id);
-      setTasks(prior => [result.data, ...prior.filter(task => task.id !== result.data.id)]);
-      setNotice('采集任务已保存。刷新状态可查看接手与归档结果。');
+      setTasks(prior => [result.data, ...(prior ?? []).filter(task => task.id !== result.data.id)].slice(0, 50));
+      setFilter(result.data.state); setTab('tasks'); setShowForm(false);
+      setNotice('采集任务已创建。');
       intent.current = null;
+    });
+  }
+  function retry(task: Task) {
+    void action(async () => {
+      const result = await recoverListedTask(task.id);
+      setNotice(result.recovered ? '已将这条任务重新排队。' : '没有启动新执行。当前状态：' + (states[result.state as TaskState] ?? result.state) + '。');
+      await load();
     });
   }
   function recover() {
@@ -103,8 +78,9 @@ export function AdminTasksPage() {
         method: 'POST',
       });
       if (!result.ok) throw new Error(adminRequestMessage(result.status, '恢复', result.message));
-      await load();
+      setDiagnosticRevision(value => value + 1);
       setNotice('已检查到期任务。余额不足和需要人工处理的任务会保留原因。');
+      await load();
     });
   }
 
@@ -115,63 +91,40 @@ export function AdminTasksPage() {
       </Button>
     } />
     <ContentContainer width="standard">
-      <div className="feed-admin-content">
-        <PageHeader title="采集任务管理" description="对已发现的通知发起采集，查看任务接手、延期和归档结果。" />
-        {error && <Alert variant="destructive"><AlertTitle>操作未完成</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
+      <div className="feed-admin-content task-page">
+        <PageHeader title="采集任务管理" description="先处理失败任务，再查看其他执行记录。"
+          actions={<Button variant="outline" disabled={initialLoading || busy} aria-expanded={showForm} onClick={() => setShowForm(!showForm)}><Plus aria-hidden="true" />手动采集</Button>} />
+        {error && <Alert variant="destructive"><AlertTitle>{notice ? '列表刷新失败' : '操作未完成'}</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
         {notice && <p role="status">{notice}</p>}
-        <>
-          <form className="feed-card feed-admin-form" onSubmit={submit}>
-            <Label htmlFor="capture-article-id">通知 ID</Label>
-            <Input id="capture-article-id" value={articleId} onChange={event => setArticleId(event.target.value)} placeholder="通知阅读链接中的 24 位 ID" maxLength={24} required disabled={busy} />
-            <div className="feed-card-actions">
-              <Button type="submit" disabled={busy || !articleId}>{busy ? '正在处理…' : '发起一次采集'}</Button>
-              <Button type="button" variant="outline" disabled={busy} onClick={() => void action(() => load())}><RefreshCw aria-hidden="true" />刷新状态</Button>
-              <Button type="button" variant="outline" disabled={busy} onClick={recover}>恢复到期任务</Button>
+        {showForm && <form className="feed-card feed-admin-form" onSubmit={submit}>
+          <Label htmlFor="capture-article-id">通知 ID</Label>
+          <Input id="capture-article-id" value={articleId} onChange={event => setArticleId(event.target.value)} placeholder="通知阅读链接中的 24 位 ID" maxLength={24} required disabled={busy} />
+          <Button type="submit" disabled={busy || !articleId}>{busy ? '正在处理…' : '发起一次采集'}</Button>
+        </form>}
+        <Tabs value={tab} onValueChange={setTab} className="feed-task-tabs">
+          <TabsList variant="line" aria-label="管理视图">
+            <TabsTrigger value="tasks">任务列表</TabsTrigger>
+            <TabsTrigger value="diagnostics">运行诊断</TabsTrigger>
+            <TabsTrigger value="events">订阅匹配</TabsTrigger>
+            <TabsTrigger value="mail">邮件投递</TabsTrigger>
+          </TabsList>
+          <TabsContent value="tasks">
+            <div className="task-list-tools">
+              <span>按创建时间显示最近 50 条任务</span>
+              <Button variant="ghost" size="sm" disabled={busy || initialLoading} onClick={() => void action(load)}><RefreshCw aria-hidden="true" />刷新状态</Button>
             </div>
-          </form>
-          {activeTask && <section className="feed-card feed-admin-detail" aria-label="所选任务详情">
-            <h2>任务详情</h2>
-            <dl className="feed-source-meta">
-              <div><dt>任务</dt><dd>{label(activeTask.state)} · 第 {activeTask.attemptNo} 次执行</dd></div>
-              <div><dt>创建时间</dt><dd>{taskTime(activeTask.createdAt)}</dd></div>
-              <div><dt>状态更新时间</dt><dd>{taskTime(activeTask.updatedAt)}</dd></div>
-              <div><dt>Workflow 接手</dt><dd>{label(activeTask.attemptState)}</dd></div>
-              <div><dt>通知归档</dt><dd>{activeTask.articleStatus ? articleStatusLabel(activeTask.articleStatus) : '未记录'}</dd></div>
-              {activeTask.state === 'deferred' && <div><dt>最早恢复时间</dt><dd>{formatDateTime(new Date(activeTask.dueAt).toISOString())}</dd></div>}
-              {(activeTask.missingRequirements?.length ?? 0) > 0 && <div className="feed-admin-missing">
-                <dt>必要内容缺项</dt>
-                <dd>
-                  <ul>
-                    {(activeTask.missingRequirements ?? []).map(requirement => (
-                      <li key={`${requirement.kind}-${requirement.filename ?? requirement.name ?? ''}`}>
-                        {requirement.name ?? requirement.filename ?? requirement.kind} · {requirement.error ?? requirement.state}
-                      </li>
-                    ))}
-                  </ul>
-                </dd>
-              </div>}
-            </dl>
-            <p className="feed-admin-id">任务 ID：{activeTask.id}</p>
-            <p className="feed-admin-id">实例 ID：{activeTask.workflowInstanceId ?? '尚未创建'}</p>
-            {activeTask.lastError && <p role="status">{activeTask.lastError}</p>}
-            {activeTask.articleId && <Button asChild variant="outline"><Link to={`/articles/${activeTask.articleId}`}>查看通知</Link></Button>}
-          </section>}
-          <AdminOperationsPanel />
-          <AdminNotificationEvents />
-          <AdminMailPanel />
-          <section aria-label="最近采集任务">
-            <h2>最近采集任务</h2>
-            <p>列表保留历史执行结果；请结合状态更新时间判断近期运行情况。</p>
-            <p><a href="https://us.posthog.com/project/662666/dashboard/2205863" target="_blank" rel="noreferrer">在 PostHog 查看采集趋势与积压</a></p>
-            {tasks.length === 0 ? <PageState state="empty" title="还没有采集任务" description="填写已发现通知的 ID，发起第一次采集。" /> :
-              <div className="feed-article-list">{tasks.map(task => <article className="feed-card" key={task.id}>
-                <div className="feed-article-topline"><strong>{task.articleTitle ?? task.articleId ?? `栏目发现 / 验证 · ${task.sourceId ?? ''}`}</strong><span className="feed-status">{label(task.state)}</span></div>
-                <p>状态更新：{taskTime(task.updatedAt)} · 第 {task.attemptNo} 次执行</p>
-                <p className="feed-admin-id">{task.id}</p>
-                <Button variant="outline" onClick={() => setSelected(task.id)} aria-pressed={selected === task.id}>查看任务详情</Button>
-              </article>)}</div>}
-          </section>
-        </>
+            {initialLoading && <p role="status">正在读取任务…</p>}
+            {tasks && <TaskDirectory tasks={tasks} filter={filter} onFilter={value => { setSelected(null); setFilter(value); }}
+              revealId={selected} busy={busy} onRetry={retry} />}
+          </TabsContent>
+          <TabsContent value="diagnostics">
+            <div className="feed-diagnostic-tools"><Button variant="outline" size="sm" disabled={busy || initialLoading} onClick={recover}>恢复到期任务</Button>
+              <a className="feed-plain-link" href="https://us.posthog.com/project/662666/dashboard/2205863" target="_blank" rel="noreferrer">查看采集趋势与积压</a></div>
+            <AdminOperationsPanel key={diagnosticRevision} />
+          </TabsContent>
+          <TabsContent value="events"><AdminNotificationEvents /></TabsContent>
+          <TabsContent value="mail"><AdminMailPanel /></TabsContent>
+        </Tabs>
       </div>
     </ContentContainer>
   </div>;
