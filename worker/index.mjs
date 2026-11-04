@@ -2,6 +2,7 @@ import {themeInitScript} from '@cqu-moe/theme';
 import {Buffer} from 'node:buffer';
 import {session,authRoute} from './auth.mjs';
 import {bridgeRoute} from './bridge.mjs';
+import {runBailianSync} from './bailian-sync.mjs';
 import {apiRoute} from './api.mjs';
 import {internalRoute} from './internal.mjs';
 import {subscriptionsRoute} from './subscriptions.mjs';
@@ -41,6 +42,7 @@ export default {
       })());
       if(env.ARCHIVE_VERSIONS_ENABLED==='true')jobs.push(createArchiveRecheck(env).scheduleDue());
     }
+    if(controller.cron==='*/5 * * * *'&&env.BAILIAN_SEARCH_WRITES==='true')jobs.push(runBailianSync(env));
     if(controller.cron==='*/5 * * * *'&&env.TASK_RUNTIME_ENABLED==='true'){
       jobs.push(createTaskRuntime(env).recover());
       jobs.push(captureFeedPipelineSummaries(env,ctx).catch(()=>{}));

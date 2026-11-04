@@ -2,6 +2,8 @@
 
 本文描述当前实现；实际生产启用范围与验收见 [release-production.md](release-production.md)。不包含 secret 值，本地测试通过不等于生产补抓完成。
 
+通知搜索单独见[百炼配置、功能验收与回滚](bailian-search-operations.md)。
+
 ## 1. 资源与配置
 
 `wrangler.jsonc` 当前绑定：
