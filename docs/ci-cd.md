@@ -35,6 +35,18 @@ GitHub CI 与 Cloudflare Builds 独立触发，因此 Cloudflare Build command �
 
 参考：[Workers Git integration](https://developers.cloudflare.com/workers/ci-cd/builds/git-integration/)、[Build configuration](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/)、[Build image](https://developers.cloudflare.com/workers/ci-cd/builds/build-image/)。
 
+## 上线后核验采集栏目
+
+涉及采集或来源状态的发布，先核实目标提交已承接生产流量。在已登录的 Feed 状态页刷新后，保存同次 `GET /api/sources` 的 JSON 响应到本地，记下采样时刻。使用该发布提交的 checkout 和 `.nvmrc` 指定的 Node；预期数从当期来源清单单独核实，只计站点和栏目均启用的项。
+
+```sh
+pnpm run check:release:sources "$sources_json" "$observed_at" "$expected_enabled"
+```
+
+命令复用状态页的判定，使用带时区的采样时间回放。退出 0 表示预期数量的启用栏目全部正常；1 列出异常栏目和最近检查时间；2 表示输入或覆盖不足，无法验收。把结果、采样时间和在服版本一起记入发布记录。CI 只用合成样本验证命令，不读取生产会话。
+
+列表正常不能证明文章已归档。若改动涉及正文、附件或网页快照，从阅读页打开本次受影响的通知版本，逐项记录可读结果。
+
 ## 本地浏览器回归
 
 首次运行先执行 `pnpm exec playwright install chromium`，再执行 `pnpm test:browser`。测试会构建前端并启动独立预览服务，不复用已有开发服务器。多 worktree 并行时用 `FEED_TEST_PORT=5191 pnpm test:browser` 指定不同端口。已安装 Chrome 的本地环境也可使用 `PLAYWRIGHT_CHANNEL=chrome pnpm test:browser`，测试仍创建独立无头浏览器上下文。
