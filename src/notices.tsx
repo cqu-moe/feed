@@ -198,6 +198,12 @@ export function ArticlesPage() {
     return search;
   }
 
+  function browseOnSelection(nextSite: string, nextSource: string) {
+    if (query.trim() || committedQuery.trim() || from !== committedFrom || to !== committedTo) return;
+    const next = canonicalSearch('', nextSource, nextSite, committedFrom, committedTo);
+    if (next.toString() !== params.toString()) setParams(next, { replace: false });
+  }
+
   function updatePage(nextPage: number) {
     const search = canonicalSearch(
       committedQuery,
@@ -302,7 +308,9 @@ export function ArticlesPage() {
             onValueChange={(value) => {
               const nextSite = value === 'all' ? '' : value;
               setSite(nextSite);
-              if (nextSite && draftSelectedSource?.siteId !== nextSite) setSource('');
+              const nextSource = nextSite && draftSelectedSource?.siteId !== nextSite ? '' : source;
+              setSource(nextSource);
+              browseOnSelection(nextSite, nextSource);
             }}
           >
             <SelectTrigger id="notice-site" className="notice-site-trigger" aria-label="按发布站点筛选">
@@ -328,7 +336,9 @@ export function ArticlesPage() {
           <Select
             value={source || 'all'}
             onValueChange={(value) => {
-              setSource(value === 'all' ? '' : value);
+              const nextSource = value === 'all' ? '' : value;
+              setSource(nextSource);
+              browseOnSelection(site, nextSource);
             }}
           >
             <SelectTrigger id="notice-source" className="notice-source-trigger" aria-label="按来源筛选">
