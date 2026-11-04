@@ -34,7 +34,7 @@ import {
 } from './components';
 import { OcrReading } from './ocr-reading';
 import { captureFeedEvent } from './telemetry';
-import { removeReadingNoise } from '../shared/reading-noise.mjs';
+import { readingParagraphs, TableProse } from './reading-tables';
 
 type RequestState<T> =
   | { kind: 'loading' }
@@ -95,8 +95,6 @@ const requirementErrors = new Map([
   ['attachment_missing', '附件未保存成功'],
 ]);
 
-const pdfTextUnavailable = 'PDF 正文暂未提取到可搜索文字；可在下方阅读原文件。';
-
 function revisionStateLabel(state: string): string {
   return revisionStates.get(state) ?? state;
 }
@@ -149,13 +147,6 @@ function pdfReaderUrl(articleId: string, attachment: Attachment, revisionId?: st
 function attachmentFormat(attachment: Attachment): string {
   const extension = attachment.name.match(/\.([a-z0-9]+)$/i)?.[1];
   return extension?.toUpperCase() ?? attachment.contentType ?? '未知格式';
-}
-
-function readingParagraphs(value: string): string[] {
-  return removeReadingNoise(value.replace(/\r\n/g, '\n'))
-    .split(/\n{2,}/)
-    .map(paragraph => paragraph.trim())
-    .filter(paragraph => paragraph && paragraph !== pdfTextUnavailable);
 }
 
 function accessibleBodyPdf(attachment: Attachment): attachment is ReadablePdfAttachment {
@@ -340,6 +331,10 @@ export function ArticleDetailPage() {
     : undefined;
   const activeRevisionId = revision?.id ?? selectedRevision?.id ?? currentRevisionId;
   const canReadRevision = !revision || revision.state === 'ready';
+  const partialSnapshot = revision && !canReadRevision
+    && requirements?.some(item => item.kind === 'snapshot' && item.state === 'fulfilled')
+    && article.snapshotUrl === `/api/articles/${article.id}/revisions/${revision.id}/snapshot`
+    ? article.snapshotUrl : null;
   const newestRevision = [...revisions].sort(
     (a, b) => Date.parse(b.observedAt) - Date.parse(a.observedAt),
   )[0];
@@ -422,12 +417,14 @@ export function ArticleDetailPage() {
         <Alert variant={revision.state === 'blocked' ? 'destructive' : 'default'} className="feed-revision-alert">
           <AlertTitle>{revisionStateLabel(revision.state)}的版本不能作为完整阅读</AlertTitle>
           <AlertDescription>
-            这次观察只显示元数据和缺项原因。正文、附件链接和原貌入口会在全部必需产物验证后开放。
+            正文和附件尚未完整。{partialSnapshot
+              ? <a className="feed-text-action" href={partialSnapshot}>查看已保存的网页快照</a>
+              : '此版本尚无可读的网页快照。'}
           </AlertDescription>
         </Alert>
       )}
 
-      {canReadRevision && (currentDocument.bodyPdfs.length > 0 || Boolean(article.snapshotUrl)) && (
+      {canReadRevision && (
         <nav className="feed-reading-mode" aria-label="阅读方式">
           <Button
             type="button"
@@ -473,11 +470,13 @@ export function ArticleDetailPage() {
               </Fragment>
             );
           })}
-          {article.snapshotUrl && (
+          {article.snapshotUrl ? (
             <a className="feed-text-action" href={article.snapshotUrl}>
               网页快照
               <ExternalLink aria-hidden="true" />
             </a>
+          ) : (
+            <span className="feed-reading-mode-warning">此版本尚无网页快照</span>
           )}
           {currentDocument.bodyPdfs.length > 1 && selectedBodyPdf && (
             <span className="feed-selected-original">当前原件：{selectedBodyPdf.name}</span>
@@ -536,7 +535,8 @@ export function ArticleDetailPage() {
         article={article}
         revision={revision ?? selectedRevision}
         canRead={canReadRevision}
-        requirements={selectedRevision ? requirements ?? [] : []}
+        snapshotUrl={canReadRevision ? article.snapshotUrl : partialSnapshot}
+        requirements={requirements ?? []}
       />
     </article>
   );
@@ -661,7 +661,9 @@ function ArchiveSheet({
   revision,
   canRead,
   requirements,
+  snapshotUrl,
 }: {
+  snapshotUrl: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   article: ArticleDetailResponse['article'];
@@ -705,9 +707,9 @@ function ArchiveSheet({
                 原始通知
               </a>
             </Button>
-            {canRead && article.snapshotUrl && (
+            {snapshotUrl && (
               <Button asChild variant="outline">
-                <a href={article.snapshotUrl} target="_blank" rel="noreferrer">
+                <a href={snapshotUrl} target="_blank" rel="noreferrer">
                   <Archive aria-hidden="true" />
                   原貌存档
                 </a>
@@ -765,7 +767,9 @@ function ArticleBody({
 }) {
   if (!canRead) return null;
   if (article.ocr?.pages.length) {
-    return <OcrReading articleId={articleId} revisionId={revisionId} ocr={article.ocr} />;
+    return <OcrReading articleId={articleId} revisionId={revisionId} ocr={article.ocr}
+      htmlBody={article.readingTables.length ? <TableProse text={article.ocr.htmlText || article.bodyText}
+        tables={article.readingTables} tablesOnly={!article.ocr.htmlText} /> : undefined} />;
   }
 
   if (textUnavailable) {
@@ -780,7 +784,7 @@ function ArticleBody({
   return (
     <section className="feed-reading-body" aria-labelledby="feed-reading-body-title">
       <h2 id="feed-reading-body-title" className="sr-only">通知正文</h2>
-      {paragraphs.length > 0 ? paragraphs.map((paragraph, index) => (
+      {article.readingTables.length > 0 ? <TableProse text={article.bodyText} tables={article.readingTables} /> : paragraphs.length > 0 ? paragraphs.map((paragraph, index) => (
         <p key={index}>{paragraph}</p>
       )) : (
         <p className="feed-reading-empty">这个版本还没有可发布的完整正文。</p>

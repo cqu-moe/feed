@@ -32,7 +32,12 @@ test(`queued OCR publishes readable content${failAfterOcrStore?' after a storage
     const pending=await(await read(versionPath)).json();
     assert.equal(pending.revision.state,'assembling');
     assert.equal(pending.article.bodyText,'');
-    assert.equal(pending.article.snapshotUrl,null);
+    assert.equal(pending.article.snapshotUrl,versionPath+'/snapshot');
+    const savedSnapshot=await read(pending.article.snapshotUrl);
+    assert.equal(savedSnapshot.status,200);
+    const snapshotHtml=await savedSnapshot.text();
+    assert.match(snapshotHtml,/data-feed-pdf|<html|<main/i);
+    assert.match(savedSnapshot.headers.get('content-security-policy'),/script-src 'none'/);
     assert.ok(pending.attachments.every(file=>file.url===null));
     await until(async()=>{
       const tasks=await(await admin('/internal/capture-tasks')).json();

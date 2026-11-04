@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import { Button } from '@cqu-moe/ui';
 import { ExternalLink } from 'lucide-react';
@@ -69,7 +70,9 @@ export function OcrReading({
   articleId,
   revisionId,
   ocr,
+  htmlBody,
 }: {
+  htmlBody?: ReactNode;
   articleId: string;
   revisionId?: string;
   ocr: ArticleOcr;
@@ -81,7 +84,7 @@ export function OcrReading({
         <p className="feed-ocr-intro">
           以下文字来自已存档的 PDF；扫描页由 OCR 自动识别。姓名和数字可能有误，请以原 PDF 为准。
         </p>
-        {ocr.htmlText && <div className="feed-prose">{ocr.htmlText}</div>}
+        {htmlBody ?? (ocr.htmlText && <div className="feed-prose">{ocr.htmlText}</div>)}
         <p className="feed-ocr-status">{statusLabel(ocr)}</p>
         {ocr.pages.length > 0 && (
           <div className="feed-ocr-page-list">

@@ -126,7 +126,10 @@ test('a complete legacy record stays blocked until its original PDF OCR is recov
     const revisionId=detail.revision.id;
     assert.equal(detail.revision.state,'blocked');
     assert.equal((await(await read('/api/articles')).json()).articles[0].status,'partial');
-    assert.equal((await read(`/api/articles/${articleId}/revisions/${revisionId}/files/attachment-1.pdf`)).status,409);
+    const original=await read(`/api/articles/${articleId}/revisions/${revisionId}/files/attachment-1.pdf`);
+    assert.equal(original.status,200);
+    assert.equal((await original.text()).slice(0,5),'%PDF-');
+    assert.equal(detail.article.bodyText,'');
 
     await bucket.put(legacy.keys.ocr,JSON.stringify(legacy.ocrResult),{httpMetadata:{contentType:'application/json'}});
     await db.prepare("UPDATE pdf_ocr_jobs SET status='complete' WHERE id='legacy-ocr-1'").run();

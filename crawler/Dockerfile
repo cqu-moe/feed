@@ -13,7 +13,7 @@ RUN curl --fail --location --http1.1 --retry 3 --retry-all-errors --max-time 180
     && unzip -q /tmp/chrome.zip -d /opt/chrome && rm /tmp/chrome.zip
 ENV CHROME_EXECUTABLE=/opt/chrome/chrome-linux64/chrome
 WORKDIR /app
-COPY browser.mjs scrape.mjs list-state.mjs server.mjs ./
+COPY browser.mjs direct-pdf.mjs scrape.mjs list-state.mjs server.mjs ./
 USER node
 # Exercise real Chrome process cleanup while building the Linux image. The test
 # file is mounted only for this step and is not shipped in the runtime image.

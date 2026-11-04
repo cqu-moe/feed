@@ -38,6 +38,7 @@ export async function serveSnapshot(env,article,{files:versionFiles=null,fileRef
         const match=new RegExp(`^/api/files/${article.id}/([^?#]+)(?:[?#]|$)`).exec(href);
         const original=fileReferences.find(row=>row.originalUrl===href.replace(/&amp;/g,'&'));
         const filename=match&&files.includes(match[1])?match[1]:original?.filename;
+        if(match&&!filename)e.removeAttribute('href');
         if(filename)e.setAttribute('href',`/api/articles/${article.id}/revisions/${revisionId}/files/${filename}?download=1`);
       }
       e.setAttribute('rel','noopener noreferrer');

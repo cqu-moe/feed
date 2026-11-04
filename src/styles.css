@@ -1006,6 +1006,11 @@ body {
   -webkit-overflow-scrolling: touch;
 }
 
+.feed-source-table td,
+.feed-source-table th {
+  white-space: pre-line;
+}
+
 .feed-markdown-table table {
   width: 100%;
   min-width: max-content;

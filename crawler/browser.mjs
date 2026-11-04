@@ -1,3 +1,4 @@
+import {pdfResponse,capturePdfResponse} from './direct-pdf.mjs';
 import {spawn} from 'node:child_process';
 import {mkdtemp,mkdir,rm,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
@@ -5,7 +6,7 @@ import {join} from 'node:path';
 import {createServer} from 'node:net';
 import {setTimeout as delay} from 'node:timers/promises';
 
-export async function openBrowser({signal,skipCarousel=false}={}){
+export async function openBrowser({signal,skipCarousel=false,pdfOrigin=null}={}){
   const executablePath=process.env.CHROME_EXECUTABLE;
   if(!executablePath)throw new Error('CHROME_EXECUTABLE required');
   const documents=[];
@@ -86,7 +87,20 @@ export async function openBrowser({signal,skipCarousel=false}={}){
       for(const {reject,timer} of pending.values()){clearTimeout(timer);reject(new Error('Browser connection closed'));}
       pending.clear();
     });
-    let mainFrameId;
+    let mainFrameId,directPdf,pdfError;
+    async function intercept(event){
+      const {requestId}=event;
+      if(!pdfResponse(event,pdfOrigin,mainFrameId))return call('Fetch.continueRequest',{requestId});
+      try{
+        directPdf={url:event.request.url,bytes:await capturePdfResponse(call,requestId)};
+        // Finish navigation without Chrome downloading or starting its PDF viewer.
+        await call('Fetch.fulfillRequest',{requestId,responseCode:200,
+          responseHeaders:[{name:'Content-Type',value:'text/html; charset=utf-8'}],body:Buffer.from('<!doctype html>').toString('base64')});
+      }catch(error){
+        pdfError=error;
+        await call('Fetch.failRequest',{requestId,errorReason:'Aborted'});
+      }
+    }
     socket.addEventListener('message',event=>{
       const message=JSON.parse(event.data);
       if(message.id&&pending.has(message.id)){
@@ -94,6 +108,8 @@ export async function openBrowser({signal,skipCarousel=false}={}){
         pending.delete(message.id);clearTimeout(timer);
         if(message.error)reject(new Error(`CDP ${message.error.message}`));
         else resolve(message.result);
+      }else if(message.method==='Fetch.requestPaused'){
+        intercept(message.params).catch(error=>{pdfError=error;});
       }else if(message.method==='Page.frameNavigated'&&!message.params.frame.parentId){
         mainFrameId=message.params.frame.id;
       }else if(message.method==='Network.responseReceived'&&message.params.type==='Document'&&message.params.frameId===mainFrameId){
@@ -104,6 +120,7 @@ export async function openBrowser({signal,skipCarousel=false}={}){
     await call('Page.enable');
     mainFrameId=(await call('Page.getFrameTree')).frameTree.frame.id;
     await call('Network.enable');
+    if(pdfOrigin)await call('Fetch.enable',{patterns:[{resourceType:'Document',requestStage:'Response'}]});
     // VSB visit counters can stall the HTML parser before the notice body.
     await call('Network.setBlockedURLs',{urls:['*/system/resource/js/counter.js*','*/system/resource/js/dynclicks.js*',
       ...(skipCarousel?['*/2024/lib/js/swiper.min.js']:[])]});
@@ -112,8 +129,10 @@ export async function openBrowser({signal,skipCarousel=false}={}){
     const {product}=await call('Browser.getVersion');
     return {
       version:product,documents,
+      get directPdf(){if(pdfError)throw pdfError;return directPdf;},
       navigate:async url=>{
         const result=await call('Page.navigate',{url});
+        if(pdfError)throw pdfError;
         if(result.errorText)throw new Error(result.errorText);
       },
       evaluate:async(script,{timeoutMs=45000,userGesture=false}={})=>{

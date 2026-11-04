@@ -172,7 +172,7 @@ test('FEED03 native Queue ingestion, completeness, replay and recovery', async (
   const incomplete = await reader(browser, `/api/articles/${mainId}/revisions/${missingRevision.id}`);
   expect(incomplete.article.bodyText).toBe('');
   expect(incomplete.attachments[0].downloadUrl).toBeNull();
-  expect(incomplete.article.snapshotUrl).toBeNull();
+  expect(incomplete.article.snapshotUrl).toBe(`/api/articles/${mainId}/revisions/${missingRevision.id}/snapshot`);
   diagnostics = await ok('/internal/operations/diagnostics');
   expect(diagnostics.requirements.some((row: Row) => row.revisionId === missingRevision.id && row.requirementKind === 'attachment' && row.state === 'failed')).toBe(true);
   await mark('missing attachment prevents publication and leaves old revision readable');

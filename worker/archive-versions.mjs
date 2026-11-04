@@ -1,3 +1,4 @@
+import {readArchivedTables} from './reading-tables.mjs';
 import {sha} from './utils.mjs';
 import {readingExcerpt,readingTitleSql} from './reading.mjs';
 import {fingerprintContent} from './archive-fingerprint.mjs';
@@ -150,7 +151,7 @@ export async function listRevisions(env,articleId){
 }
 export async function readRevision(env,articleId,revisionId,{current=false}={}){
   const row=await env.DB.prepare(`SELECT ${revisionColumns},r.published_at AS publishedAt,r.diagnostics_json AS diagnostics,
-      a.source_id AS sourceId,s.name AS sourceName,a.url
+      a.source_id AS sourceId,s.name AS sourceName,a.url,r.source_metadata_json AS sourceMetadata
     FROM article_revisions r JOIN articles a ON a.id=r.article_id JOIN sources s ON s.id=a.source_id
     WHERE r.id=? AND r.article_id=?`).bind(revisionId,articleId).first();
   if(!row)return null;
@@ -166,6 +167,11 @@ export async function readRevision(env,articleId,revisionId,{current=false}={}){
       ocr_updated_at AS ocrUpdatedAt FROM article_read_models WHERE article_id=? AND revision_id=?`).bind(articleId,revisionId).first():null;
   if(ready&&model)bodyText=model.readable_text;
   const ocr=await revisionOcr(env,rows.results,model);
+  const {tableMarkupHash}=JSON.parse(row.sourceMetadata);
+  // Older captures and migrated versions predate the compact markup hint.
+  const tableKey=tableMarkupHash===undefined?rows.results.find(item=>item.kind==='snapshot')?.objectKey
+    :tableMarkupHash?objectKeyFromHash(tableMarkupHash):null;
+  const readingTables=ready?await readArchivedTables(env,tableKey,ocr?.htmlText||bodyText):[];
   const files=rows.results.filter(item=>item.kind==='attachment'||item.kind==='body_pdf');
   const attachments=files.map(item=>({id:`${revisionId}:${item.slotKey}`,name:item.name,filename:item.filename,
     bytes:item.bytes??null,contentType:item.contentType??null,status:item.state==='fulfilled'?'complete':item.state,
@@ -174,9 +180,9 @@ export async function readRevision(env,articleId,revisionId,{current=false}={}){
   const revision=presentRevision(Object.fromEntries(Object.keys({id:1,articleId:1,revisionNo:1,title:1,state:1,observedAt:1,readyAt:1,changeKind:1,missingCount:1}).map(key=>[key,row[key]])));
   return {revision,requirements:rows.results.map(({objectHash,objectKey,...item})=>({...item,fetchedAt:iso(item.fetchedAt)})),
     article:{id:articleId,title:row.title,sourceId:row.sourceId,sourceName:row.sourceName,url:row.url,publishedAt:row.publishedAt,
-      capturedAt:revision.observedAt,status:ready?'complete':'partial',attachmentCount:attachments.length,excerpt:readingExcerpt(bodyText),bodyText,bodyHtml:null,...(ocr?{ocr}:{}),
+      capturedAt:revision.observedAt,status:ready?'complete':'partial',attachmentCount:attachments.length,excerpt:readingExcerpt(bodyText),bodyText,bodyHtml:null,...(readingTables.length?{readingTables}:{}),...(ocr?{ocr}:{}),
       error:ready?null:`${row.missingCount} 项必要内容尚未完成`,
-      snapshotUrl:ready?`${base}/snapshot`:null,screenshotUrl:ready&&rows.results.some(item=>item.kind==='screenshot')?`${base}/screenshot`:null},attachments};
+      snapshotUrl:rows.results.some(item=>item.kind==='snapshot'&&item.state==='fulfilled'&&item.objectKey&&item.bytes>0)?`${base}/snapshot`:null,screenshotUrl:ready&&rows.results.some(item=>item.kind==='screenshot')?`${base}/screenshot`:null},attachments};
 }
 
 async function frozenRevisionBody(env,requirements){
@@ -237,8 +243,8 @@ function objectKeyFromHash(hash){
 }
 
 export async function revisionArtifact(env,articleId,revisionId,{filename,kind}){
-  return env.DB.prepare(`SELECT q.filename,q.name,q.kind,o.r2_key AS objectKey,o.media_type AS contentType,r.state
+  return env.DB.prepare(`SELECT q.filename,q.name,q.kind,o.r2_key AS objectKey,o.media_type AS contentType,r.state,o.byte_size AS bytes
     FROM article_revisions r JOIN revision_requirements q ON q.revision_id=r.id JOIN artifact_objects o ON o.sha256=q.object_hash
-    WHERE r.article_id=? AND r.id=? AND ${filename?"q.filename=? AND q.kind IN ('attachment','body_pdf')":'q.kind=?'}`)
+    WHERE r.article_id=? AND r.id=? AND q.state='fulfilled' AND ${filename?"q.filename=? AND q.kind IN ('attachment','body_pdf')":'q.kind=?'}`)
     .bind(articleId,revisionId,filename||kind).first();
 }

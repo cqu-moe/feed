@@ -1,3 +1,4 @@
+import {readArchivedTables} from './reading-tables.mjs';
 import {json} from './utils.mjs';
 import {createSources} from './sources.mjs';
 import {serveObject,serveSnapshot} from './storage.mjs';
@@ -37,6 +38,8 @@ export async function apiRoute(request,env){
       const reading=await env.ARCHIVE.get(article.ocr_result_key);
       if(reading)article.ocr=await reading.json();
     }
+    const tables=await readArchivedTables(env,article.snapshot_key,article.ocr?.htmlText||article.bodyText);
+    if(tables.length)article.readingTables=tables;
     delete article.ocr_result_key;
     delete article.snapshot_key;delete article.screenshot_key;
     return json({article,attachments:rows.results.map(row=>{const file=row.filename?`/api/files/${article.id}/${row.filename}`:null;return {...row,url:file,downloadUrl:file?file+'?download=1':null};})});

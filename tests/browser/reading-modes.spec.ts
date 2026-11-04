@@ -389,3 +389,27 @@ test('original mode stays usable across widths, themes, and keyboard switching',
   await expect(textButton).toBeFocused();
   await expect(page.getByText('请根据学校要求开展优异生培养工作。')).toBeVisible();
 });
+
+test('web tables remain in reading order and scroll within a narrow page', async ({ page }) => {
+  const first = '序号\n\n学院\n\n学号\n\n姓名\n\n1\n\n示例学院\n\n0123\n\n甲';
+  const second = '日期\n\n事项';
+  const bodyText = ['公示名单如下：', first, '另请留意：', second, '公示结束。'].join('\n\n');
+  const project = (part: string, rows: string[][]) => ({
+    start: bodyText.indexOf(part), end: bodyText.indexOf(part) + part.length,
+    rows: rows.map((row, i) => row.map(text => ({ text, header: i === 0, colSpan: 1, rowSpan: 1 }))),
+  });
+  const base = readingDetail('html');
+  const detail = { ...base, article: { ...base.article, bodyText, readingTables: [
+    project(first, [['序号', '学院', '学号', '姓名'], ['1', '示例学院', '0123', '甲']]),
+    project(second, [['日期', '事项']]),
+  ] } };
+  await installReadingRoutes(page, { detail });
+  await page.setViewportSize({ width: 375, height: 800 });
+  await page.goto('/articles/' + articleId);
+  const reading = page.getByRole('region', { name: '通知正文' });
+  await expect(reading.getByRole('table')).toHaveCount(2);
+  await expect(reading.getByRole('row').nth(1).getByRole('cell')).toHaveText(['1', '示例学院', '0123', '甲']);
+  await expect(reading.locator(':scope > p')).toHaveText(['公示名单如下：', '另请留意：', '公示结束。']);
+  const table = reading.getByRole('region', { name: '通知表格 1' });
+  expect(await table.evaluate(el => el.scrollWidth > el.clientWidth && el.getBoundingClientRect().right <= innerWidth)).toBe(true);
+});

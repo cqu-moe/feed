@@ -542,3 +542,11 @@ node scripts/compare-ocr.mjs publish textin-xparse-auto
 ## 正式 Auth 后台客户端
 
 浏览器 OAuth 客户端继续沿用 `cqu-feed`。后台独立客户端仅允许 `getFeedPolicy`、`getFeedRecipient`，metadata subsystem 为 `feed`，不授予浏览器 grant、scope 或 redirect URI。运行时凭据为 `FEED_AUTH_RPC_CLIENT_ID` / `FEED_AUTH_RPC_CLIENT_SECRET`；RSS 链接加密沿用会话加密密钥，按实现读取。权益仅合并到指定用户，不能替换其他子系统权益。
+
+### 快照、网页表格与正文 PDF
+
+已验证的 HTML 快照可以独立于通知版本的发布状态读取。例如 OCR 尚未结束、某个附件下载失败时，详情页仍给出同一版本的快照。快照中内嵌的已验证正文 PDF 可读，普通附件、统一正文、订阅发布仍遵循完整版本门禁。没有采集到来源内容时不生成成功快照。SingleFile 未能打包时，若已获得正文页面，保存带缺资源说明的渲染后 HTML，仍经静态快照的清理与 CSP 保护。
+
+通知地址本身返回 PDF 时，容器读取主文档的响应字节；不再请求一次性的下载地址。PDF 原件作为正文型 PDF 进入现有逐页文字提取或 OCR 流程。此类来源没有 HTML，网页快照是打开归档原件的静态阅读页。
+
+阅读页从同一版本已存的 HTML 恢复表格，只在单元格文字与统一正文匹配时替换相应文字段。旧版本优先保持原有字节，不因阅读排版产生新版本或更新提醒。新采集的通知在原有版本元数据中记录是否需要读取正文 HTML，纯文本页不额外读取快照。

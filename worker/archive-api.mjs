@@ -15,10 +15,12 @@ export async function archiveRoute(request,env){
     if(!artifact){const detail=await readRevision(env,articleId,revisionId);return detail?json(detail):json({error:'版本不存在'},404);}
     const object=await revisionArtifact(env,articleId,revisionId,{filename,kind:artifact});
     if(!object)return json({error:'版本产物尚未保存'},404);
-    if(object.state!=='ready')return json({error:'版本仍有缺项，尚未开放阅读'},409);
+    // A verified snapshot is usable while an unrelated attachment or OCR is pending.
+    const snapshotPart=object.bytes>0&&(artifact==='snapshot'||(object.kind==='body_pdf'&&filename?.endsWith('.pdf')));
+    if(object.state!=='ready'&&!snapshotPart)return json({error:'版本仍有缺项，尚未开放阅读'},409);
     if(artifact==='snapshot'){
       const files=await env.DB.prepare(`SELECT filename,original_url AS originalUrl FROM revision_requirements WHERE revision_id=?
-        AND kind IN ('attachment','body_pdf') AND state='fulfilled'`).bind(revisionId).all();
+        AND (kind='body_pdf' OR (kind='attachment' AND ?='ready')) AND state='fulfilled'`).bind(revisionId,object.state).all();
       return serveSnapshot(env,{id:articleId,snapshot_key:object.objectKey},{files:files.results.map(row=>row.filename),fileReferences:files.results,revisionId});
     }
     const pdf=filename?.endsWith('.pdf');
