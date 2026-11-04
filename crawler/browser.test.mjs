@@ -124,6 +124,26 @@ test('HTTP and JavaScript redirects keep the main document status separate from 
   }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
 });
 
+test('capture waits through a challenge and a 200 shell for the requested notice body',async()=>{
+  const title='重大杯足球联赛通知';
+  const server=createServer((req,res)=>{
+    res.setHeader('content-type','text/html; charset=utf-8');
+    if(req.url==='/notice'){
+      res.statusCode=412;return res.end('<script>location.replace("/content.jsp")</script>');
+    }
+    res.end(`<title>稍候</title><nav>${'栏目导航'.repeat(40)}</nav><article><header><img src="data:image/gif;base64,"></header><table></table><p style="display:none">装修中</p><h1>栏目名称</h1></article>
+      <script>setTimeout(()=>document.title='${title}',700);
+      setTimeout(()=>document.querySelector('article').textContent='本次足球联赛的正文',1300)</script>`);
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  try{
+    const result=await scrapePage({url:`http://127.0.0.1:${server.address().port}/notice`,formats:[],
+      readiness:{articleTitle:title},actions:[{type:'executeJavascript',script:"document.querySelector('article').innerText"}]},
+      AbortSignal.timeout(12000));
+    assert.equal(result.actions.javascriptReturns[0].value,'本次足球联赛的正文');
+  }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
+});
+
 test('a throttled main document returns the source Retry-After without holding the browser',async()=>{
   const server=createServer((_request,response)=>{
     response.writeHead(429,{'Retry-After':'120','content-type':'text/html'});response.end('Later');

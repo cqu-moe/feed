@@ -34,7 +34,7 @@ test('historical samples preserve CAPTCHA sessions, large originals and reject c
     const largeHash=createHash('sha256').update(largeAttachment).digest('hex');
     const sourceRequests:Array<{path:string;cookie:string}>=[];
     const bridgeCalls:string[]=[];
-    let challenge=false,pdfBody=false,captchaDenied=false;
+    let challenge=false,pdfBody=false,reply='success';
     await context.route('**/*',async route=>{
       const url=new URL(route.request().url());
       if(url.origin==='https://feed.test')return route.fulfill({status:403,body:'<title>Just a moment...</title>'});
@@ -48,26 +48,37 @@ test('historical samples preserve CAPTCHA sessions, large originals and reject c
       if(['/file.pdf','/large.zip','/captcha.png'].includes(url.pathname))
         sourceRequests.push({path:url.pathname,cookie:route.request().headers()['cookie']??''});
       if(url.pathname==='/captcha.png')return route.fulfill({contentType:'image/png',body:Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5XcAAAAASUVORK5CYII=','base64')});
-      if(url.pathname==='/file.pdf')return route.fulfill({contentType:'application/pdf',body:'%PDF-1.7\nfixture-file-bytes'});
-      if(url.pathname==='/large.zip')return !captchaDenied&&url.searchParams.get('codeValue')==='1234'
-        ?route.fulfill({contentType:'application/zip',body:largeAttachment})
-        :route.fulfill({contentType:'text/html',body:'<form><input name="codeValue"><img src="/captcha.png"></form>'});
+      if(url.pathname==='/file.pdf')return route.fulfill({contentType:'application/pdf',body:reply==='wrong-pdf'
+        ?Buffer.from([0x50,0x4b,0x03,0x04,0,0,0,0]):'%PDF-1.7\nfixture-file-bytes'});
+      if(url.pathname==='/large.zip'){
+        const form='<form><input name="codeValue"><img src="/captcha.png"></form>';
+        if(!url.searchParams.has('codeValue')||reply==='repeat')return route.fulfill({contentType:'text/html',body:form});
+        if(reply==='http')return route.fulfill({status:403,contentType:'text/html',body:form});
+        if(reply==='html')return route.fulfill({contentType:'application/pdf',body:'<!doctype html><title>文件维护</title>'});
+        return route.fulfill({contentType:'application/zip',body:largeAttachment});
+      }
       const body=url.pathname==='/list.htm'?list:url.pathname==='/list/2.htm'?continuation:challenge
         ?`<title>访问验证</title><p>${'请通过验证后继续访问。'.repeat(30)}</p>`:pdfBody
           ?'<title>历史正文 PDF</title><div class="v_news_content"><iframe src="/file.pdf"></iframe></div>':article;
       return route.fulfill({contentType:'text/html; charset=utf-8',
         headers:url.pathname==='/info/1/1.htm'?{'Set-Cookie':'source_session=t2; Path=/'}:{},body});
     });
+    let lastDownloads:{attemptCount:number;responses:{status:number;outcome:string}[]}[]=[];
     const verify=()=>verifySource({BASE_URL:'https://feed.test',BRIDGE_BASE_URL:'https://bridge.test',BRIDGE_SECRET:secret,ARCHIVE:archive},{
       find:async()=>source,recordValidation:async(_id:string,_version:number,evidence:unknown)=>({verified:true,evidence}),
       recordValidationFailure:async()=>{},
     },source.id,{source,taskId:source.validationTaskId,attemptNo:1,
       scrape:async(_env:unknown,url:string,options:{actions:{script:string}[]})=>{
         await page.goto(url);
-        return {actions:{javascriptReturns:[{value:await page.evaluate(options.actions[0].script)}]}};
+        const value=await page.evaluate<{downloads?:typeof lastDownloads}>(options.actions[0].script);
+        if(value.downloads)lastDownloads=value.downloads;
+        return {actions:{javascriptReturns:[{value}]}};
       }}).catch((error:Error)=>{throw new Error(error.message);});
     const result=await verify();
     expect(result.verified).toBe(true);
+    expect(lastDownloads.map(row=>row.responses)).toEqual([
+      [{status:200,outcome:'file'}],[{status:200,outcome:'captcha'},{status:200,outcome:'file'}],
+    ]);
     expect(result.evidence).toMatchObject({listPages:2,paginationMode:'followed',articleBody:true,attachmentSample:true,snapshotSample:true});
     expect(result.evidence.fileHashes).toEqual([createHash('sha256').update('%PDF-1.7\nfixture-file-bytes').digest('hex'),largeHash]);
     expect(bridgeCalls.filter(path=>path==='/internal/solve')).toHaveLength(1);
@@ -83,8 +94,22 @@ test('historical samples preserve CAPTCHA sessions, large originals and reject c
     pdfBody=true;
     const pdfResult=await verify();
     expect(pdfResult.evidence.fileHashes).toEqual([createHash('sha256').update('%PDF-1.7\nfixture-file-bytes').digest('hex')]);
-    pdfBody=false;captchaDenied=true;
-    await expect(verify()).rejects.toThrow('Sample attachment was not retrieved');
+    pdfBody=false;
+    for(const [mode,expected,submissions] of [
+      ['repeat','Source still requires CAPTCHA after 2 submissions',2],
+      ['http','File download returned HTTP 403',1],
+      ['html','Source returned HTML instead of a file',1],
+    ] as const){
+      reply=mode;
+      const before=bridgeCalls.filter(path=>path==='/internal/solve').length;
+      await expect(verify()).rejects.toThrow(expected);
+      expect(bridgeCalls.filter(path=>path==='/internal/solve').length-before).toBe(submissions);
+      expect(lastDownloads[1].attemptCount).toBe(submissions);
+      expect(lastDownloads[1].responses.at(-1)).toEqual(mode==='http'?{status:403,outcome:'http_error'}:
+        {status:200,outcome:mode==='html'?'html':'captcha'});
+    }
+    pdfBody=true;reply='wrong-pdf';
+    await expect(verify()).rejects.toThrow('Expected PDF document');
     challenge=true;
     await expect(verify()).rejects.toThrow('Sample article body was not recognized');
   } finally {await mf.dispose();}

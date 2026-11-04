@@ -139,11 +139,19 @@ async function savedRawBody(env,capture){
   return stored.text();
 }
 
+// Readability is independent of eligibility for notifications. Only ordinary
+// attachment gaps can relax the ready gate; never substitute another revision's files.
+const readableRevisionSql=`(r.state='ready' OR (
+  EXISTS(SELECT 1 FROM revision_requirements q WHERE q.revision_id=r.id AND q.kind='body' AND q.state='fulfilled' AND q.object_hash IS NOT NULL)
+  AND EXISTS(SELECT 1 FROM revision_requirements q WHERE q.revision_id=r.id AND q.required=1 AND q.kind='attachment' AND q.state<>'fulfilled')
+  AND NOT EXISTS(SELECT 1 FROM revision_requirements q WHERE q.revision_id=r.id AND q.required=1 AND q.kind<>'attachment' AND q.state<>'fulfilled')
+))`;
+
 const revisionColumns=`r.id,r.article_id AS articleId,r.revision_no AS revisionNo,${readingTitleSql('r.title','a.title','r.observed_at')} AS title,r.state,r.observed_at AS observedAt,
-  r.ready_at AS readyAt,r.change_kind AS changeKind,
+  ${readableRevisionSql} AS readable,r.ready_at AS readyAt,r.change_kind AS changeKind,
   (SELECT COUNT(*) FROM revision_requirements q WHERE q.revision_id=r.id AND q.required=1 AND q.state<>'fulfilled') AS missingCount`;
 const iso=value=>value===null?null:new Date(value).toISOString();
-const presentRevision=row=>({...row,observedAt:iso(row.observedAt),readyAt:iso(row.readyAt)});
+const presentRevision=row=>({...row,readable:!!row.readable,observedAt:iso(row.observedAt),readyAt:iso(row.readyAt)});
 
 export async function listRevisions(env,articleId){
   const rows=await env.DB.prepare(`SELECT ${revisionColumns} FROM article_revisions r JOIN articles a ON a.id=r.article_id WHERE r.article_id=? ORDER BY r.revision_no DESC`).bind(articleId).all();
@@ -160,29 +168,29 @@ export async function readRevision(env,articleId,revisionId,{current=false}={}){
       q.input_hash AS inputHash,q.derived_output_id AS derivedOutputId
     FROM revision_requirements q LEFT JOIN artifact_objects o ON o.sha256=q.object_hash WHERE q.revision_id=? ORDER BY q.slot_key`)
     .bind(revisionId).all();
-  const ready=row.state==='ready',base=`/api/articles/${articleId}/revisions/${revisionId}`;
+  const readable=!!row.readable,base=`/api/articles/${articleId}/revisions/${revisionId}`;
   let bodyText='';
-  if(ready)bodyText=await frozenRevisionBody(env,rows.results);
+  if(readable)bodyText=await frozenRevisionBody(env,rows.results);
   const model=current?await env.DB.prepare(`SELECT readable_text,ocr_result_hash AS ocrResultHash,ocr_model AS ocrModel,
       ocr_updated_at AS ocrUpdatedAt FROM article_read_models WHERE article_id=? AND revision_id=?`).bind(articleId,revisionId).first():null;
-  if(ready&&model)bodyText=model.readable_text;
+  if(model&&readable)bodyText=model.readable_text;
   const ocr=await revisionOcr(env,rows.results,model);
   const {tableMarkupHash}=JSON.parse(row.sourceMetadata);
   // Older captures and migrated versions predate the compact markup hint.
   const tableKey=tableMarkupHash===undefined?rows.results.find(item=>item.kind==='snapshot')?.objectKey
     :tableMarkupHash?objectKeyFromHash(tableMarkupHash):null;
-  const readingTables=ready?await readArchivedTables(env,tableKey,ocr?.htmlText||bodyText):[];
+  const readingTables=readable?await readArchivedTables(env,tableKey,ocr?.htmlText||bodyText):[];
   const files=rows.results.filter(item=>item.kind==='attachment'||item.kind==='body_pdf');
   const attachments=files.map(item=>({id:`${revisionId}:${item.slotKey}`,name:item.name,filename:item.filename,
     bytes:item.bytes??null,contentType:item.contentType??null,status:item.state==='fulfilled'?'complete':item.state,
     error:item.error,role:item.kind==='body_pdf'?'body-pdf':'attachment',originalUrl:item.originalUrl,
-    url:ready&&item.objectKey?`${base}/files/${item.filename}`:null,downloadUrl:ready&&item.objectKey?`${base}/files/${item.filename}?download=1`:null}));
-  const revision=presentRevision(Object.fromEntries(Object.keys({id:1,articleId:1,revisionNo:1,title:1,state:1,observedAt:1,readyAt:1,changeKind:1,missingCount:1}).map(key=>[key,row[key]])));
+    url:readable&&item.state==='fulfilled'&&item.objectKey?`${base}/files/${item.filename}`:null,downloadUrl:readable&&item.state==='fulfilled'&&item.objectKey?`${base}/files/${item.filename}?download=1`:null}));
+  const revision=presentRevision(Object.fromEntries(Object.keys({id:1,articleId:1,revisionNo:1,title:1,state:1,readable:1,observedAt:1,readyAt:1,changeKind:1,missingCount:1}).map(key=>[key,row[key]])));
   return {revision,requirements:rows.results.map(({objectHash,objectKey,...item})=>({...item,fetchedAt:iso(item.fetchedAt)})),
     article:{id:articleId,title:row.title,sourceId:row.sourceId,sourceName:row.sourceName,url:row.url,publishedAt:row.publishedAt,
-      capturedAt:revision.observedAt,status:ready?'complete':'partial',attachmentCount:attachments.length,excerpt:readingExcerpt(bodyText),bodyText,bodyHtml:null,...(readingTables.length?{readingTables}:{}),...(ocr?{ocr}:{}),
-      error:ready?null:`${row.missingCount} 项必要内容尚未完成`,
-      snapshotUrl:rows.results.some(item=>item.kind==='snapshot'&&item.state==='fulfilled'&&item.objectKey&&item.bytes>0)?`${base}/snapshot`:null,screenshotUrl:ready&&rows.results.some(item=>item.kind==='screenshot')?`${base}/screenshot`:null},attachments};
+      capturedAt:revision.observedAt,status:row.state==='ready'?'complete':'partial',attachmentCount:attachments.length,excerpt:readingExcerpt(bodyText),bodyText,bodyHtml:null,...(readingTables.length?{readingTables}:{}),...(ocr?{ocr}:{}),
+      error:readable?null:`${row.missingCount} 项必要内容尚未完成`,
+      snapshotUrl:rows.results.some(item=>item.kind==='snapshot'&&item.state==='fulfilled'&&item.objectKey&&item.bytes>0)?`${base}/snapshot`:null,screenshotUrl:readable&&rows.results.some(item=>item.kind==='screenshot'&&item.state==='fulfilled'&&item.objectKey)?`${base}/screenshot`:null},attachments};
 }
 
 async function frozenRevisionBody(env,requirements){
@@ -243,7 +251,7 @@ function objectKeyFromHash(hash){
 }
 
 export async function revisionArtifact(env,articleId,revisionId,{filename,kind}){
-  return env.DB.prepare(`SELECT q.filename,q.name,q.kind,o.r2_key AS objectKey,o.media_type AS contentType,r.state,o.byte_size AS bytes
+  return env.DB.prepare(`SELECT q.filename,q.name,q.kind,o.r2_key AS objectKey,o.media_type AS contentType,${readableRevisionSql} AS readable,o.byte_size AS bytes
     FROM article_revisions r JOIN revision_requirements q ON q.revision_id=r.id JOIN artifact_objects o ON o.sha256=q.object_hash
     WHERE r.article_id=? AND r.id=? AND q.state='fulfilled' AND ${filename?"q.filename=? AND q.kind IN ('attachment','body_pdf')":'q.kind=?'}`)
     .bind(articleId,revisionId,filename||kind).first();

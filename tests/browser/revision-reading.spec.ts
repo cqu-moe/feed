@@ -386,6 +386,25 @@ test('an unready newer observation leaves the last complete version as the defau
   await expect(page.getByRole('button', { name: '当前查看' })).toBeVisible();
 });
 
+test('a missing attachment is labelled beside its filename while the notice stays readable', async ({ page }) => {
+  const detail = readingDetail('pdf');
+  Object.assign(detail.revision, { state: 'blocked', readable: true, readyAt: null, missingCount: 1 });
+  Object.assign(detail.article, { status: 'partial', attachmentCount: 3 });
+  detail.attachments.push(Object.assign({ ...detail.attachments[1] }, {
+    id: 'pledge', name: '附件二 安全承诺书.pdf', filename: 'attachment-3.bin', status: 'failed',
+    error: 'CAPTCHA attempt limit reached', bytes: null, url: null, downloadUrl: null,
+  }));
+  await installReadingRoutes(page, {detail, revisions: [detail.revision]});
+  await page.goto(`/articles/${articleId}`);
+  await expect(page.frameLocator('iframe[title="通知原件.pdf PDF 预览"]').getByText('PDF PAGE 1')).toBeVisible();
+  await page.getByRole('button', {name: '正文', exact: true}).click();
+  await expect(page.getByText('请根据学校要求开展优异生培养工作。')).toBeVisible();
+  const missing = page.getByRole('listitem').filter({hasText: '安全承诺书.pdf'});
+  await expect(missing).toContainText('暂时缺失');
+  await expect(missing.getByRole('link')).toHaveCount(0);
+  await expect(page.getByRole('link', {name: detail.attachments[1].name})).toHaveAttribute('href', detail.attachments[1].downloadUrl);
+});
+
 test('a blocked newer observation uses clear unready wording', async ({ page }) => {
   const detail = readingDetail('html');
   const blockedRevision = {

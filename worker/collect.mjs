@@ -4,7 +4,7 @@ import {pdfPages,PDF_TEXT_UNAVAILABLE} from './pdf-text.mjs';
 import {enqueuePdfOcr} from './pdf-ocr.mjs';
 import {script as bundle} from 'single-file-cli/lib/single-file-bundle.js';
 import options from './singlefile-options.json';
-import {captchaPage} from './page-action.mjs';
+import {articlePageOptions} from './page-action.mjs';
 import {issueGrant} from './bridge.mjs';
 import {scrape} from './browser-scrape.mjs';
 import {put,bounded,fileKind,sha,cleanError} from './utils.mjs';
@@ -42,7 +42,7 @@ async function collectArticle(env,source,article,dependencies,captureContext){
     const sites=await env.DB.prepare('SELECT id FROM sites WHERE origin=?').bind(new URL(source.url).origin).all();
     if(sites.results.length===1)source={...source,siteId:sites.results[0].id};
   }
-  const data=await scrapeDependency(env,article.url,{source,directPdf:{title:input.title,uploadUrl:new URL('/internal/upload',bridgeURL).href,grant:grant.token},...(captureContext?.siteAdmission?{siteAdmission:captureContext.siteAdmission}:{}),formats:['markdown','rawHtml',{type:'screenshot',fullPage:true}],onlyMainContent:true,actions:[{type:'executeJavascript',script:`var __name=value=>value; (${captchaPage.toString()})(${JSON.stringify(input)})`}]});
+  const data=await scrapeDependency(env,article.url,{source,directPdf:{title:input.title,uploadUrl:new URL('/internal/upload',bridgeURL).href,grant:grant.token},...(captureContext?.siteAdmission?{siteAdmission:captureContext.siteAdmission}:{}),formats:['markdown','rawHtml',{type:'screenshot',fullPage:true}],onlyMainContent:true,...articlePageOptions(input)});
   let page=data.actions?.javascriptReturns?.[0]?.value;if(typeof page==='string')page=JSON.parse(page);
   if(!page?.bodyRecognized||new URL(page.page.url).origin!==new URL(source.url).origin)throw new Error('Article body not recognized');
   const report={id:article.id,runId,url:article.url,captureFence:fence,capturedAt:new Date().toISOString(),bodyCapturedAt:page.bodyCapturedAt??null,provider:{name:'browser-container',siteId:source.siteId,statusCode:data.metadata?.statusCode,elapsedMs:data.metadata?.elapsedMs},artifacts:[],errors:[...(page.errors??[])]};
@@ -123,7 +123,7 @@ async function collectArticle(env,source,article,dependencies,captureContext){
   const status=report.errors.length?'partial':'complete';
   const hash=await sha(body);
   report.status=status;report.attachmentCount=candidates.length;report.downloadedCount=completeFiles;
-  report.downloads=(page.downloads??[]).map(({attempts,...row})=>({...row,attemptCount:attempts?.length??0}));
+  report.downloads=(page.downloads??[]).map(({attempts,...row})=>({attemptCount:attempts?.length??0,...row}));
   report.artifacts.push(await put(env,prefix,'manifest.json',JSON.stringify(report,null,2),'application/json'));
   if(versioned)return saveCaptureRevision(env,source,article,captureContext,{report,stored,candidates,downloaded,body,rawBody,migrationBody,sourceMarkup:page.bodyHtml??null,nativePdfs,sourceTitle:page.heading||page.page.title});
   const result={id:article.id,status,attachments:candidates.length,downloaded:completeFiles};

@@ -123,6 +123,7 @@ export type ArticleRevision = {
   revisionNo: number;
   title: string;
   state: RevisionState;
+  readable: boolean;
   observedAt: string;
   readyAt: string | null;
   changeKind: string;
@@ -750,6 +751,7 @@ function parseRevision(value: unknown): ArticleRevision {
     revisionNo: value.revisionNo,
     title: value.title,
     state: parseRevisionState(value.state),
+    readable: value.state === 'ready' || value.readable === true,
     observedAt: value.observedAt,
     readyAt: stringOrNull(value.readyAt),
     changeKind: value.changeKind,
