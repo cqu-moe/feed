@@ -170,12 +170,13 @@ test('FEED03 native Queue ingestion, completeness, replay and recovery', async (
   expect(observed.events).toHaveLength(2);
   expect((await reader(browser, `/api/articles/${mainId}`)).revision.id).toBe(firstRevision);
   const incomplete = await reader(browser, `/api/articles/${mainId}/revisions/${missingRevision.id}`);
-  expect(incomplete.article.bodyText).toBe('');
+  expect(incomplete.revision.readable).toBe(true);
+  expect(incomplete.article.bodyText).toBe('采集验收第一版完整正文');
   expect(incomplete.attachments[0].downloadUrl).toBeNull();
   expect(incomplete.article.snapshotUrl).toBe(`/api/articles/${mainId}/revisions/${missingRevision.id}/snapshot`);
   diagnostics = await ok('/internal/operations/diagnostics');
   expect(diagnostics.requirements.some((row: Row) => row.revisionId === missingRevision.id && row.requirementKind === 'attachment' && row.state === 'failed')).toBe(true);
-  await mark('missing attachment prevents publication and leaves old revision readable');
+  await mark('missing attachment keeps the captured body readable without publishing the incomplete revision');
 
   await control('ingestion-mode', { mode: 'ocr', holdOcr: true });
   const ocrCapture = await capture(mainId, 'feed03-ocr-pending');
