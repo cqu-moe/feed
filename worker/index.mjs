@@ -75,7 +75,7 @@ export default {
         const subscriptions=await subscriptionsRoute(request,env,state);if(subscriptions)return subscriptions;
         if(!state.authenticated)return json({error:'请先登录'},401);
         if(!state.entitled)return json({error:'需要 feed.access 权益'},403);
-        return apiRoute(request,env);
+        return apiRoute(request,env,{admin:state.admin===true});
       }
       const response=await env.ASSETS.fetch(request),headers=new Headers(response.headers);
       if(headers.get('Content-Type')?.includes('text/html')){

@@ -6,7 +6,7 @@ import {archiveRoute} from './archive-api.mjs';
 import {noticeFilters,noticeWhere} from './bailian-filters.mjs';
 import {bailianSearch} from './bailian-search.mjs';
 const columns=`a.id,a.title,a.source_id AS sourceId,s.name AS sourceName,a.url,NULLIF(a.published_at,'unknown') AS publishedAt,a.captured_at AS capturedAt,a.status,a.attachment_count AS attachmentCount,a.excerpt`;
-export async function apiRoute(request,env){
+export async function apiRoute(request,env,{admin=false}={}){
   const url=new URL(request.url),path=url.pathname,configuredSources=await createSources(env).all(),dynamic=env.SOURCE_MANAGEMENT_ENABLED==='true';
   if(!['GET','HEAD'].includes(request.method))return json({error:'Method not allowed'},405);
   let filters;
@@ -16,7 +16,8 @@ export async function apiRoute(request,env){
     const query=(url.searchParams.get('q')||'').trim();
     if(path==='/api/articles/search'||(query&&env.BAILIAN_SEARCH_READS==='true')){
       if(!query||[...query].length>100)return json({error:'请输入不超过 100 个字符的搜索词'},400);
-      if(env.BAILIAN_SEARCH_READS!=='true')return json({error:'通知搜索暂未启用'},503);
+      const preview=admin&&path==='/api/articles/search'&&url.searchParams.get('preview')==='1'&&env.BAILIAN_SEARCH_WRITES==='true';
+      if(env.BAILIAN_SEARCH_READS!=='true'&&!preview)return json({error:'通知搜索暂未启用'},503);
       return bailianSearch(env,query,filters);
     }
   }

@@ -10,7 +10,7 @@ import {createNotifications} from './notifications.mjs';
 import {createArchiveMigration,MigrationConflictError,MigrationNotFoundError,MigrationValidationError} from './archive-migration.mjs';
 import {createOperations,OperationsError} from './operations.mjs';
 import {createArchiveRecheck} from './archive-recheck.mjs';
-import {getBailianStatus,pauseBailianSync,resumeBailianSync,startBailianBackfill,pauseBailianBackfill,retryBailianFailures} from './bailian-sync.mjs';
+import {getBailianStatus,pauseBailianSync,resumeBailianSync,startBailianBackfill,pauseBailianBackfill,retryBailianFailures,runBailianSync} from './bailian-sync.mjs';
 import {readProviderUsage} from './provider-usage.mjs';
 
 export async function internalRoute(request,env,ctx){
@@ -22,6 +22,8 @@ export async function internalRoute(request,env,ctx){
     if(request.method!=='POST')return json({error:'Method not allowed'},405);
     let payload;
     try{payload=await readJson(request);}catch{return json({error:'Invalid JSON'},400);}
+    // Use the scheduled job's limits, lease, receipts and backoff for manual batches too.
+    if(payload?.action==='process-batch')return json(await runBailianSync(env));
     const actions=new Map([['pause',pauseBailianSync],['resume',resumeBailianSync],
       ['start-backfill',startBailianBackfill],['pause-backfill',pauseBailianBackfill],['retry',retryBailianFailures]]);
     if(!actions.has(payload?.action))return json({error:'未知的搜索管理操作'},400);
