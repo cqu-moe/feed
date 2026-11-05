@@ -6,7 +6,7 @@ import {json} from './utils.mjs';
 const clean=text=>text.replace(/^#{1,6}\s+.*$/gm,'').replace(/\s+/gu,' ').trim();
 const normalized=text=>text.normalize('NFKC').replace(/\s+/gu,'').toLowerCase();
 
-async function sourceLink(env,doc,content){
+async function sourceLink(env,doc,content,quote){
   if(!/^attachment-\d+\.pdf$/.test(doc.filename??''))return {label:doc.label,href:null};
   const revision=doc.revisionId?'revisions/'+encodeURIComponent(doc.revisionId)+'/':'';
   const href='/reader/'+encodeURIComponent(doc.articleId)+'/'+revision+doc.filename;
@@ -17,8 +17,16 @@ async function sourceLink(env,doc,content){
       const object=await env.ARCHIVE.get(doc.evidenceKey).catch(()=>null);
       if(object){
         const pages=await object.json().catch(()=>[]);
-        const matches=Array.isArray(pages)?pages.filter(p=>Number.isSafeInteger(p?.number)&&p.number>0&&typeof p.text==='string'&&normalized(p.text).includes(needle)):[];
-        if(matches.length===1)return {label:doc.label+' · 第 '+matches[0].number+' 页',href:href+'?page='+matches[0].number};
+        if(Array.isArray(pages)){
+          const candidates=pages.filter(p=>Number.isSafeInteger(p?.number)&&p.number>0&&typeof p.text==='string')
+            .map(p=>({number:p.number,text:normalized(p.text)}));
+          // A chunk can cross a page boundary while its displayed excerpt is wholly on one page.
+          for(const exact of new Set([needle,normalized(quote)])){
+            if(exact.length<2)continue;
+            const matches=candidates.filter(p=>p.text.includes(exact));
+            if(matches.length===1)return {label:doc.label+' · 第 '+matches[0].number+' 页',href:href+'?page='+matches[0].number};
+          }
+        }
       }
     }
   }
@@ -28,7 +36,8 @@ async function sourceLink(env,doc,content){
 function excerpt(content,query){
   const at=content.toLowerCase().indexOf(query.toLowerCase());
   const start=Math.max(0,at-64),end=start+220;
-  return (start?'…':'')+content.slice(start,end)+(end<content.length?'…':'');
+  const quote=content.slice(start,end);
+  return {quote,display:(start?'…':'')+quote+(end<content.length?'…':'')};
 }
 
 let cooldownUntil=0; // Per Worker isolate; distributed quota is enforced by the provider.
@@ -45,8 +54,9 @@ export async function bailianSearch(env,query,filters){
       const doc=byFile.get(hit.fileId),card=doc&&byArticle.get(doc.articleId);
       const content=clean(hit.content)||hit.content.trim();
       if(!card||!content)continue;
-      const match=await sourceLink(env,doc,content);
-      articles.push({...card,excerpt:excerpt(content,query),match});
+      const {quote,display}=excerpt(content,query);
+      const match=await sourceLink(env,doc,content,quote);
+      articles.push({...card,excerpt:display,match});
       byArticle.delete(doc.articleId);
       if(articles.length===20)break;
     }

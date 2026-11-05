@@ -4,7 +4,7 @@ import {searchFixture,seedSources,notice,site} from './helpers/bailian-fixture.m
 import {buildSearchTags} from '../worker/bailian-filters.mjs';
 
 test('HTTP upload, file-level import and ranked Chinese searches round-trip through D1 and R2',async t=>{
-  const files=new Map(),queries=[];let serial=0,fail=false;
+  const files=new Map(),queries=[];let serial=0,fail=false,providerChunk=null;
   const pass=data=>Response.json({code:'Success',status:200,status_code:200,data});
   async function remote(req){
     const u=new URL(req.url),body=req.method==='POST'?await req.json():{};
@@ -21,7 +21,7 @@ test('HTTP upload, file-level import and ranked Chinese searches round-trip thro
       if(fail)return new Response(null,{status:503});
       const nodes=[{metadata:{doc_id:'obsolete',content:'过期内容'}}];
       for(const [id,f] of [...files].sort((a,b)=>Number(b[1].text.includes('380 元'))-Number(a[1].text.includes('380 元')))){
-        const text=f.text.split('\n').at(-1);
+        const text=providerChunk&&f.text.includes('380 元')?providerChunk:f.text.split('\n').at(-1);
         if(body.query==='无匹配')continue;
         nodes.push({metadata:{doc_id:id,content:text,doc_url:'https://provider.test/private'}});
         nodes.push({metadata:{doc_id:id,content:text}});
@@ -59,6 +59,15 @@ test('HTTP upload, file-level import and ranked Chinese searches round-trip thro
   const written=await buildSearchTags([{siteId:site,sourceId:'jwc'}],'2026-02-01');
   assert.ok(config.search_filters.every(group=>group.tags.some(tag=>written.includes(tag))));
   assert.equal((await query({q:'无匹配'})).total,0);
+  const key=await f.db.prepare('SELECT evidence_key FROM bailian_files WHERE article_id=? AND filename=?').bind(a,filename).first('evidence_key');
+  const pageText='申请须知'.repeat(36)+'缴费期限'+'办理流程'.repeat(54);
+  providerChunk='非原件标题：' + pageText;
+  for(const repeated of [false,true]){
+    await f.bucket.put(key,JSON.stringify([{number:1,text:repeated?pageText:'其他页面'},{number:2,text:pageText}]));
+    const [hit]=(await query({q:'缴费期限'})).articles;
+    assert.ok(hit.excerpt.startsWith('…'));
+    assert.equal(hit.match.href,'/reader/'+a+'/'+filename+(repeated?'':'?page=2'));
+  }
   fail=true;assert.equal((await query({q:'补考'})).status,503);
   assert.equal((await query({from:'2026-02-02'})).total,1);
 });
