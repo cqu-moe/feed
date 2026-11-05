@@ -377,3 +377,22 @@ test('rejects invalid public inputs before any network call', async () => {
     return true;
   });
 });
+
+test('connector business refusals on HTTP 200 preserve status and a safe reason', async () => {
+  const lease = { code:'Success', status:200, data:{ type:'OSS.PreSignedUrl', leaseId:'l',
+    param:{ method:'PUT', url:'https://oss-cn-beijing.aliyuncs.com/path', headers:{} } } };
+  for (const [payload,expectedStatus,expectedReason] of [
+    [{code:'InvalidParameter',status:400,message:'MD5 mismatch: private input'},400,'checksum'],
+    [{code:'InvalidParameter',status_code:400,message:'Invalid tags: private input'},400,'tags'],
+    [{code:'Unknown',message:'private input'},undefined,'rejected'],
+  ]) {
+    await withDigest(() => withFetch(async url => url.endsWith('addFile')?Response.json(payload):
+      url.endsWith('applyFileUploadLease')?Response.json(lease):new Response(null), async () => {
+      await assert.rejects(() => createBailianClient(env).registerFile({name:'notice.md',text:noticeText}), e => {
+        assert.equal(e.stage,'register');assert.equal(e.status,expectedStatus);
+        assert.equal(e.reason,expectedReason);assert.doesNotMatch(e.message,/private input/);
+        return true;
+      });
+    }));
+  }
+});

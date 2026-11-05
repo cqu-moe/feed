@@ -53,21 +53,23 @@ export function createBailianClient(env){
     try{leaseId=await uploadFile({name,text});}
     catch(error){
       // addFile has not been issued, so retrying cannot register a second file.
-      throw Object.assign(error,{registrationAttempted:false});
+      throw Object.assign(error,{registrationAttempted:false,stage:'upload'});
     }
-    const registered=await requestJson('/api/v1/connector/dash/addFile',{
-      body:{
-        leaseId,
-        category:categoryId,
-        categoryType:'UNSTRUCTURED',
-        parser:'AUTO_SELECT',
-        tags:fileTags,
-      },
-    });
-    const data=successData(registered,'Success','status');
-    if(typeof data.fileId!=='string')
-      throw providerResponseError('Invalid Bailian file id');
-    return identifier(data.fileId,'Bailian file id');
+    try{
+      const registered=await requestJson('/api/v1/connector/dash/addFile',{
+        body:{
+          leaseId,
+          category:categoryId,
+          categoryType:'UNSTRUCTURED',
+          parser:'AUTO_SELECT',
+          tags:fileTags,
+        },
+      });
+      const data=successData(registered,'Success','status');
+      if(typeof data.fileId!=='string')
+        throw providerResponseError('Invalid Bailian file id');
+      return identifier(data.fileId,'Bailian file id');
+    }catch(error){throw Object.assign(error,{stage:'register'});}
   }
 
   async function findFile({name,text}){
@@ -212,7 +214,7 @@ export function createBailianClient(env){
     try{payload=JSON.parse(new TextDecoder().decode(bytes));}
     catch{throw providerResponseError('Invalid Bailian JSON response');}
     if(isRecord(payload)&&(payload.code==='Success'||payload.success===true&&payload.status==='SUCCESS'))return payload;
-    throw providerResponseError(providerFailureMessage(payload));
+    throw businessError(payload);
   }
 
   async function responseBytes(response){
@@ -332,7 +334,7 @@ function successData(payload,successCode,statusField){
   if(payload?.code!==successCode||status!==200||payload.success===false||
     (typeof payload.status_code==='number'&&payload.status_code!==200)||
     (statusField==='status_code'&&payload.status==='FAILED'))
-    throw providerResponseError(providerFailureMessage(payload));
+    throw businessError(payload);
   if(!isRecord(payload.data))throw providerResponseError('Invalid Bailian response data');
   return payload.data;
 }
@@ -349,13 +351,19 @@ function requireConnectorSuccess(payload,message){
     throw providerResponseError(message);
 }
 
-function providerFailureMessage(payload){
-  const code=safeCode(payload?.code);
-  return code?`Bailian request failed: ${code}`:'Invalid Bailian response';
-}
-
-function safeCode(value){
-  return typeof value==='string'&&/^[A-Za-z0-9_.-]{1,96}$/.test(value)?value:null;
+function businessError(payload){
+  const status=Number.isInteger(payload?.status)?payload.status:payload?.status_code;
+  const error=providerResponseError('Bailian rejected the request');
+  if(Number.isInteger(status)&&status>=400&&status<=599)error.status=status;
+  // Persist only known categories; vendor messages can contain content or signed URLs.
+  const message=[payload?.code,payload?.message].filter(v=>typeof v==='string').join(' ').slice(0,2000);
+  const reason=[['checksum',/md5|checksum|digest|校验和/i],['tags',/\btag(?:s)?\b|标签/i],
+    ['file_type',/extension|file.?type|文件类型|文件格式/i],['parser',/parser|解析器/i],
+    ['category',/categor(?:y|ies)|类目/i],['lease',/lease|租约/i],
+    ['permission',/permission|forbidden|accessdenied|unauthori|权限/i],
+    ['invalid_parameter',/invalid.?parameter|invalid.?param|参数/i]].find(([,pattern])=>pattern.test(message));
+  error.reason=reason?.[0]??'rejected';
+  return error;
 }
 
 function headerRecord(value){
