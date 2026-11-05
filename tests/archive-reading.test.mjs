@@ -52,6 +52,14 @@ test(`queued OCR publishes readable content${failAfterOcrStore?' after a storage
       assert.match(detail.article.bodyText,/桥接验收名单/);
       assert.equal(detail.article.ocr.pages[0].text,'桥接验收名单 测试同学 1200');
     });
+    const projected=await read('/__fixture/search-projection');
+    assert.equal(projected.status,200,await projected.clone().text());
+    const projection=await projected.json();
+    assert.equal(projection.revisionId,revisionId);
+    const pdfDoc=projection.documents.find(doc=>doc.label==='正文 PDF');
+    assert.equal(pdfDoc.filename,'attachment-1.pdf');
+    assert.deepEqual(pdfDoc.pages,[{number:1,text:'桥接验收名单 测试同学 1200'}]);
+    assert.doesNotMatch(projection.documents.find(doc=>doc.slot==='body').text,/桥接验收名单/);
     const exact=await(await read(versionPath)).json();
     assert.match(exact.article.bodyText,/桥接验收名单/);
     assert.equal(exact.article.ocr.pages[0].page,1);
@@ -98,6 +106,7 @@ async function fixture({failAfterOcrStore=false}={}){
     `}));
   }};
   const app=await build({stdin:{resolveDir:process.cwd(),sourcefile:'reading-journey-fixture.mjs',contents:`
+    import {loadSearchNotice} from './worker/bailian-projection.mjs';
     import worker from './worker/index.mjs';
     import {CaptureWorkflow} from './worker/capture-workflow.mjs';
     import {ArchiveOcrWorkflow} from './worker/archive-ocr.mjs';
@@ -154,7 +163,7 @@ async function fixture({failAfterOcrStore=false}={}){
       return env;
     }
     export default{
-      fetch(request,raw){return worker.fetch(request,environment(raw));},
+      async fetch(request,raw){if(new URL(request.url).pathname==='/__fixture/search-projection')return Response.json(await loadSearchNotice(environment(raw),${JSON.stringify(articleId)}));return worker.fetch(request,environment(raw));},
       async queue(batch,raw){await worker.queue(batch,environment(raw));await Promise.allSettled(active.splice(0));}
     };
   `},bundle:true,write:false,format:'esm',platform:'browser',external:['node:*'],plugins:[cloudflarePlugin,providerPlugin]});

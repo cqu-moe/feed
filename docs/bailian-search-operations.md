@@ -1,0 +1,46 @@
+# 通知搜索：审查、联调与回滚
+
+[规格与五项子任务](https://github.com/cqu-moe/feed/issues/77) · [数据范围及费用口径](specs/bailian-notice-search.md)
+
+仓库默认 `BAILIAN_SEARCH_WRITES=false`、`BAILIAN_SEARCH_READS=false`。已配置正式百炼资源 ID；提交、部署、开启上传及切换搜索分别等待审核。通知页的部门、栏目和发布日期可独立用于 D1 浏览；百炼启用后只有提交搜索词才调用远端。短词不会触发第二次 D1 全文扫描。回滚到旧搜索则恢复旧实现，包括旧短词匹配的成本特征。
+
+## 当前正式资源（2026-11-05）
+
+本次按用户决定直接接入正式资源，不另外创建验证空间或测试知识库。早期规格中的隔离验证资源步骤不适用于本次上线。
+
+| 配置 | 值 |
+| --- | --- |
+| Cloudflare Worker | `cqu-feed`，域名 `feed.cqu.moe` |
+| 百炼地域、业务空间 | 华北 2（北京）、默认业务空间 |
+| `BAILIAN_WORKSPACE_ID` | `llm-e0iaquhpj1ghqjcd` |
+| 数据集 | `cqu-moe-feed`（`conn_file_d0f740c966234c66a0672c48f12787f5_13999074`） |
+| `BAILIAN_CATEGORY_ID` | `cate_05dae95d749942599c8cfb79b81f8caf_13999074`，此专用数据集的默认类目 |
+| `BAILIAN_INDEX_ID` | `xrzcywshph`，知识库 `cqu-moe-feed` |
+| `BAILIAN_SEARCH_SERVICE_ID` | `aid-256102634d9c400d8f22325ea67b2425`，服务 `cqu-moe-feed_知识检索` |
+
+知识库采用标准版、平台存储、智能切分（最大 2000 字符）、`text-embedding-v4`，关闭 Metadata 抽取、Excel 表头拼装及类目自动同步。知识库创建后控制台已有已发布的检索服务：仅绑定该库，关键词与向量各召回 20 段，`qwen3-rerank` 问答排序模式，阈值 0.20，最多返回 20 段；Query 改写、知识库路由关闭，无固定标签过滤条件。
+
+`BAILIAN_API_KEY` 仅保存在 Worker Secret。用户已报告通过 Wrangler 完成配置；代理不读取密钥，不读取剪贴板，也未用密钥执行远端验收。GitHub CI 不需要该密钥，禁止写入仓库、前端环境变量或日志。资源 ID 已从控制台核对；这些 ID 及 Secret 存在不等于真实接口调用已通过。
+
+## 先在本地看读者路径
+
+安装仓库锁定依赖后执行 `pnpm exec playwright test tests/browser/bailian-notice-search.spec.ts --headed`。用例在现有通知页提供合成通知和模拟会话，覆盖搜索、筛选与故障返回。Worker 侧执行 `node --test tests/bailian-*.test.mjs`；D1、R2 使用本地模拟器。它们能验证文档提交与返回的处理，不能证明远端的中文召回效果。
+
+## 正式接入顺序
+
+1. 审核配置提交及 PR 合并部署。按现有 Git Connector 流程应用 `0022_bailian_search.sql` 并部署，保持读写开关关闭。只检查资源标识、迁移及管理员状态，不启动文稿上传。应用本身不创建库、不请求文本生成；有待清理文件时不能直接更换资源 ID。
+2. 在开写前确认知识库的标签字段具备过滤能力。官方要求可过滤字段声明于 `index_config.fields`；控制台存在“标签过滤”输入框不能证明这一点。不得添加收窄全库语料的固定过滤条件。该项当前仍待确认。[接口约束](https://help.aliyun.com/zh/model-studio/knowledgesearch)。
+3. 通过管理员状态盘点当前可读通知、网页正文、正文 PDF 与普通 PDF 原件。回填前给用户审核范围及费用估算：库基础时长 + 实际入库嵌入 token + 查询嵌入与送排片段 token。原件字节不等于 token；实际账单以空间用量为准，关闭请求不会停止基础费。
+4. 用户批准后开启 `BAILIAN_SEARCH_WRITES` 并启动历史回填，保持读关闭。按**逐文件**状态确认解析和索引就绪，处理阻塞项，区分已登记、已上传与可搜索。不会为了本次接入重跑付费 OCR、改写生产文稿或发送通知邮件。
+5. 切换搜索前核对真实中文短词、语义问法、PDF 独有内容、栏目及日期筛选、跨栏目去重和原文链接；不以本地模拟结果代替远端证据。覆盖与筛选满足要求后，再由用户审核开启 `BAILIAN_SEARCH_READS`。未完成的远端核对必须明确记录。
+6. 需要撤回时先关 `BAILIAN_SEARCH_READS` 恢复旧列表入口，再关 `BAILIAN_SEARCH_WRITES` 停止后台远端写入。保留迁移表与远端回执，原始 D1/R2 存档始终保留；最终退役需另行确认后才删除专用云库和类目。
+
+## 管理员操作
+
+以 `feed.admin` 会话访问 `GET /internal/operations/notice-search`：`readable` 是全量可读通知，`notices` 是已登记通知的状态分布，两者之间的差额代表尚未盘点的历史通知。`originals` 分列网页正文、正文 PDF、普通 PDF 原件数和字节数，可在开写前盘点；原件字节不是送入模型的 token 数。查看 `files` 的状态、阻塞原因与数量，`needsAttention` 列出需处理的前 20 个文件及其本地／远端回执，`blockedCleanup` 是被阻塞的清理数。`cleanup` 为已失效的待清理文档数，`usage` 为最近七天后台操作次数。它们不是已计费 token 数。搜索只记录结果数量或故障类型，不写入原始查询和命中片段。
+
+向同一路径发同源 POST，JSON 为 `{"action":"start-backfill"}`。支持 `start-backfill`／`pause-backfill` 控制历史清单游标；`pause`／`resume` 控制整个后台任务（已在途的操作可以完成）；`retry` 在修正配置后重试可安全重放的阻塞项。写入开关关着时不会访问供应商。后台用短批次推进，所以“已登记”不等于“可搜索”。
+
+若标记 `unconfirmed_receipt`，表示远端可能已受理但本地没有可靠回执，不要重复上传／发起导入。暂停同步，在专用类目按本地待处理记录的确定性文件名 `feed-<id>.md` 查找并核对文件、导入任务，再恢复回执；真实修复须经管理员核实。真实申请租约、按文件导入／删除及分组标签 AND/OR 语义仍需有远端证据，不能用本地回归替代。
+
+恢复 D1 到 0022 迁移以前会丢失文件和任务回执。先关闭读写、保留回执备份并完成清理；如已丢失回执，必须在专用百炼类目和库逐项核对遗留文件，仅恢复 D1 不会清除云端资源。

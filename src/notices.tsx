@@ -44,6 +44,8 @@ type RequestState<T> =
 type SourceState = RequestState<Source[]>;
 type ArticleListState = RequestState<ArticleList>;
 
+const ISO_DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
 function fromResult<T>(
   result: Awaited<ReturnType<typeof requestJson<T>>>,
 ): RequestState<T> {
@@ -67,12 +69,25 @@ function noticeDate(article: ArticleListItem): { value: string | null; label: st
   return { value: null, label: '时间未记录' };
 }
 
+function dateRangeLabel(from: string, to: string): string {
+  if (from && to) return `${from} 至 ${to}`;
+  if (from) return `${from} 起`;
+  return `${to} 前`;
+}
+
 export function ArticlesPage() {
   const [params, setParams] = useSearchParams();
   const committedQuery = params.get('q') ?? '';
+  const committedSite = params.get('site') ?? '';
   const committedSource = params.get('source') ?? '';
+  const committedFrom = params.get('from') ?? '';
+  const committedTo = params.get('to') ?? '';
   const committedPage = Math.max(1, Number.parseInt(params.get('page') ?? '1', 10) || 1);
   const [query, setQuery] = useState(committedQuery);
+  const [site, setSite] = useState(committedSite);
+  const [source, setSource] = useState(committedSource);
+  const [from, setFrom] = useState(committedFrom);
+  const [to, setTo] = useState(committedTo);
   const [sourceState, setSourceState] = useState<SourceState>({ kind: 'loading' });
   const [listState, setListState] = useState<ArticleListState>({ kind: 'loading' });
   const [sourceReloadKey, setSourceReloadKey] = useState(0);
@@ -88,7 +103,11 @@ export function ArticlesPage() {
 
   useEffect(() => {
     setQuery(committedQuery);
-  }, [committedQuery]);
+    setSite(committedSite);
+    setSource(committedSource);
+    setFrom(committedFrom);
+    setTo(committedTo);
+  }, [committedQuery, committedSite, committedSource, committedFrom, committedTo]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -104,7 +123,10 @@ export function ArticlesPage() {
     setListState({ kind: 'loading' });
     const search = new URLSearchParams();
     if (committedQuery.trim()) search.set('q', committedQuery.trim());
+    if (committedSite) search.set('site', committedSite);
     if (committedSource) search.set('source', committedSource);
+    if (committedFrom) search.set('from', committedFrom);
+    if (committedTo) search.set('to', committedTo);
     if (committedPage > 1) search.set('page', String(committedPage));
     const suffix = search.size > 0 ? `?${search.toString()}` : '';
     requestJson(`/api/articles${suffix}`, parseArticleList, { signal: controller.signal }).then((result) => {
@@ -149,24 +171,55 @@ export function ArticlesPage() {
       }
     });
     return () => controller.abort();
-  }, [committedQuery, committedSource, committedPage, listReloadKey]);
+  }, [committedQuery, committedSite, committedSource, committedFrom, committedTo, committedPage, listReloadKey]);
 
   const sources = sourceState.kind === 'success' ? sourceState.data : [];
-  const selectedSource = sources.find((source) => source.id === committedSource);
+  const committedSiteSource = sources.find((item) => item.siteId === committedSite);
+  const committedSelectedSource = sources.find((item) => item.id === committedSource);
+  const draftSelectedSource = sources.find((item) => item.id === source);
+  const sourceBelongsToSite = draftSelectedSource?.siteId === site;
+  const visibleSources = sources.filter((item) => !site || item.siteId === site);
 
-  function updateUrl(nextQuery: string, nextSource: string, nextPage = 1) {
+  function canonicalSearch(
+    nextQuery: string,
+    nextSource: string,
+    nextSite: string,
+    nextFrom: string,
+    nextTo: string,
+    nextPage = 1,
+  ) {
     const search = new URLSearchParams();
     if (nextQuery.trim()) search.set('q', nextQuery.trim());
+    if (nextSite) search.set('site', nextSite);
     if (nextSource) search.set('source', nextSource);
+    if (nextFrom) search.set('from', nextFrom);
+    if (nextTo) search.set('to', nextTo);
     if (nextPage > 1) search.set('page', String(nextPage));
-    if (params.toString() === search.toString()) setListReloadKey((key) => key + 1);
-    else setParams(search, { replace: false });
+    return search;
+  }
+
+  function browseOnSelection(nextSite: string, nextSource: string) {
+    if (query.trim() || committedQuery.trim() || from !== committedFrom || to !== committedTo) return;
+    const next = canonicalSearch('', nextSource, nextSite, committedFrom, committedTo);
+    if (next.toString() !== params.toString()) setParams(next, { replace: false });
+  }
+
+  function updatePage(nextPage: number) {
+    const search = canonicalSearch(
+      committedQuery,
+      committedSource,
+      committedSite,
+      committedFrom,
+      committedTo,
+      nextPage,
+    );
+    setParams(search, { replace: false });
     searchOperation.current = {
       id: crypto.randomUUID(),
       attemptId: crypto.randomUUID(),
       startedAt: performance.now(),
-      hasQuery: Boolean(nextQuery.trim()),
-      hasSourceFilter: Boolean(nextSource),
+      hasQuery: Boolean(committedQuery.trim()),
+      hasSourceFilter: Boolean(committedSource),
       page: nextPage,
     };
   }
@@ -180,12 +233,27 @@ export function ArticlesPage() {
 
   function clearFilters() {
     setQuery('');
-    updateUrl('', '');
+    setSite('');
+    setSource('');
+    setFrom('');
+    setTo('');
+    if (params.size > 0) setParams(new URLSearchParams(), { replace: false });
   }
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    updateUrl(query, committedSource);
+    const nextFrom = from.match(ISO_DAY_PATTERN) ? from : '';
+    const nextTo = to.match(ISO_DAY_PATTERN) ? to : '';
+    if (from !== nextFrom) setFrom('');
+    if (to !== nextTo) setTo('');
+    const nextQuery = query.trim();
+    const nextSource = sourceBelongsToSite || !site ? source : '';
+    if (nextSource !== source) setSource(nextSource);
+    const nextSearch = canonicalSearch(nextQuery, nextSource, site, nextFrom, nextTo);
+    if (params.toString() === nextSearch.toString()) return;
+    searchOperation.current = { id: crypto.randomUUID(), attemptId: crypto.randomUUID(),
+      startedAt: performance.now(), hasQuery: Boolean(nextQuery), hasSourceFilter: Boolean(nextSource), page: 1 };
+    setParams(nextSearch, { replace: false });
   }
 
   if (
@@ -200,7 +268,10 @@ export function ArticlesPage() {
     return <AccessDeniedState />;
   }
 
-  const hasFilters = Boolean(committedQuery || committedSource);
+  const hasFilters = Boolean(
+    committedQuery || committedSite || committedSource || committedFrom || committedTo,
+  );
+  const relatedResults = listState.kind === 'success' && listState.data.searchKind === 'related';
 
   return (
     <>
@@ -223,32 +294,95 @@ export function ArticlesPage() {
             autoComplete="off"
             spellCheck={false}
             value={query}
-            onChange={(event) => setQuery(event.target.value)}
+            onChange={(event) => {
+              setQuery(event.target.value);
+            }}
           />
+        </div>
+        <div className="notice-site">
+          <Label className="notice-sr-only" htmlFor="notice-site">
+            发布站点
+          </Label>
+          <Select
+            value={site || 'all'}
+            onValueChange={(value) => {
+              const nextSite = value === 'all' ? '' : value;
+              setSite(nextSite);
+              const nextSource = nextSite && draftSelectedSource?.siteId !== nextSite ? '' : source;
+              setSource(nextSource);
+              browseOnSelection(nextSite, nextSource);
+            }}
+          >
+            <SelectTrigger id="notice-site" className="notice-site-trigger" aria-label="按发布站点筛选">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部站点</SelectItem>
+              {[...new Map(sources.map((source) => [source.siteId, source])).values()].map((source) => (
+                <SelectItem key={source.siteId} value={source.siteId}>
+                  {source.siteName || source.siteId}
+                </SelectItem>
+              ))}
+              {!sources.some((item) => item.siteId === site) && site && (
+                <SelectItem value={site}>当前筛选站点</SelectItem>
+              )}
+            </SelectContent>
+          </Select>
         </div>
         <div className="notice-source">
           <Label className="notice-sr-only" htmlFor="notice-source">
             通知来源
           </Label>
           <Select
-            value={committedSource || 'all'}
-            onValueChange={(value) => updateUrl(committedQuery, value === 'all' ? '' : value)}
+            value={source || 'all'}
+            onValueChange={(value) => {
+              const nextSource = value === 'all' ? '' : value;
+              setSource(nextSource);
+              browseOnSelection(site, nextSource);
+            }}
           >
             <SelectTrigger id="notice-source" className="notice-source-trigger" aria-label="按来源筛选">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">全部来源</SelectItem>
-              {sources.map((source) => (
+              {visibleSources.map((source) => (
                 <SelectItem key={source.id} value={source.id}>
                   {source.name}
                 </SelectItem>
               ))}
-              {!selectedSource && committedSource && (
-                <SelectItem value={committedSource}>当前筛选来源</SelectItem>
+              {!visibleSources.some((item) => item.id === source) && source && (
+                <SelectItem value={source}>当前筛选来源</SelectItem>
               )}
             </SelectContent>
           </Select>
+        </div>
+        <div className="notice-date-range">
+          <Label className="notice-sr-only" htmlFor="notice-from">
+            发布开始日期
+          </Label>
+          <Input
+            id="notice-from"
+            name="from"
+            type="date"
+            value={from}
+            onChange={(event) => {
+              setFrom(event.target.value);
+            }}
+          />
+          <span aria-hidden="true">至</span>
+          <Label className="notice-sr-only" htmlFor="notice-to">
+            发布结束日期
+          </Label>
+          <Input
+            id="notice-to"
+            name="to"
+            type="date"
+            value={to}
+            onChange={(event) => {
+              setTo(event.target.value);
+            }}
+          />
         </div>
         <Button type="submit">
           <Search aria-hidden="true" />
@@ -281,7 +415,8 @@ export function ArticlesPage() {
           state="error"
           title="暂时无法加载通知"
           description={`${listState.message}筛选条件已保留，你可以重试。`}
-          action={<RetryButton onClick={retrySearch} />}
+          action={<><RetryButton onClick={retrySearch} />{committedQuery &&
+            <Button variant="outline" onClick={() => setParams(canonicalSearch('', committedSource, committedSite, committedFrom, committedTo))}>按当前条件浏览</Button>}</>}
         />
       )}
       {listState.kind === 'not-found' && (
@@ -298,7 +433,7 @@ export function ArticlesPage() {
           title={hasFilters ? '没有找到匹配通知' : '还没有采集到通知'}
           description={
             hasFilters
-              ? '试试更短的关键词，或清除当前来源筛选。'
+                  ? '试试其他关键词，或调整筛选条件。'
               : '每日采集运行后，新通知会出现在这里。'
           }
           action={hasFilters ? <Button variant="outline" onClick={clearFilters}>清除筛选</Button> : undefined}
@@ -308,9 +443,13 @@ export function ArticlesPage() {
         <>
           <div className="notice-result-meta" aria-live="polite">
             <span aria-current="page">
-              共 {listState.data.total} 条通知
+              {relatedResults
+                ? `相关通知 ${listState.data.total} 条`
+                : `共 ${listState.data.total} 条通知`}
               {committedQuery ? ` · “${committedQuery}”` : ''}
-              {selectedSource ? ` · ${selectedSource.name}` : ''}
+              {committedSiteSource ? ` · ${committedSiteSource.siteName || committedSiteSource.siteId}` : ''}
+              {committedSelectedSource ? ` · ${committedSelectedSource.name}` : ''}
+              {committedFrom || committedTo ? ` · ${dateRangeLabel(committedFrom, committedTo)}` : ''}
             </span>
             {hasFilters ? (
               <Button type="button" variant="ghost" onClick={clearFilters}>
@@ -341,6 +480,16 @@ export function ArticlesPage() {
                         {article.title}
                       </Link>
                     </h2>
+                    {article.match && (
+                      <p className="notice-match">
+                        {article.match.href ? (
+                          <Link to={article.match.href}>{article.match.label}</Link>
+                        ) : (
+                          article.match.label
+                        )}
+                      </p>
+                    )}
+                    {article.excerpt && <p className="notice-excerpt">{article.excerpt}</p>}
                   </div>
                   <div className="notice-end">
                     {article.attachmentCount > 0 && (
@@ -360,37 +509,39 @@ export function ArticlesPage() {
             })}
           </div>
 
-          <nav className="notice-pagination" aria-label="通知分页">
-            <span>
-              第 {listState.data.page} /{' '}
-              {Math.max(1, Math.ceil(listState.data.total / listState.data.pageSize))} 页
-            </span>
-            <div>
-              <Button
-                type="button"
-                variant="outline"
-                size="icon"
-                aria-label="上一页"
-                disabled={listState.data.page <= 1}
-                onClick={() => updateUrl(committedQuery, committedSource, committedPage - 1)}
-              >
-                <ChevronLeft aria-hidden="true" />
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="icon"
-                aria-label="下一页"
-                disabled={
-                  listState.data.page >=
-                  Math.max(1, Math.ceil(listState.data.total / listState.data.pageSize))
-                }
-                onClick={() => updateUrl(committedQuery, committedSource, committedPage + 1)}
-              >
-                <ChevronRight aria-hidden="true" />
-              </Button>
-            </div>
-          </nav>
+          {!relatedResults && (
+            <nav className="notice-pagination" aria-label="通知分页">
+              <span>
+                第 {listState.data.page} /{' '}
+                {Math.max(1, Math.ceil(listState.data.total / listState.data.pageSize))} 页
+              </span>
+              <div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  aria-label="上一页"
+                  disabled={listState.data.page <= 1}
+                onClick={() => updatePage(committedPage - 1)}
+                >
+                  <ChevronLeft aria-hidden="true" />
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  aria-label="下一页"
+                  disabled={
+                    listState.data.page >=
+                    Math.max(1, Math.ceil(listState.data.total / listState.data.pageSize))
+                  }
+                  onClick={() => updatePage(committedPage + 1)}
+                >
+                  <ChevronRight aria-hidden="true" />
+                </Button>
+              </div>
+            </nav>
+          )}
         </>
       )}
     </>

@@ -3,21 +3,33 @@ import {json} from './utils.mjs';
 import {createSources} from './sources.mjs';
 import {serveObject,serveSnapshot} from './storage.mjs';
 import {archiveRoute} from './archive-api.mjs';
+import {noticeFilters,noticeWhere} from './bailian-filters.mjs';
+import {bailianSearch} from './bailian-search.mjs';
 const columns=`a.id,a.title,a.source_id AS sourceId,s.name AS sourceName,a.url,NULLIF(a.published_at,'unknown') AS publishedAt,a.captured_at AS capturedAt,a.status,a.attachment_count AS attachmentCount,a.excerpt`;
 export async function apiRoute(request,env){
   const url=new URL(request.url),path=url.pathname,configuredSources=await createSources(env).all(),dynamic=env.SOURCE_MANAGEMENT_ENABLED==='true';
   if(!['GET','HEAD'].includes(request.method))return json({error:'Method not allowed'},405);
-  const archived=await archiveRoute(request,env);if(archived)return archived;
+  let filters;
+  if(path==='/api/articles'||path==='/api/articles/search'){
+    filters=await noticeFilters(url.searchParams,configuredSources);
+    if(filters.error)return json({error:filters.error},400);
+    const query=(url.searchParams.get('q')||'').trim();
+    if(path==='/api/articles/search'||(query&&env.BAILIAN_SEARCH_READS==='true')){
+      if(!query||[...query].length>100)return json({error:'请输入不超过 100 个字符的搜索词'},400);
+      if(env.BAILIAN_SEARCH_READS!=='true')return json({error:'通知搜索暂未启用'},503);
+      return bailianSearch(env,query,filters);
+    }
+  }
+  const archived=await archiveRoute(request,env,filters);if(archived)return archived;
   if(path==='/api/sources'){
     if(dynamic){const sources=await createSources(env).listSources();return json({sources:sources.map(source=>({id:source.id,siteId:source.siteId,siteName:source.siteName,name:source.name,url:source.url,listUrl:source.listUrl??null,enabled:source.enabled,siteEnabled:source.siteEnabled,validationState:source.validationState,refreshIntervalSec:source.refreshIntervalSec,nextDiscoveryAt:source.nextDiscoveryAt,scheduledDiscoveryAt:source.scheduledDiscoveryAt,articleCount:source.articleCount,lastRunAt:source.lastRunAt??null,error:source.error??null}))});}
     const rows=await env.DB.prepare('SELECT s.*, (SELECT COUNT(*) FROM articles a WHERE a.source_id=s.id) AS articleCount FROM sources s').all();
     return json({sources:configuredSources.map(s=>{const row=rows.results.find(r=>r.id===s.id);return {id:s.id,siteId:s.siteId,siteName:s.name,name:s.name,url:s.url,listUrl:s.listUrls[0]??s.url,articleCount:row?.articleCount??0,lastRunAt:row?.last_run_at??null,error:row?.error??null};})});
   }
   if(path==='/api/articles'){
-    const q=(url.searchParams.get('q')??'').trim().slice(0,100),source=url.searchParams.get('source')??'';
+    const q=(url.searchParams.get('q')??'').trim().slice(0,100);
     const page=Math.min(500,Math.max(1,parseInt(url.searchParams.get('page')??'1')||1)),pageSize=20;
-    const where=[],bind=[];
-    if(source){if(!configuredSources.some(s=>s.id===source))return json({error:'未知来源'},400);where.push(dynamic?'EXISTS(SELECT 1 FROM article_sources src WHERE src.article_id=a.id AND src.source_id=?)':'a.source_id=?');bind.push(source);}
+    const {clauses:where,bindings:bind}=noticeWhere(filters,"NULLIF(a.published_at,'unknown')",dynamic);
     let join='';
     if(q){
       if([...q].length>=3){join=' JOIN article_search f ON f.id=a.id';where.push('article_search MATCH ?');bind.push('"'+q.replace(/"/g,'""')+'"');}

@@ -1,10 +1,11 @@
 import {json} from './utils.mjs';
 import {createSources} from './sources.mjs';
+import {noticeFilters,noticeWhere} from './bailian-filters.mjs';
 import {listRevisions,readRevision,revisionArtifact} from './archive-versions.mjs';
 import {serveObject,serveSnapshot} from './storage.mjs';
 import {readingTitleSql} from './reading.mjs';
 
-export async function archiveRoute(request,env){
+export async function archiveRoute(request,env,listFilters){
   if(env.ARCHIVE_READS_ENABLED!=='true')return null;
   const url=new URL(request.url),path=url.pathname;
   const history=/^\/api\/articles\/([a-f0-9]{24})\/revisions$/.exec(path);
@@ -36,19 +37,19 @@ export async function archiveRoute(request,env){
     if(article.latest_observed_revision_id)return json(await readRevision(env,current[1],article.latest_observed_revision_id));
     return null;
   }
-  if(path==='/api/articles')return versionedList(env,url);
+  if(path==='/api/articles')return versionedList(env,url,listFilters);
   return null;
 }
-async function versionedList(env,url){
-  const query=(url.searchParams.get('q')??'').trim().slice(0,100),source=url.searchParams.get('source')??'';
-  const page=Math.min(500,Math.max(1,parseInt(url.searchParams.get('page')??'1')||1)),pageSize=20;
-  const clauses=[],bindings=[];
-  const storedTitle='COALESCE(m.title,observed.title,a.title)',title=readingTitleSql(storedTitle,'a.title','COALESCE(r.observed_at,observed.observed_at)');
-  if(source){
-    const configured=await createSources(env).all();
-    if(!configured.some(row=>row.id===source))return json({error:'未知来源'},400);
-    clauses.push(env.SOURCE_MANAGEMENT_ENABLED==='true'?'EXISTS(SELECT 1 FROM article_sources src WHERE src.article_id=a.id AND src.source_id=?)':'a.source_id=?');bindings.push(source);
-  }
+const publishedDay="NULLIF(COALESCE(r.published_at,observed.published_at,a.published_at),'unknown')";
+const storedTitle='COALESCE(m.title,observed.title,a.title)';
+const title=readingTitleSql(storedTitle,'a.title','COALESCE(r.observed_at,observed.observed_at)');
+
+async function versionedList(env,url,filters){
+  const query=(url.searchParams.get('q')??'').trim().slice(0,100);
+  const page=Math.min(500,Math.max(1,parseInt(url.searchParams.get('page')??'1')||1));
+  filters??=await noticeFilters(url.searchParams,await createSources(env).all());
+  if(filters.error)return json({error:filters.error},400);
+  const {clauses,bindings}=noticeWhere(filters,publishedDay,env.SOURCE_MANAGEMENT_ENABLED==='true');
   if(query){
     if([...query].length>=3){
       clauses.push(`(EXISTS(SELECT 1 FROM article_read_search WHERE id=a.id AND article_read_search MATCH ?)
@@ -63,18 +64,33 @@ async function versionedList(env,url){
       const match='%'+query.replace(/[\\%_]/g,'\\$&')+'%';bindings.push(match,match);
     }
   }
+  return json(await articleCards(env,clauses,bindings,page,true));
+}
+
+// The archive list and related search must present the same title/date/reading identity.
+export async function relatedArticleCards(env,filters,ids){
+  if(!ids.length)return [];
+  const {clauses,bindings}=noticeWhere(filters,publishedDay,env.SOURCE_MANAGEMENT_ENABLED==='true');
+  clauses.push('a.id IN (SELECT value FROM json_each(?))');
+  bindings.push(JSON.stringify(ids));
+  clauses.push("(m.revision_id IS NOT NULL OR (observed.id IS NULL AND a.status='complete'))");
+  return (await articleCards(env,clauses,bindings,1,false)).articles;
+}
+
+async function articleCards(env,clauses,bindings,page,includeCount){
+  const pageSize=20;
   const from=`FROM articles a JOIN sources s ON s.id=a.source_id LEFT JOIN article_read_models m ON m.article_id=a.id
     LEFT JOIN article_revisions r ON r.id=m.revision_id
     LEFT JOIN article_revisions observed ON observed.id=a.latest_observed_revision_id`;
   const where=clauses.length?' WHERE '+clauses.join(' AND '):'';
-  const count=await env.DB.prepare(`SELECT COUNT(*) AS n ${from}${where}`).bind(...bindings).first();
+  const count=includeCount?await env.DB.prepare(`SELECT COUNT(*) AS n ${from}${where}`).bind(...bindings).first():null;
   const rows=await env.DB.prepare(`SELECT a.id,${title} AS title,a.source_id AS sourceId,s.name AS sourceName,a.url,
-    NULLIF(COALESCE(r.published_at,observed.published_at,a.published_at),'unknown') AS publishedAt,a.captured_at AS capturedAt,
+    ${publishedDay} AS publishedAt,a.captured_at AS capturedAt,
     COALESCE(r.observed_at,observed.observed_at) AS revisionObservedAt,
     CASE WHEN m.revision_id IS NOT NULL THEN 'complete' WHEN observed.id IS NOT NULL THEN 'partial' ELSE a.status END AS status,
     CASE WHEN m.revision_id IS NULL AND observed.id IS NULL THEN a.attachment_count ELSE (SELECT COUNT(*) FROM revision_requirements q
       WHERE q.revision_id=COALESCE(m.revision_id,observed.id) AND q.kind IN ('attachment','body_pdf')) END AS attachmentCount,
     COALESCE(m.summary,a.excerpt) AS excerpt ${from}${where} ORDER BY publishedAt DESC,a.id LIMIT ? OFFSET ?`)
-    .bind(...bindings,pageSize,(page-1)*pageSize).all();
-  return json({articles:rows.results.map(({revisionObservedAt,...row})=>({...row,capturedAt:revisionObservedAt===null?row.capturedAt:new Date(revisionObservedAt).toISOString()})),total:count.n,page,pageSize});
+    .bind(...bindings,includeCount?pageSize:100,(page-1)*pageSize).all();
+  return {articles:rows.results.map(({revisionObservedAt,...row})=>({...row,capturedAt:revisionObservedAt===null?row.capturedAt:new Date(revisionObservedAt).toISOString()})),total:count?.n??rows.results.length,page,pageSize};
 }

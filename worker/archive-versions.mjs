@@ -210,7 +210,7 @@ async function frozenRevisionBody(env,requirements){
   return entries.length?applyOcrEntries(text,entries):text;
 }
 
-async function revisionOcr(env,requirements,projection=null){
+export async function revisionOcr(env,requirements,projection=null){
   const rows=requirements.filter(item=>item.kind==='body_ocr');
   if(!rows.length)return null;
   if(rows.some(item=>item.state!=='fulfilled'||!item.objectHash))return {status:'pending',model:env.PDF_OCR_MODEL??'textin-xparse-auto',htmlText:'',pages:[],updatedAt:null};

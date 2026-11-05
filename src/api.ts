@@ -67,6 +67,10 @@ export type ArticleListItem = {
   status: string;
   attachmentCount: number;
   excerpt: string;
+  match?: {
+    label: string;
+    href: string | null;
+  };
 };
 
 export type ArticleList = {
@@ -74,6 +78,7 @@ export type ArticleList = {
   total: number;
   page: number;
   pageSize: number;
+  searchKind?: 'related';
 };
 
 export type Attachment = {
@@ -579,6 +584,16 @@ export function parseSources(value: unknown): Source[] {
   return value.sources.map(parseSource);
 }
 
+function safeReaderHref(value: string): string | null {
+  try {
+    const url = new URL(value, window.location.origin);
+    if (url.origin !== window.location.origin || !url.pathname.startsWith('/reader/')) return null;
+    return `${url.pathname}${url.search}${url.hash}`;
+  } catch {
+    return null;
+  }
+}
+
 function parseArticleListItem(value: unknown): ArticleListItem {
   if (
     !isRecord(value) ||
@@ -595,6 +610,21 @@ function parseArticleListItem(value: unknown): ArticleListItem {
   ) {
     throw new Error('通知列表接口结构不匹配。');
   }
+  let match: ArticleListItem['match'];
+  if (value.match !== undefined && value.match !== null) {
+    if (
+      !isRecord(value.match) ||
+      typeof value.match.label !== 'string' ||
+      !value.match.label ||
+      (typeof value.match.href !== 'string' && value.match.href !== null)
+    ) {
+      throw new Error('通知匹配信息结构不匹配。');
+    }
+    match = {
+      label: value.match.label,
+      href: value.match.href === null ? null : safeReaderHref(value.match.href),
+    };
+  }
   return {
     id: value.id,
     title: value.title,
@@ -606,6 +636,7 @@ function parseArticleListItem(value: unknown): ArticleListItem {
     status: value.status,
     attachmentCount: value.attachmentCount,
     excerpt: value.excerpt,
+    ...(match === undefined ? {} : { match }),
   };
 }
 
@@ -622,11 +653,16 @@ export function parseArticleList(value: unknown): ArticleList {
   ) {
     throw new Error('通知列表接口结构不匹配。');
   }
+  const searchKind = value.searchKind;
+  if (searchKind !== undefined && searchKind !== 'related') {
+    throw new Error('通知列表接口结构不匹配。');
+  }
   return {
     articles: value.articles.map(parseArticleListItem),
     total: value.total,
     page: value.page,
     pageSize: value.pageSize,
+    searchKind,
   };
 }
 

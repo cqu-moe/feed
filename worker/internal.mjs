@@ -10,12 +10,24 @@ import {createNotifications} from './notifications.mjs';
 import {createArchiveMigration,MigrationConflictError,MigrationNotFoundError,MigrationValidationError} from './archive-migration.mjs';
 import {createOperations,OperationsError} from './operations.mjs';
 import {createArchiveRecheck} from './archive-recheck.mjs';
+import {getBailianStatus,pauseBailianSync,resumeBailianSync,startBailianBackfill,pauseBailianBackfill,retryBailianFailures} from './bailian-sync.mjs';
 import {readProviderUsage} from './provider-usage.mjs';
 
 export async function internalRoute(request,env,ctx){
   const url=new URL(request.url);
   const authorizationError=await adminAuthorizationError(request,env);
   if(authorizationError)return authorizationError;
+  if(url.pathname==='/internal/operations/notice-search'){
+    if(request.method==='GET')return json(await getBailianStatus(env));
+    if(request.method!=='POST')return json({error:'Method not allowed'},405);
+    let payload;
+    try{payload=await readJson(request);}catch{return json({error:'Invalid JSON'},400);}
+    const actions=new Map([['pause',pauseBailianSync],['resume',resumeBailianSync],
+      ['start-backfill',startBailianBackfill],['pause-backfill',pauseBailianBackfill],['retry',retryBailianFailures]]);
+    if(!actions.has(payload?.action))return json({error:'未知的搜索管理操作'},400);
+    await actions.get(payload.action)(env);
+    return json(await getBailianStatus(env));
+  }
   if(url.pathname==='/internal/operations/provider-usage'){
     if(request.method!=='GET')return json({error:'Method not allowed'},405);
     return json(await readProviderUsage(env));
