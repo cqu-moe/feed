@@ -44,7 +44,7 @@ async function route(calls, handler) {
     return response;
   }, async () => {
     const client = createBailianClient(env);
-    const file = await client.registerFile({ name: 'notice.md', text: noticeText, tags: ['site:jwc', 'source:news'] });
+    const file = await client.registerFile({ name: 'notice.md', text: noticeText, tags: ['site-jwc', 'source-news'] });
     assert.equal(file, 'file-1');
     const jobId = await client.startImport([file]);
     assert.equal(jobId, 'job-1');
@@ -54,7 +54,7 @@ async function route(calls, handler) {
     });
     assert.deepEqual(await client.search({
       query: '挂科以后怎么考试',
-      tagGroups: [['site:jwc'], ['source:news', 'source:notice']],
+      tagGroups: [['site-jwc'], ['source-news', 'source-notice']],
     }), [{
       fileId: 'file-1',
       content: '可以申请补考',
@@ -104,7 +104,7 @@ test('register, import, search, and deletion use the documented Bailian protocol
         category: 'feed-category',
         categoryType: 'UNSTRUCTURED',
         parser: 'AUTO_SELECT',
-        tags: ['site:jwc', 'source:news'],
+        tags: ['site-jwc', 'source-news'],
       });
       return Response.json({ code: 'Success', status_code: 200, data: { fileId: 'file-1' } });
     }
@@ -134,8 +134,8 @@ test('register, import, search, and deletion use the documented Bailian protocol
         kb_search_configs: [{
           id: 'feed-index',
           search_filters: [
-            { tags: ['site:jwc'] },
-            { tags: ['source:news', 'source:notice'] },
+            { tags: ['site-jwc'] },
+            { tags: ['source-news', 'source-notice'] },
           ],
         }],
       });
@@ -354,13 +354,13 @@ test('rejects invalid public inputs before any network call', async () => {
   const operations = [
     () => client.registerFile({ name: 'nested/file.md', text: noticeText }),
     () => client.registerFile({ name: 'notice.md', text: '' }),
-    () => client.registerFile({ name: 'notice.md', text: noticeText, tags: ['site:jwc', 'site:jwc'] }),
+    () => client.registerFile({ name: 'notice.md', text: noticeText, tags: ['site-jwc', 'site-jwc'] }),
     () => client.registerFile({ name: 'notice.md', text: noticeText, tags: Array(101).fill('x') }),
     () => client.startImport([]),
     () => client.startImport(Array(101).fill('file-1')),
     () => client.startImport(['bad file id']),
     () => client.checkImport('../job'),
-    () => client.search({ query: '补考', tagGroups: [['site:jwc'], []] }),
+    () => client.search({ query: '补考', tagGroups: [['site-jwc'], []] }),
     () => client.removeDocument('bad file id'),
     () => client.removeFile('bad file id'),
   ];

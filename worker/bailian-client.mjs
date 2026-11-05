@@ -281,7 +281,8 @@ function tagsValue(value){
   if(value.length>100)throw invalidRequest('Too many Bailian tags');
   const tags=value.map(tag=>{
     const text=stringValue(tag,'Bailian tag');
-    if(text.length>32)throw invalidRequest('Bailian tags must be at most 32 characters');
+    if(text.length>32||!/^[-_a-zA-Z0-9\p{Script=Han}]+$/u.test(text))
+      throw invalidRequest('Invalid Bailian tag');
     return text;
   });
   if(tags.some((tag,index)=>tags.indexOf(tag)!==index))
