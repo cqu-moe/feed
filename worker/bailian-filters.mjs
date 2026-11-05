@@ -1,6 +1,6 @@
 async function memberTag(kind,id){
   const bytes=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(id)));
-  return kind+':'+Array.from(bytes.subarray(0,10),b=>b.toString(16).padStart(2,'0')).join('');
+  return kind+'-'+Array.from(bytes.subarray(0,10),b=>b.toString(16).padStart(2,'0')).join('');
 }
 const validDay=value=>/^\d{4}-\d{2}-\d{2}$/.test(value)&&value.slice(0,4)!=='0000'&&
   Number.isFinite(Date.parse(value))&&new Date(value).toISOString().slice(0,10)===value;
@@ -9,7 +9,7 @@ const validDay=value=>/^\d{4}-\d{2}-\d{2}$/.test(value)&&value.slice(0,4)!=='000
 // keeps even open-ended queries inside Bailian's tag-count and length limits.
 const firstDay=Date.parse('0001-01-01'), leafBase=2**22;
 const leaf=day=>leafBase+(Date.parse(day)-firstDay)/86400000;
-const dayTag=node=>'d:'+node.toString(36);
+const dayTag=node=>'d-'+node.toString(36);
 
 export async function buildSearchTags(memberships,publishedDay){
   const tags=new Set();

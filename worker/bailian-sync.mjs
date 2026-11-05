@@ -7,7 +7,8 @@ const writeEnabled=env=>env.BAILIAN_SEARCH_WRITES==='true';
 const eligible="(a.latest_ready_revision_id IS NOT NULL OR (a.latest_observed_revision_id IS NULL AND a.status='complete'))";
 const retryDelay=n=>Math.min(24*3600_000,300_000*2**Math.min(n,8));
 const failure=e=>e?.status===429?'rate_limited':e?.status===401||e?.status===403?'credentials':
-  e?.kind==='request'?'configuration':e?.kind==='timeout'?'timeout':'operation_failed';
+  e?.kind==='request'?'configuration':e?.kind==='timeout'?'timeout':
+  e?.stage?[e.stage,e.status||e.kind||'failed',e.reason].filter(Boolean).join(':'):'operation_failed';
 const noRetry=e=>e?.kind==='request'||(e?.status>=400&&e.status<500&&![408,429].includes(e.status));
 const control=(env,sql,...args)=>env.DB.prepare('UPDATE bailian_control SET '+sql+' WHERE id=1').bind(...args).run();
 const nowValue=now=>typeof now==='function'?now():now;
