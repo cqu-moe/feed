@@ -2,7 +2,7 @@
 
 [规格与五项子任务](https://github.com/cqu-moe/feed/issues/77) · [数据范围及费用口径](specs/bailian-notice-search.md)
 
-仓库默认 `BAILIAN_SEARCH_WRITES=false`、`BAILIAN_SEARCH_READS=false`。已配置正式百炼资源 ID；提交、部署、开启上传及切换搜索分别等待审核。通知页的部门、栏目和发布日期可独立用于 D1 浏览；百炼启用后只有提交搜索词才调用远端。短词不会触发第二次 D1 全文扫描。回滚到旧搜索则恢复旧实现，包括旧短词匹配的成本特征。
+回填阶段使用 `BAILIAN_SEARCH_WRITES=true`、`BAILIAN_SEARCH_READS=false`。2026-11-05 已获准在 CI 通过后合并部署、回填真实文稿，并在原文链接和筛选核对通过后切换查询。通知页的部门、栏目和发布日期可独立用于 D1 浏览；百炼启用后只有提交搜索词才调用远端。回滚到旧搜索会恢复旧短词匹配的成本特征。
 
 ## 当前正式资源（2026-11-05）
 
@@ -39,7 +39,9 @@
 
 以 `feed.admin` 会话访问 `GET /internal/operations/notice-search`：`readable` 是全量可读通知，`notices` 是已登记通知的状态分布，两者之间的差额代表尚未盘点的历史通知。`originals` 分列网页正文、正文 PDF、普通 PDF 原件数和字节数，可在开写前盘点；原件字节不是送入模型的 token 数。查看 `files` 的状态、阻塞原因与数量，`needsAttention` 列出需处理的前 20 个文件及其本地／远端回执，`blockedCleanup` 是被阻塞的清理数。`cleanup` 为已失效的待清理文档数，`usage` 为最近七天后台操作次数。它们不是已计费 token 数。搜索只记录结果数量或故障类型，不写入原始查询和命中片段。
 
-向同一路径发同源 POST，JSON 为 `{"action":"start-backfill"}`。支持 `start-backfill`／`pause-backfill` 控制历史清单游标；`pause`／`resume` 控制整个后台任务（已在途的操作可以完成）；`retry` 在修正配置后重试可安全重放的阻塞项。写入开关关着时不会访问供应商。后台用短批次推进，所以“已登记”不等于“可搜索”。
+向同一路径发同源 POST，JSON 为 `{"action":"start-backfill"}`。支持 `start-backfill`／`pause-backfill` 控制历史清单游标；`pause`／`resume` 控制整个后台任务（已在途的操作可以完成）；`retry` 在修正配置后重试可安全重放的阻塞项。`process-batch` 立即推进一次现有定时任务，同样遵守写入开关、暂停、租约、冷却和每批 4 个文件步骤的上限。操作方应串行调用；遇到阻塞先查回执，不循环重试错误。“已登记”不等于“可搜索”。
+
+正式切读前，有 `feed.admin` 和 `feed.access` 的用户可调用 `GET /api/articles/search?preview=1&q=…` 验证实际搜索结果；预览要求写入开关已开，沿用同一检索、筛选及原文链接实现。普通用户及未显式请求预览的查询继续使用原有读开关。
 
 若标记 `unconfirmed_receipt`，表示远端可能已受理但本地没有可靠回执，不要重复上传／发起导入。暂停同步，在专用类目按本地待处理记录的确定性文件名 `feed-<id>.md` 查找并核对文件、导入任务，再恢复回执；真实修复须经管理员核实。真实申请租约、按文件导入／删除及分组标签 AND/OR 语义仍需有远端证据，不能用本地回归替代。
 
