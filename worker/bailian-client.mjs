@@ -15,10 +15,9 @@ export function createBailianClient(env){
   const searchServiceId=stringEnv(env,'BAILIAN_SEARCH_SERVICE_ID');
   const baseUrl=`https://${workspaceId}${BASE_HOST_SUFFIX}`;
 
-  async function registerFile({name,text,tags=[]}){
+  async function uploadFile({name,text}){
     const fileName=fileNameValue(name);
     const content=stringValue(text,'file text');
-    const fileTags=tagsValue(tags);
     const bytes=textEncoder.encode(content);
     if(bytes.length===0||bytes.length>8*1024*1024)
       throw invalidRequest('Bailian file text must be 1 to 8388608 bytes');
@@ -45,10 +44,20 @@ export function createBailianClient(env){
       redirect:'manual',
       signal:AbortSignal.timeout(OSS_REQUEST_TIMEOUT_MS),
     },OSS_REQUEST_TIMEOUT_MS);
+    return stringValue(leaseData.leaseId,'Bailian lease id');
+  }
 
+  async function registerFile({name,text,tags=[]}){
+    const fileTags=tagsValue(tags);
+    let leaseId;
+    try{leaseId=await uploadFile({name,text});}
+    catch(error){
+      // addFile has not been issued, so retrying cannot register a second file.
+      throw Object.assign(error,{registrationAttempted:false});
+    }
     const registered=await requestJson('/api/v1/connector/dash/addFile',{
       body:{
-        leaseId:stringValue(leaseData.leaseId,'Bailian lease id'),
+        leaseId,
         category:categoryId,
         categoryType:'UNSTRUCTURED',
         parser:'AUTO_SELECT',

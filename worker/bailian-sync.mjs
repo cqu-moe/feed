@@ -120,7 +120,8 @@ async function usage(env,kind,at){
 async function advance(env,f,client,at){
   const db=env.DB;
   const set=(sql,...args)=>db.prepare('UPDATE bailian_files SET '+sql+' WHERE id=?').bind(...args,f.id).run();
-  const state=s=>set('state=?,attempts=0,next_at=0,error=NULL,blocked=0',s);
+  // Starting or retrying an operation must retain its accumulated failures.
+  const completed=s=>set('state=?,attempts=0,next_at=0,error=NULL,blocked=0',s);
   const call=async(kind,fn)=>{await usage(env,kind,at);return fn();};
   const name='feed-'+f.id+'.md';
   if(f.stale||f.state==='removing'||f.state==='unlinking'){
@@ -137,9 +138,9 @@ async function advance(env,f,client,at){
         if(progress.state==='pending'){await set('next_at=?',at+300_000);return;}
       }
       if(f.state==='submitting')throw Object.assign(new Error(),{kind:'ambiguous'});
-      await state('removing');
+      await set("state='removing'");
       await call('delete_document',()=>client.removeDocument(f.file_id)).catch(ignoreMissing);
-      await state('unlinking');
+      await completed('unlinking');
       return;
     }
     if(f.file_id)await call('delete_file',()=>client.removeFile(f.file_id)).catch(ignoreMissing);
@@ -154,16 +155,16 @@ async function advance(env,f,client,at){
       id=await call('reconcile',()=>client.findFile({name,text}));
       if(!id)throw Object.assign(new Error(),{kind:'ambiguous'});
     }else{
-      await state('registering');
+      await set("state='registering'");
       try{id=await call('register',()=>client.registerFile({name,text,tags:JSON.parse(f.tags)}));}
-      catch(e){if(e.status===429||noRetry(e))await state('new');throw e;}
+      catch(e){if(e.registrationAttempted===false||e.status===429||noRetry(e))await set("state='new'");throw e;}
     }
     await set("file_id=?,state='registered',attempts=0,next_at=0,error=NULL",id);
   }else if(f.state==='registered'){
-    await state('submitting');
+    await set("state='submitting'");
     let job;
     try{job=await call('import',()=>client.startImport([f.file_id]));}
-    catch(e){if(e.status===429||noRetry(e))await state('registered');throw e;}
+    catch(e){if(e.status===429||noRetry(e))await set("state='registered'");throw e;}
     await set("job_id=?,state='importing',attempts=0,next_at=0,error=NULL",job);
   }else if(f.state==='submitting'){
     // No job id survived the interrupted submit. Replaying could bill twice.
@@ -173,7 +174,7 @@ async function advance(env,f,client,at){
     const file=result.files.find(item=>item.fileId===f.file_id);
     if(result.state==='failed'||file?.state==='failed'||(result.state==='done'&&file?.state!=='done')){
       await set("state='failed',error='import_failed',blocked=1");
-    }else if(result.state==='done'&&file?.state==='done')await state('ready');
+    }else if(result.state==='done'&&file?.state==='done')await completed('ready');
     else await set('next_at=?',at+300_000);
   }
 }
