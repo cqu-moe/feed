@@ -1,18 +1,26 @@
+import {articleContent,fileTarget} from '../crawler/article-content.mjs';
+
+export function articlePageOptions(input){
+  return {
+    readiness:{articleTitle:input.title??null},
+    actions:[{type:'executeJavascript',script:`var __name=value=>value; (${captchaPage.toString()})(${JSON.stringify(input)},${articleContent.toString()},${fileTarget.toString()})`}],
+  };
+}
+
 // Runs in the original source browser page, including file fetches.
-export async function captchaPage(input) {
-  const normalizedTitle=value=>String(value??'').normalize('NFKC').replace(/[\s\u200b●•·—–_-]/g,'');
-  const contentSelector='.v_news_content, #vsb_content, #vsb_content_2, article, .article-content, .news_content';
-  const expectedTitle=normalizedTitle(input.title?.slice(0,18));
-  // A configured historical sample may not have a title in the current list.
-  const titleMatches=()=>expectedTitle?normalizedTitle(document.title).includes(expectedTitle):!!document.querySelector(contentSelector);
+async function captchaPage(input,findContent,fileTarget) {
   const readyStarted=Date.now();
-  while((!document.body||!titleMatches())&&Date.now()-readyStarted<10000)await new Promise(resolve=>setTimeout(resolve,200));
+  let content=findContent(input.title,fileTarget);
+  while(!content&&Date.now()-readyStarted<10000){
+    await new Promise(resolve=>setTimeout(resolve,200));
+    content=findContent(input.title,fileTarget);
+  }
   const report = { page: { title:document.title, url:location.href }, downloads:[], artifacts:[], errors:[], bridge:{}, policyViolations:[] };
   report.pageReadyWaitMs=Date.now()-readyStarted;
   const start = Date.now();
   const clean = e => String(e?.message ?? e).replace(/https?:\/\/\S+/g,'[URL omitted]').slice(0,220);
   const to64 = bytes => { let s=''; for(let i=0;i<bytes.length;i+=8192)s+=String.fromCharCode(...bytes.subarray(i,i+8192));return btoa(s); };
-  const kind = bytes => { const h=[...bytes.subarray(0,8)].map(x=>x.toString(16).padStart(2,'0')).join('');return h.startsWith('255044462d')?'pdf':h==='d0cf11e0a1b11ae1'?'ole':h.startsWith('504b0304')?'zip':h.startsWith('526172211a07')?'rar':h.startsWith('377abcaf271c')?'7z':null; };
+  const kind = bytes => { const h=[...bytes.subarray(0,8)].map(x=>x.toString(16).padStart(2,'0')).join('');return h.startsWith('255044462d')?'pdf':h==='d0cf11e0a1b11ae1'?'ole':(h.startsWith('504b0304')||h.startsWith('504b0506'))?'zip':h.startsWith('526172211a07')?'rar':h.startsWith('377abcaf271c')?'7z':null; };
   async function read(url) {
     const target=new URL(url,location.href);if(target.origin!==location.origin)throw new Error('Unexpected download origin');
     const r=await fetch(target,{credentials:'include',signal:AbortSignal.timeout(45000)});
@@ -22,35 +30,43 @@ export async function captchaPage(input) {
     const bytes=new Uint8Array(size);let off=0;for(const chunk of chunks){bytes.set(chunk,off);off+=chunk.length;}
     return {status:r.status,type:r.headers.get('content-type')??'',bytes,kind:kind(bytes),headers:{disposition:r.headers.get('content-disposition'),csp:r.headers.get('content-security-policy')}};
   }
+  function inspectDownload(response,expectsPdf){
+    if(response.status!==200)return {outcome:'http_error',error:`File download returned HTTP ${response.status}`};
+    if(response.kind){
+      if(expectsPdf&&response.kind!=='pdf')return {outcome:'wrong_format',error:'Expected PDF document'};
+      return {outcome:'file'};
+    }
+    // Inspect only a bounded prefix of an unrecognized file. A server can label
+    // an HTML error as application/pdf, or a verification form as plain text.
+    const html=new TextDecoder().decode(response.bytes.subarray(0,128*1024));
+    if(!/html/i.test(response.type)&&!/^\s*</.test(html))return {outcome:'unknown_format',error:'Unrecognized file response'};
+    const doc=new DOMParser().parseFromString(html,'text/html');
+    const field=doc.querySelector('input[name="codeValue"]');
+    if(!field)return {outcome:'html',error:'Source returned HTML instead of a file'};
+    const generated=/["'](\/system\/resource\/js\/filedownload\/createimage\.jsp)\?randnum=/.exec(html)?.[1];
+    const imagePath=(field.form??doc).querySelector('img[src]')?.getAttribute('src')||(generated&&`${generated}?randnum=${Date.now()}`);
+    return {outcome:'captcha',imagePath};
+  }
   function save(name,data,contentType){const bytes=typeof data==='string'?new TextEncoder().encode(data):data;if(bytes.length>8*1024*1024)throw new Error('Artifact cap');report.artifacts.push({name,contentType,base64:to64(bytes)});return{name,bytes:bytes.length};}
   const policy=e=>report.policyViolations.push({directive:e.effectiveDirective,blockedOrigin:(()=>{try{return new URL(e.blockedURI).origin;}catch{return e.blockedURI;}})()});
   document.addEventListener('securitypolicyviolation',policy);
   let popup, listener;
   const pending=new Map();
-  function fileTarget(element){
-    const link=new URL(element.getAttribute('href')||element.getAttribute('src')||element.getAttribute('data'),location.href);
-    const file=link.searchParams.get('file');
-    const url=file?new URL(file,link):link;
-    const typedPdf=element.getAttribute('type')?.split(';')[0].trim().toLowerCase()==='application/pdf';
-    const knownViewer=file&&/\/(?:pdfjs\/web\/)?viewer\.html?$/i.test(link.pathname);
-    if(url.origin!==location.origin||!(/^https?:$/.test(url.protocol))||
-      !(typedPdf||knownViewer||/download\.jsp$|\.(?:pdf|docx?|xlsx?|pptx?|zip|rar|7z)$/i.test(url.pathname)))return null;
-    return url;
-  }
   try {
     report.bodyRecognized=false;
-    if(!titleMatches())return report;
-    const content = document.querySelector(contentSelector) || document.body;
+    if(!content)return report;
     report.bodyText = content.innerText.trim();
     report.bodyHtml = content.innerHTML;
     report.bodyCapturedAt = new Date().toISOString();
     report.heading = document.querySelector('h1, .title')?.innerText?.trim() || input.title || document.title;
     report.dateText = document.querySelector('meta[name=\"PubDate\"]')?.content || document.body.innerText.slice(0,4000);
-    const candidates=[];
+    const candidates=[],pdfUrls=new Set();
     for(const a of document.querySelectorAll('a[href],iframe[src],embed[src],object[data]')){
       try{
         const url=fileTarget(a);if(!url)continue;
         const role=a.tagName==='A'?'attachment':'body-pdf';
+        if(role==='body-pdf'||/^application\/pdf(?:;|$)/i.test(a.type??a.getAttribute('type')??'')||
+          /\.pdf$/i.test(url.pathname)||/\.pdf$/i.test((a.innerText||a.getAttribute('title')||'').trim()))pdfUrls.add(url.href);
         const existing=candidates.find(x=>x.url===url.href);
         if(existing){if(role==='body-pdf')existing.role=role;continue;}
         candidates.push({url:url.href,name:a.innerText?.trim()||a.getAttribute('title')||decodeURIComponent(url.pathname.split('/').pop())||'附件',role});
@@ -65,9 +81,7 @@ export async function captchaPage(input) {
         report.bodyText.trim()===links[0].innerText.trim())candidates[0].role='body-pdf';
     }
     report.attachmentCandidates=candidates;report.attachmentsDiscovered=candidates.length;
-    report.bodyRecognized=(document.body?.innerText?.length??0)>100
-      ||content!==document.body&&(!!report.bodyText||!!content.querySelector('img[src],table')||candidates.some(item=>item.role==='body-pdf'));
-    if(!report.bodyRecognized)return report;
+    report.bodyRecognized=true;
     let readyResolve;
     const ready=new Promise(resolve=>{readyResolve=resolve;});
     listener=event=>{if(event.origin!==input.bridgeOrigin||event.source!==popup||event.data?.channel!==input.channel)return;if(event.data.type==='ready')readyResolve(event.data);if(event.data.type==='result')pending.get(event.data.slot)?.(event.data);};
@@ -99,30 +113,32 @@ export async function captchaPage(input) {
       return {name,bytes:answer.saved.bytes,uploaded:true};
     }
     for(let index=0;index<Math.min(candidates.length,8);index++){
-      const item=candidates[index],row={...item,attempts:[]};report.downloads.push(row);
+      const item=candidates[index],row={...item,attemptCount:0,responses:[]};report.downloads.push(row);
       try{
-        let response=await read(item.url);row.initialStatus=response.status;row.initialKind=response.kind;
-        for(let attempt=0;!response.kind&&attempt<2;attempt++){
-          const html=new TextDecoder().decode(response.bytes),doc=new DOMParser().parseFromString(html,'text/html');
-          row.captchaDetected=!!doc.querySelector('input[name="codeValue"]');
-          if(!row.captchaDetected){row.error=`No file or CAPTCHA (HTTP ${response.status})`;break;}
-          row.form={method:doc.querySelector('form')?.getAttribute('method'),action:doc.querySelector('form')?.getAttribute('action'),inputNames:[...doc.querySelectorAll('input')].map(x=>x.name||x.id)};
-          const generated=/["'](\/system\/resource\/js\/filedownload\/createimage\.jsp)\?randnum=/.exec(html)?.[1];
-          const imagePath=doc.querySelector('img')?.getAttribute('src')||(generated&&`${generated}?randnum=${Date.now()}`);
+        let url=new URL(item.url);
+        while(true){
+          const response=await read(url);
+          const {outcome,error,imagePath}=inspectDownload(response,pdfUrls.has(item.url));
+          row.responses.push({status:response.status,outcome});
+          row.fetchedAt=new Date().toISOString();
+          row.status=response.status;row.kind=response.kind;row.bytes=response.bytes.length;
+          row.contentType=response.type;row.contentDisposition=response.headers.disposition;
+          row.originalFile=outcome==='file';
+          if(row.originalFile){
+            const ext=response.kind==='pdf'?'pdf':/\.(docx?|xlsx?|pptx?|zip|rar|7z)$/i.exec(item.name)?.[1]?.toLowerCase()??'bin';
+            const name=`attachment-${index+1}.${ext}`;
+            row.saved=response.bytes.length>2*1024*1024?await upload(name,response.bytes):save(name,response.bytes,response.type);
+            break;
+          }
+          if(outcome!=='captcha'){row.error=error;break;}
+          if(row.attemptCount===2){row.error='Source still requires CAPTCHA after 2 submissions';break;}
           if(!imagePath)throw new Error('CAPTCHA image endpoint missing');
           const image=await read(new URL(imagePath,item.url));
-          if(image.status!==200||!image.type.startsWith('image/')||image.bytes.length>128*1024)throw new Error('Invalid CAPTCHA image response');
-          const slot=index*2+attempt,answer=await solve(image,slot);
-          const url=new URL(item.url);url.searchParams.set('codeValue',answer.digits);
-          response=await read(url);
-          const attemptReport={slot,usage:answer.usage,aiMs:answer.aiMs,image:answer.image,status:response.status,bytes:response.bytes.length,validFile:!!response.kind};
-          if(!response.kind){const returned=new DOMParser().parseFromString(new TextDecoder().decode(response.bytes),'text/html');attemptReport.captchaAgain=!!returned.querySelector('input[name="codeValue"]');attemptReport.text=returned.body.textContent.trim().slice(-450);}
-          row.attempts.push(attemptReport);
+          if(image.status!==200||!image.type.startsWith('image/')||!image.bytes.length||image.bytes.length>128*1024)throw new Error('Invalid CAPTCHA image response');
+          const answer=await solve(image,index*2+row.attemptCount);
+          url.searchParams.set('codeValue',answer.digits);
+          row.attemptCount++;
         }
-        row.fetchedAt=new Date().toISOString();
-        row.status=response.status;row.originalFile=response.status===200&&!!response.kind&&(item.role!=='body-pdf'||response.kind==='pdf');row.kind=response.kind;row.bytes=response.bytes.length;row.contentType=response.type;row.contentDisposition=response.headers.disposition;
-        if(row.originalFile){const ext=response.kind==='pdf'?'pdf':/\.(docx?|xlsx?|pptx?|zip|rar|7z)$/i.exec(item.name)?.[1]?.toLowerCase()??'bin';const name=`attachment-${index+1}.${ext}`;row.saved=response.bytes.length>2*1024*1024?await upload(name,response.bytes):save(name,response.bytes,response.type);}
-        else row.error??=item.role==='body-pdf'&&response.kind?'Expected PDF document':'CAPTCHA attempt limit reached';
       }catch(e){row.error=clean(e);}
     }
   }catch(e){report.errors.push(clean(e));}

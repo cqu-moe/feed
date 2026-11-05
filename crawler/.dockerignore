@@ -2,6 +2,7 @@
 !browser.mjs
 !browser.test.mjs
 !scrape.mjs
+!article-content.mjs
 !server.mjs
 !list-state.mjs
 

@@ -1,6 +1,6 @@
 import {script as singleFileBundle} from 'single-file-cli/lib/single-file-bundle.js';
 import singleFileOptions from './singlefile-options.json';
-import {captchaPage} from './page-action.mjs';
+import {articlePageOptions} from './page-action.mjs';
 import {issueGrant} from './bridge.mjs';
 import {scrape} from './browser-scrape.mjs';
 import {discoverList} from './discovery.mjs';
@@ -48,7 +48,7 @@ async function collectEvidence(env,source,scrapeDependency,siteAdmission){
   const data=await scrapeDependency(env,sample.href,{
     source,formats:['markdown','rawHtml',{type:'screenshot',fullPage:true}],onlyMainContent:true,
     ...(siteAdmission?{siteAdmission}:{}),
-    actions:[{type:'executeJavascript',script:`var __name=value=>value; (${captchaPage.toString()})(${JSON.stringify(input)})`}],
+    ...articlePageOptions(input),
   });
   let report=data.actions?.javascriptReturns?.[0]?.value;
   if(typeof report==='string')report=JSON.parse(report);
