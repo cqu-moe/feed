@@ -127,7 +127,7 @@ jobs:
           FEED_E2E_SUITE: ${{ matrix.suite }}
           FEED_E2E_OUTPUT: .e2e/${{ matrix.suite }}-round-${{ matrix.round }}
       - uses: actions/upload-artifact@v4
-        if: always() && needs.changes.outputs.code == 'true'
+        if: ${{ !cancelled() && needs.changes.outputs.code == 'true' }}
         with:
           name: feed-auth-${{ matrix.suite }}-e2e-${{ matrix.browser }}-round-${{ matrix.round }}
           path: .e2e/${{ matrix.suite }}-round-${{ matrix.round }}/public/
@@ -163,7 +163,7 @@ jobs:
           FEED_E2E_CONTROL_SHARD: ${{ matrix.shard }}/2
           FEED_E2E_CONTROL_OUTPUT: .e2e/mail-controls
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: ${{ !cancelled() }}
         with:
           name: feed-mail-negative-controls-${{ matrix.browser }}-${{ matrix.shard }}
           path: |
