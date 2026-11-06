@@ -20,7 +20,7 @@ concurrency:
 jobs:
   changes:
     name: Classify changed paths
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     timeout-minutes: 2
     outputs:
       code: ${{ steps.paths.outputs.code }}
@@ -43,7 +43,7 @@ jobs:
           fi
 
   unit:
-    name: Unit and integration tests (${{ matrix.shard }}/4)
+    name: Unit and integration tests (${{ matrix.shard }}/2)
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
@@ -51,7 +51,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -60,10 +60,10 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: node --test --test-shard=${{ matrix.shard }}/4 tests/*.test.mjs
+      - run: node --test --test-shard=${{ matrix.shard }}/2 tests/*.test.mjs
 
   package:
-    name: Build, design and Worker packaging
+    name: Build, design, Worker packaging and browser regression
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
@@ -79,21 +79,6 @@ jobs:
       - run: pnpm build
       - run: pnpm check:design
       - run: pnpm check:worker
-
-  browser:
-    name: Browser regression
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm test:browser
       - name: PDF telemetry regression with intercepted local endpoint
@@ -112,8 +97,9 @@ jobs:
   e2e:
     name: Real Auth and Feed ${{ matrix.suite }} E2E (${{ matrix.browser }}, round ${{ matrix.round }})
     needs: changes
-    if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    # Expand the matrix even for docs so all six required names exist.
+    if: always() && needs.changes.result == 'success'
+    runs-on: ${{ needs.changes.outputs.code == 'true' && 'ubuntu-latest' || 'ubuntu-slim' }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -126,19 +112,22 @@ jobs:
       FEED_E2E_CROSS_BROWSER: ${{ matrix.browser != 'chromium' && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
+        if: needs.changes.outputs.code == 'true'
         with:
           fetch-depth: 0
           persist-credentials: false
       - uses: ./.github/actions/setup-e2e
+        if: needs.changes.outputs.code == 'true'
         with:
           browser: ${{ matrix.browser }}
       - run: pnpm test:e2e
+        if: needs.changes.outputs.code == 'true'
         env:
           FEED_E2E_AUTH_CHECKOUT: .e2e/auth-checkout
           FEED_E2E_SUITE: ${{ matrix.suite }}
           FEED_E2E_OUTPUT: .e2e/${{ matrix.suite }}-round-${{ matrix.round }}
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && needs.changes.outputs.code == 'true'
         with:
           name: feed-auth-${{ matrix.suite }}-e2e-${{ matrix.browser }}-round-${{ matrix.round }}
           path: .e2e/${{ matrix.suite }}-round-${{ matrix.round }}/public/
@@ -146,7 +135,7 @@ jobs:
           retention-days: 7
 
   mail-controls:
-    name: Mail negative controls (${{ matrix.browser }}, ${{ matrix.shard }}/4)
+    name: Mail negative controls (${{ matrix.browser }}, ${{ matrix.shard }}/2)
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
@@ -154,7 +143,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2]
         browser: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["chromium","firefox","webkit"]' || '["chromium"]') }}
     env:
       FEED_E2E_BROWSER: ${{ matrix.browser }}
@@ -171,7 +160,7 @@ jobs:
         run: pnpm test:e2e:mail:controls
         env:
           FEED_E2E_AUTH_CHECKOUT: .e2e/auth-checkout
-          FEED_E2E_CONTROL_SHARD: ${{ matrix.shard }}/4
+          FEED_E2E_CONTROL_SHARD: ${{ matrix.shard }}/2
           FEED_E2E_CONTROL_OUTPUT: .e2e/mail-controls
       - uses: actions/upload-artifact@v4
         if: always()
@@ -186,9 +175,9 @@ jobs:
   check:
     # Preserve the required check and make every new shard a required gate.
     name: Tests, build, design and Worker packaging
-    needs: [changes, unit, package, browser, e2e, mail-controls]
+    needs: [changes, unit, package, e2e, mail-controls]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     timeout-minutes: 2
     steps:
       - env:
@@ -200,6 +189,6 @@ jobs:
           assert.equal(needs.changes.result, 'success');
           const expected = needs.changes.outputs.code === 'false' ? 'skipped' : 'success';
           for (const [job, {result}] of Object.entries(needs)) {
-            if (job !== 'changes') assert.equal(result, expected, `${job}: ${result}`);
+            if (job !== 'changes') assert.equal(result, job === 'e2e' ? 'success' : expected, `${job}: ${result}`);
           }
           JS
