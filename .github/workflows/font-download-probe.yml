@@ -1,0 +1,53 @@
+name: Ubuntu font transport probe
+
+on:
+  push:
+    branches: [perf/ubuntu-font-downloads-20261106]
+
+permissions:
+  contents: read
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        attempt: [0, 1, 2]
+    steps:
+      - run: sudo apt-get update
+      - name: Compare identical package bytes and verify SHA-256
+        env:
+          ATTEMPT: ${{ matrix.attempt }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, subprocess
+          metadata = subprocess.check_output(['apt-cache', 'show', '--no-all-versions', 'fonts-wqy-zenhei'], text=True)
+          fields = dict(line.split(': ', 1) for line in metadata.split('\n\n')[0].splitlines() if ': ' in line and not line.startswith(' '))
+          filename, digest = fields['Filename'], fields['SHA256']
+          assert filename.startswith('pool/') and '..' not in filename
+          assert len(digest) == 64
+          bases = ['http://azure.archive.ubuntu.com/ubuntu', 'https://azure.archive.ubuntu.com/ubuntu', 'https://archive.ubuntu.com/ubuntu']
+          offset = int(os.environ['ATTEMPT'])
+          bases = bases[offset:] + bases[:offset]
+          results = []
+          for index, base in enumerate(bases):
+              target = pathlib.Path(os.environ['RUNNER_TEMP']) / f'font-{index}.deb'
+              command = ['curl', '--fail', '--location', '--silent', '--show-error', '--connect-timeout', '10', '--max-time', '45', '--output', str(target), '--write-out', '%{json}', f'{base}/{filename}']
+              response = subprocess.run(command, capture_output=True, text=True)
+              metrics = json.loads(response.stdout)
+              verified = response.returncode == 0 and hashlib.sha256(target.read_bytes()).hexdigest() == digest
+              row = {'base': base, 'package': fields['Package'], 'version': fields['Version'], 'sha256': digest, 'exit_code': response.returncode, 'verified': verified, 'error': response.stderr, **{key: metrics[key] for key in ['http_code', 'time_total', 'size_download', 'speed_download']}}
+              results.append(row)
+              print(json.dumps(row), flush=True)
+          pathlib.Path('font-results.json').write_text(json.dumps(results, indent=2))
+          assert any(row['verified'] for row in results), 'No endpoint delivered the expected package bytes'
+          PY
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: font-transport-${{ matrix.attempt }}
+          path: font-results.json
+          if-no-files-found: error
+          retention-days: 7
