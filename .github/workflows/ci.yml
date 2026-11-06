@@ -98,7 +98,7 @@ jobs:
     name: Real Auth and Feed ${{ matrix.suite }} E2E (${{ matrix.browser }}, round ${{ matrix.round }})
     needs: changes
     # Expand the matrix even for docs so all six required names exist.
-    if: always() && needs.changes.result == 'success'
+    if: ${{ !cancelled() && needs.changes.result == 'success' }}
     runs-on: ${{ needs.changes.outputs.code == 'true' && 'ubuntu-latest' || 'ubuntu-slim' }}
     timeout-minutes: 20
     strategy:
@@ -176,7 +176,7 @@ jobs:
     # Preserve the required check and make every new shard a required gate.
     name: Tests, build, design and Worker packaging
     needs: [changes, unit, package, e2e, mail-controls]
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-slim
     timeout-minutes: 2
     steps:

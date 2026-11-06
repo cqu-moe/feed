@@ -8,7 +8,7 @@
 
 同一 PR 新提交取消旧运行。main 和手动运行使用独立 run ID 分组，既不取消正在运行的提交，也不挤掉等待中的提交。main 的纯根目录 Markdown 或 `docs/` 变更使用 `paths-ignore`；PR 始终生成检查，由完整 diff 判断是否只改文档。纯文档 PR 跳过重任务，但仍展开 E2E matrix 并跳过内部步骤，使 6 个必需名称都出现，汇总检查成功。代码移入文档目录、空 diff 或路径判断失败都不能绕过校验。
 
-保留现有 7 个必需检查名称。`Tests, build, design and Worker packaging` 是汇总门禁：所有分片、浏览器、打包、业务 E2E 和邮件负向校验必须成功；代码 PR 中的跳过、失败或取消均阻止通过。路径判断与汇总门禁是真实依赖，其余检查不串行等待。
+保留现有 7 个必需检查名称。`Tests, build, design and Worker packaging` 是汇总门禁：所有分片、浏览器、打包、业务 E2E 和邮件负向校验必须成功；代码 PR 中的跳过、失败或取消均阻止通过。路径判断与汇总门禁是真实依赖，其余检查不串行等待。E2E 与汇总 job 使用 `!cancelled()`，避免 `always()` 在取消旧 PR 时仍继续执行并阻塞新提交；普通失败仍会触发汇总并拒绝通过。
 
 本地 `pnpm build` 使用 TypeScript 原生增量检查，缓存放在已忽略的 `node_modules/.cache/`；Vite 和 PDF 静态资源仍正常重建，不以旧 `dist/` 跳过校验。
 
