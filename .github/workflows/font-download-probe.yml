@@ -17,10 +17,10 @@ jobs:
         attempt: [0, 1, 2]
         source: [default, ubuntu-https]
     steps:
+      - uses: actions/checkout@v4
       - name: Prefer the existing official HTTPS mirror
         if: matrix.source == 'ubuntu-https'
-        run: |
-          sudo sed -i -e '/^http:\/\/azure\.archive\.ubuntu\.com\/ubuntu\//s/priority:1/priority:2/' -e '/^https:\/\/archive\.ubuntu\.com\/ubuntu\//s/priority:2/priority:1/' /etc/apt/apt-mirrors.txt
+        run: bash scripts/ci-apt-mirror.sh
       - run: sudo apt-get update
       - name: Download through APT and verify package bytes
         env:
@@ -28,21 +28,25 @@ jobs:
         run: |
           python3 - <<'PYTHON'
           import hashlib, json, os, pathlib, subprocess, time
-          metadata = subprocess.check_output(['apt-cache', 'show', '--no-all-versions', 'fonts-wqy-zenhei'], text=True)
+          metadata = subprocess.check_output(['apt-cache', 'show', '--no-all-versions', 'fonts-ipafont-gothic'], text=True)
           fields = dict(line.split(': ', 1) for line in metadata.split('\n\n')[0].splitlines() if ': ' in line and not line.startswith(' '))
           configuration = subprocess.check_output(['apt-config', 'dump'], text=True)
           limits = [line for line in configuration.splitlines() if 'Dl-Limit' in line or 'Pipeline-Depth' in line]
           mirrors = pathlib.Path('/etc/apt/apt-mirrors.txt').read_text()
           start = time.monotonic()
           with pathlib.Path('apt-download.log').open('w') as log:
-              result = subprocess.run(['apt-get', 'download', 'fonts-wqy-zenhei'], stdout=log, stderr=subprocess.STDOUT)
+              result = subprocess.run(['apt-get', '-o', 'Acquire::http::Dl-Limit=50', '-o', 'Acquire::https::Dl-Limit=0', 'download', 'fonts-ipafont-gothic'], stdout=log, stderr=subprocess.STDOUT)
           elapsed = time.monotonic() - start
-          packages = list(pathlib.Path('.').glob('fonts-wqy-zenhei*.deb'))
+          packages = list(pathlib.Path('.').glob('fonts-ipafont-gothic*.deb'))
           verified = len(packages) == 1 and hashlib.sha256(packages[0].read_bytes()).hexdigest() == fields['SHA256']
-          row = {'source': os.environ['SOURCE'], 'elapsed_s': elapsed, 'exit_code': result.returncode, 'verified': verified, 'version': fields['Version'], 'sha256': fields['SHA256'], 'mirrors': mirrors, 'limits': limits, 'log': pathlib.Path('apt-download.log').read_text()}
+          row = {'controlled_fault': 'HTTP limited to 50 KiB/s; HTTPS unlimited', 'source': os.environ['SOURCE'], 'elapsed_s': elapsed, 'exit_code': result.returncode, 'verified': verified, 'version': fields['Version'], 'sha256': fields['SHA256'], 'mirrors': mirrors, 'limits': limits, 'log': pathlib.Path('apt-download.log').read_text()}
           pathlib.Path('font-results.json').write_text(json.dumps(row, indent=2))
           print(json.dumps(row), flush=True)
           assert result.returncode == 0 and verified
+          if os.environ['SOURCE'] == 'ubuntu-https':
+              assert elapsed < 10, f'HTTPS fix still slow: {elapsed}s'
+          else:
+              assert elapsed > 50, f'HTTP slow-link control did not reproduce: {elapsed}s'
           PYTHON
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
