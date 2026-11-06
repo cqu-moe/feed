@@ -165,7 +165,7 @@ test('FEED02 real archive search reading and PDF history', async ({ app, screen,
   await expect(screen.getByRole('navigation', '通知分页').getByText('第 1 / 2 页')).toBeVisible();
   await screen.getByRole('button', '清除筛选').click();
 
-  await screen.getByLabel('通知来源').click();
+  await screen.getByRole('combobox', '按来源筛选').click();
   await screen.getByRole('option', '国际处').click();
   await expect(screen.getByRole('heading', { level: 2, name: 'FEED02 PDF 正文通知' })).toBeVisible();
   await expect(screen.getByRole('link', '统一阅读')).toHaveCount(1);

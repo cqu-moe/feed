@@ -14,6 +14,8 @@
 
 依赖使用 `actions/setup-node` 自带的 pnpm/npm 缓存。E2E 的 pnpm key 同时包含 Feed 与固定 Auth 前端 lockfile，npm key 包含 Auth 后端 lockfile。不缓存 `node_modules`、账号、会话、运行数据或浏览器证据；不增加 Docker/浏览器大缓存。仓库缓存预算按 10 GB 控制，升级 lockfile 后留意无用旧缓存。
 
+Linux 浏览器依赖安装前，`scripts/ci-apt-mirror.sh` 将 runner 已配置的 Ubuntu 官方 HTTPS 镜像调为首选，保留 Azure 和安全镜像作为备用。Azure HTTP 源可能响应缓慢但不报错，此时 APT 不会自动切到备用源。此调整覆盖打包、E2E 和邮件负向校验，保留完整 `--with-deps` 安装、APT 签名及包哈希校验，不新增系统包缓存。
+
 浏览器回归运行真实构建后的前端与 PDF.js，通过受控 HTTP fixture 提供通知和文件；权限、Range/HEAD、版本不可变与快照净化仍由 Miniflare 集成测试验证。普通构建和本地虚拟 PostHog token 构建分别运行，不能复用编译时配置不同的产物。`pnpm run ci` 保留给本地和 Cloudflare Builds；Actions 把同样的命令拆开并行，不再重复调用整套 `ci`。
 
 只授予 `contents: read`，不配置 Cloudflare secret，不负责部署。失败的浏览器截图、trace 和报告，以及经过脱敏的 E2E 证据保留 7 天。Worker dry-run 验证 Wrangler 配置、Worker 打包及 Linux Chrome 容器测试，不上传部署，也不证明远端绑定可用。

@@ -79,6 +79,7 @@ jobs:
       - run: pnpm build
       - run: pnpm check:design
       - run: pnpm check:worker
+      - run: bash scripts/ci-apt-mirror.sh
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm test:browser
       - name: PDF telemetry regression with intercepted local endpoint
