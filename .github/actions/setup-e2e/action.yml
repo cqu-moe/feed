@@ -32,6 +32,8 @@ runs:
       shell: bash
     - run: pnpm --dir .e2e/auth-checkout/frontend install --frozen-lockfile
       shell: bash
+    - run: bash scripts/ci-apt-mirror.sh
+      shell: bash
     - run: pnpm exec e2e-web install chromium --with-deps
       if: inputs.browser == 'chromium'
       shell: bash
