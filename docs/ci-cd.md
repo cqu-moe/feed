@@ -4,7 +4,7 @@
 
 ## GitHub Actions
 
-`.github/workflows/ci.yml` 在 main push、PR 和手动触发时运行。单测/Miniflare 集成测试分成 2 片；前端构建、设计规范、Worker/Docker dry-run 与浏览器回归共用一个安装环境；两轮真实 Auth/Feed 的 reader、ingestion、mail E2E；2 片邮件负向校验互相并行。手动运行额外覆盖 Firefox 和 WebKit。未删除用例、第二轮、移动端或负向校验。所有 job 使用 Ubuntu。
+`.github/workflows/ci.yml` 在 main push、PR 和手动触发时运行。单测/Miniflare 集成测试分成 2 片；前端构建、设计规范、Worker/Docker dry-run 与浏览器回归共用一个安装环境；两轮真实 Auth/Feed 的 reader、ingestion、mail E2E；2 片邮件负向校验互相并行。手动运行额外覆盖 Firefox 和 WebKit。未删除用例、第二轮、移动端或负向校验。所有 job 使用 Ubuntu；路径判断、汇总门禁及文档 PR 的空 E2E 检查使用 `ubuntu-slim`，需要浏览器、Miniflare 或 Docker 的校验使用完整 `ubuntu-latest`。
 
 同一 PR 新提交取消旧运行。main 和手动运行使用独立 run ID 分组，既不取消正在运行的提交，也不挤掉等待中的提交。main 的纯根目录 Markdown 或 `docs/` 变更使用 `paths-ignore`；PR 始终生成检查，由完整 diff 判断是否只改文档。纯文档 PR 跳过重任务，但仍展开 E2E matrix 并跳过内部步骤，使 6 个必需名称都出现，汇总检查成功。代码移入文档目录、空 diff 或路径判断失败都不能绕过校验。
 

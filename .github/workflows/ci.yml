@@ -20,7 +20,7 @@ concurrency:
 jobs:
   changes:
     name: Classify changed paths
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     timeout-minutes: 2
     outputs:
       code: ${{ steps.paths.outputs.code }}
@@ -99,7 +99,7 @@ jobs:
     needs: changes
     # Expand the matrix even for docs so all six required names exist.
     if: always() && needs.changes.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.changes.outputs.code == 'true' && 'ubuntu-latest' || 'ubuntu-slim' }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -177,7 +177,7 @@ jobs:
     name: Tests, build, design and Worker packaging
     needs: [changes, unit, package, e2e, mail-controls]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     timeout-minutes: 2
     steps:
       - env:
