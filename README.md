@@ -90,3 +90,5 @@ pnpm check:design
 MVP 当时的限制：扫描 PDF 已接 OCR，但自动识别会有姓名等错字，应对照原 PDF。只处理正文型 PDF，普通附件尚未全文索引。完成的 URL 不会每天重复采集，暂不自动追踪原文后续修改。当前使用 Firecrawl 无密钥入口，曾出现一次 IP 限制 403；后续可配置已有 API key 提高稳定性，未购买服务。
 
 这些边界用于控制外部请求和存储成本：快照、正文、截图、manifest 等小对象写入没有纳入 `archive_bytes` 日额度，R2 总存储和 D1 增长仍需要运维监控。
+
+<!-- Temporary documentation-only CI routing probe. -->
