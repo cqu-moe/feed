@@ -4,7 +4,19 @@
 
 ## GitHub Actions
 
-`.github/workflows/ci.yml` 在 main push、PR 和手动触发时运行 `pnpm run ci`：测试、TypeScript/Vite/PDF 静态资源构建、设计规范检查和 Worker dry-run。最后一步验证 Wrangler 配置及 Worker 打包，不上传或部署，也不证明远端绑定可用。随后安装 Chromium 并执行 `pnpm test:browser`，失败时保留浏览器截图、trace 和报告 7 天。浏览器测试运行真实构建后的前端与 PDF.js，通过受控 HTTP fixture 提供通知和文件；真实权限、Range/HEAD、版本不可变与快照净化仍由 Miniflare 集成测试验证。只授予 `contents: read`，不配置 Cloudflare secret，不负责部署。
+`.github/workflows/ci.yml` 在 main push、PR 和手动触发时运行。单测/Miniflare 集成测试分成 2 片；前端构建、设计规范、Worker/Docker dry-run 与浏览器回归共用一个安装环境；两轮真实 Auth/Feed 的 reader、ingestion、mail E2E；2 片邮件负向校验互相并行。手动运行额外覆盖 Firefox 和 WebKit。未删除用例、第二轮、移动端或负向校验。所有 job 使用 Ubuntu；路径判断、汇总门禁及文档 PR 的空 E2E 检查使用 `ubuntu-slim`，需要浏览器、Miniflare 或 Docker 的校验使用完整 `ubuntu-latest`。
+
+同一 PR 新提交取消旧运行。main 和手动运行使用独立 run ID 分组，既不取消正在运行的提交，也不挤掉等待中的提交。main 的纯根目录 Markdown 或 `docs/` 变更使用 `paths-ignore`；PR 始终生成检查，由完整 diff 判断是否只改文档。纯文档 PR 跳过重任务，但仍展开 E2E matrix 并跳过内部步骤，使 6 个必需名称都出现，汇总检查成功。代码移入文档目录、空 diff 或路径判断失败都不能绕过校验。
+
+保留现有 7 个必需检查名称。`Tests, build, design and Worker packaging` 是汇总门禁：所有分片、浏览器、打包、业务 E2E 和邮件负向校验必须成功；代码 PR 中的跳过、失败或取消均阻止通过。路径判断与汇总门禁是真实依赖，其余检查不串行等待。E2E 与汇总 job 使用 `!cancelled()`，避免 `always()` 在取消旧 PR 时仍继续执行并阻塞新提交；普通失败仍会触发汇总并拒绝通过。
+
+本地 `pnpm build` 使用 TypeScript 原生增量检查，缓存放在已忽略的 `node_modules/.cache/`；Vite 和 PDF 静态资源仍正常重建，不以旧 `dist/` 跳过校验。
+
+依赖使用 `actions/setup-node` 自带的 pnpm/npm 缓存。E2E 的 pnpm key 同时包含 Feed 与固定 Auth 前端 lockfile，npm key 包含 Auth 后端 lockfile。不缓存 `node_modules`、账号、会话、运行数据或浏览器证据；不增加 Docker/浏览器大缓存。仓库缓存预算按 10 GB 控制，升级 lockfile 后留意无用旧缓存。
+
+浏览器回归运行真实构建后的前端与 PDF.js，通过受控 HTTP fixture 提供通知和文件；权限、Range/HEAD、版本不可变与快照净化仍由 Miniflare 集成测试验证。普通构建和本地虚拟 PostHog token 构建分别运行，不能复用编译时配置不同的产物。`pnpm run ci` 保留给本地和 Cloudflare Builds；Actions 把同样的命令拆开并行，不再重复调用整套 `ci`。
+
+只授予 `contents: read`，不配置 Cloudflare secret，不负责部署。失败的浏览器截图、trace 和报告，以及经过脱敏的 E2E 证据保留 7 天。Worker dry-run 验证 Wrangler 配置、Worker 打包及 Linux Chrome 容器测试，不上传部署，也不证明远端绑定可用。
 
 ## Cloudflare Workers Builds
 
