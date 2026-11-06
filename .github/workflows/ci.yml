@@ -3,6 +3,10 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+  # Keep required checks present on documentation-only PRs.
   pull_request:
   workflow_dispatch:
 
@@ -10,14 +14,44 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  check:
-    name: Tests, build, design and Worker packaging
+  changes:
+    name: Classify changed paths
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 2
+    outputs:
+      code: ${{ steps.paths.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: paths
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            git diff --no-renames --name-only -z "$BASE...$HEAD" | node scripts/ci-changes.mjs >> "$GITHUB_OUTPUT"
+          else
+            echo 'code=true' >> "$GITHUB_OUTPUT"
+          fi
+
+  unit:
+    name: Unit and integration tests (${{ matrix.shard }}/4)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -26,7 +60,40 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm run ci
+      - run: node --test --test-shard=${{ matrix.shard }}/4 tests/*.test.mjs
+
+  package:
+    name: Build, design and Worker packaging
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm check:design
+      - run: pnpm check:worker
+
+  browser:
+    name: Browser regression
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm test:browser
       - name: PDF telemetry regression with intercepted local endpoint
@@ -44,6 +111,8 @@ jobs:
 
   e2e:
     name: Real Auth and Feed ${{ matrix.suite }} E2E (${{ matrix.browser }}, round ${{ matrix.round }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -60,50 +129,14 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-e2e
         with:
-          repository: cqu-moe/auth
-          ref: 9cbfed93dcd73b626c6e9d7f0b663ce679c0d1bd
-          path: .e2e/auth-checkout
-          persist-credentials: false
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: npm --prefix .e2e/auth-checkout ci
-      - run: pnpm --dir .e2e/auth-checkout/frontend install --frozen-lockfile
-      - run: pnpm exec e2e-web install chromium --with-deps
-        if: matrix.browser == 'chromium'
-        env:
-          PLAYWRIGHT_BROWSERS_PATH: .e2e/browser-cache
-          E2E_TELEMETRY_DISABLED: '1'
-          DO_NOT_TRACK: '1'
-      - run: pnpm exec playwright install --with-deps "${{ matrix.browser }}"
-        if: matrix.browser != 'chromium'
-        env:
-          PLAYWRIGHT_BROWSERS_PATH: .e2e/browser-cache
+          browser: ${{ matrix.browser }}
       - run: pnpm test:e2e
         env:
           FEED_E2E_AUTH_CHECKOUT: .e2e/auth-checkout
           FEED_E2E_SUITE: ${{ matrix.suite }}
           FEED_E2E_OUTPUT: .e2e/${{ matrix.suite }}-round-${{ matrix.round }}
-      - name: Mail gate negative controls
-        if: matrix.suite == 'mail' && matrix.round == 1
-        run: pnpm test:e2e:mail:controls
-        env:
-          FEED_E2E_AUTH_CHECKOUT: .e2e/auth-checkout
-          FEED_E2E_CONTROL_OUTPUT: .e2e/mail-controls
-      - uses: actions/upload-artifact@v4
-        if: always() && matrix.suite == 'mail' && matrix.round == 1
-        with:
-          name: feed-mail-negative-controls-${{ matrix.browser }}
-          path: |
-            .e2e/mail-controls/controls.json
-            .e2e/mail-controls/*/public/
-          if-no-files-found: error
-          retention-days: 7
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -111,3 +144,62 @@ jobs:
           path: .e2e/${{ matrix.suite }}-round-${{ matrix.round }}/public/
           if-no-files-found: error
           retention-days: 7
+
+  mail-controls:
+    name: Mail negative controls (${{ matrix.browser }}, ${{ matrix.shard }}/4)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+        browser: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["chromium","firefox","webkit"]' || '["chromium"]') }}
+    env:
+      FEED_E2E_BROWSER: ${{ matrix.browser }}
+      FEED_E2E_CROSS_BROWSER: ${{ matrix.browser != 'chromium' && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup-e2e
+        with:
+          browser: ${{ matrix.browser }}
+      - name: Mail gate negative controls
+        run: pnpm test:e2e:mail:controls
+        env:
+          FEED_E2E_AUTH_CHECKOUT: .e2e/auth-checkout
+          FEED_E2E_CONTROL_SHARD: ${{ matrix.shard }}/4
+          FEED_E2E_CONTROL_OUTPUT: .e2e/mail-controls
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: feed-mail-negative-controls-${{ matrix.browser }}-${{ matrix.shard }}
+          path: |
+            .e2e/mail-controls/controls.json
+            .e2e/mail-controls/*/public/
+          if-no-files-found: error
+          retention-days: 7
+
+  check:
+    # Preserve the required check and make every new shard a required gate.
+    name: Tests, build, design and Worker packaging
+    needs: [changes, unit, package, browser, e2e, mail-controls]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          const needs = JSON.parse(process.env.NEEDS);
+          assert.equal(needs.changes.result, 'success');
+          const expected = needs.changes.outputs.code === 'false' ? 'skipped' : 'success';
+          for (const [job, {result}] of Object.entries(needs)) {
+            if (job !== 'changes') assert.equal(result, expected, `${job}: ${result}`);
+          }
+          JS

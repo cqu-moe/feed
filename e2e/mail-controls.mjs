@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { assertSelectedAttemptCleanup } from './evidence.mjs';
+import { selectShard } from './shard.mjs';
 import { join, resolve } from 'node:path';
 
 // A control counts only when its intended failure and physical teardown are
@@ -19,9 +20,10 @@ const definitions = [
   { name: 'cleanup', env: { FEED_E2E_FAIL_CLEANUP: '1' }, reason: /Injected cleanup failure after successful physical cleanup/ },
   { name: 'startup-and-cleanup', env: { FEED_E2E_FAIL_STARTUP: '1', FEED_E2E_FAIL_CLEANUP: '1' }, reason: /Injected startup failure after real Worker initialization/, secondary: /Injected cleanup failure after successful physical cleanup/ },
 ];
+const selectedDefinitions = selectShard(definitions, process.env.FEED_E2E_CONTROL_SHARD);
 const results = [];
 try {
-  for (const definition of definitions) {
+  for (const definition of selectedDefinitions) {
     const output = join(root, definition.name);
     const env = { ...process.env, FEED_E2E_SUITE: 'mail', FEED_E2E_VARIANT: 'desktop', FEED_E2E_OUTPUT: output, ...definition.env };
     // Inherited fault controls must not change the reason another control fails.
