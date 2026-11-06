@@ -15,39 +15,41 @@ jobs:
       fail-fast: false
       matrix:
         attempt: [0, 1, 2]
+        source: [default, ubuntu-https]
     steps:
-      - run: sudo apt-get update
-      - name: Compare identical package bytes and verify SHA-256
-        env:
-          ATTEMPT: ${{ matrix.attempt }}
+      - name: Prefer the existing official HTTPS mirror
+        if: matrix.source == 'ubuntu-https'
         run: |
-          python3 - <<'PY'
-          import hashlib, json, os, pathlib, subprocess
+          sudo sed -i -e '/^http:\/\/azure\.archive\.ubuntu\.com\/ubuntu\//s/priority:1/priority:2/' -e '/^https:\/\/archive\.ubuntu\.com\/ubuntu\//s/priority:2/priority:1/' /etc/apt/apt-mirrors.txt
+      - run: sudo apt-get update
+      - name: Download through APT and verify package bytes
+        env:
+          SOURCE: ${{ matrix.source }}
+        run: |
+          python3 - <<'PYTHON'
+          import hashlib, json, os, pathlib, subprocess, time
           metadata = subprocess.check_output(['apt-cache', 'show', '--no-all-versions', 'fonts-wqy-zenhei'], text=True)
           fields = dict(line.split(': ', 1) for line in metadata.split('\n\n')[0].splitlines() if ': ' in line and not line.startswith(' '))
-          filename, digest = fields['Filename'], fields['SHA256']
-          assert filename.startswith('pool/') and '..' not in filename
-          assert len(digest) == 64
-          bases = ['http://azure.archive.ubuntu.com/ubuntu', 'https://azure.archive.ubuntu.com/ubuntu', 'https://archive.ubuntu.com/ubuntu']
-          offset = int(os.environ['ATTEMPT'])
-          bases = bases[offset:] + bases[:offset]
-          results = []
-          for index, base in enumerate(bases):
-              target = pathlib.Path(os.environ['RUNNER_TEMP']) / f'font-{index}.deb'
-              command = ['curl', '--fail', '--location', '--silent', '--show-error', '--connect-timeout', '10', '--max-time', '45', '--output', str(target), '--write-out', '%{json}', f'{base}/{filename}']
-              response = subprocess.run(command, capture_output=True, text=True)
-              metrics = json.loads(response.stdout)
-              verified = response.returncode == 0 and hashlib.sha256(target.read_bytes()).hexdigest() == digest
-              row = {'base': base, 'package': fields['Package'], 'version': fields['Version'], 'sha256': digest, 'exit_code': response.returncode, 'verified': verified, 'error': response.stderr, **{key: metrics[key] for key in ['http_code', 'time_total', 'size_download', 'speed_download']}}
-              results.append(row)
-              print(json.dumps(row), flush=True)
-          pathlib.Path('font-results.json').write_text(json.dumps(results, indent=2))
-          assert any(row['verified'] for row in results), 'No endpoint delivered the expected package bytes'
-          PY
+          configuration = subprocess.check_output(['apt-config', 'dump'], text=True)
+          limits = [line for line in configuration.splitlines() if 'Dl-Limit' in line or 'Pipeline-Depth' in line]
+          mirrors = pathlib.Path('/etc/apt/apt-mirrors.txt').read_text()
+          start = time.monotonic()
+          with pathlib.Path('apt-download.log').open('w') as log:
+              result = subprocess.run(['apt-get', 'download', 'fonts-wqy-zenhei'], stdout=log, stderr=subprocess.STDOUT)
+          elapsed = time.monotonic() - start
+          packages = list(pathlib.Path('.').glob('fonts-wqy-zenhei*.deb'))
+          verified = len(packages) == 1 and hashlib.sha256(packages[0].read_bytes()).hexdigest() == fields['SHA256']
+          row = {'source': os.environ['SOURCE'], 'elapsed_s': elapsed, 'exit_code': result.returncode, 'verified': verified, 'version': fields['Version'], 'sha256': fields['SHA256'], 'mirrors': mirrors, 'limits': limits, 'log': pathlib.Path('apt-download.log').read_text()}
+          pathlib.Path('font-results.json').write_text(json.dumps(row, indent=2))
+          print(json.dumps(row), flush=True)
+          assert result.returncode == 0 and verified
+          PYTHON
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
-          name: font-transport-${{ matrix.attempt }}
-          path: font-results.json
+          name: font-apt-${{ matrix.source }}-${{ matrix.attempt }}
+          path: |
+            font-results.json
+            apt-download.log
           if-no-files-found: error
           retention-days: 7
