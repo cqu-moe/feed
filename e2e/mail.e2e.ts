@@ -23,14 +23,14 @@ beforeEach(async ({ browser }) => {
 });
 afterEach(async () => { await mark(); expect(unexpected).toEqual([]); });
 
-test('FEED04 real mail Queue, signed callbacks, policy and unknown recovery', async ({ app, browser, screen }) => {
+test('FEED04 real mail Queue, policy and safe idempotency', async ({ app, browser, screen }) => {
   await app.open('/subscriptions');
   await expect(screen.getByRole('heading', /^重大通知/)).toBeVisible();
   if (process.env.FEED_E2E_BREAK_ASSERTION === '1') await expect(screen.getByRole('heading', '故意错误的邮件成功断言')).toBeVisible();
   const empty = await ingestion();
   for (const table of ['articles', 'tasks', 'revisions', 'events', 'objects']) expect(empty[table]).toEqual([]);
   const noMail = await state();
-  for (const table of ['mail_messages', 'mail_items', 'mail_webhook_receipts', 'user_deliveries', 'accepted']) expect(noMail[table]).toEqual([]);
+  for (const table of ['mail_messages', 'mail_items', 'user_deliveries', 'accepted']) expect(noMail[table]).toEqual([]);
   expect((await admin('/internal/mail', 'GET')).status).toBe(401);
   expect((await admin('/internal/mail/recover', 'POST', {}, 'invalid-token')).status).toBe(401);
   await mark('empty business state and actual administrator denial');
@@ -98,28 +98,16 @@ test('FEED04 real mail Queue, signed callbacks, policy and unknown recovery', as
     expect(read.status).toBe(200); expect(read.body.revision.id).toBe(event.revision_id);
     expect(read.body.article.bodyText.length).toBeGreaterThan(5);
   }
-  if (process.env.FEED_E2E_MAIL_WRONG_ORACLE === '1') expect(s.mail_messages[0].state).toBe('delivered');
-  const first = s.mail_messages[0], key = first.idempotency_key;
+  if (process.env.FEED_E2E_MAIL_WRONG_ORACLE === '1') expect(s.mail_messages[0].state).toBe('rejected');
+  const first = s.mail_messages[0];
   const outbox = (await ingestion()).outbox.find((r: Row) => r.topic === 'feed-mail' && JSON.parse(r.payload_json).messageId === first.id);
   const count = posts(s).length;
   await control('mail-duplicate', { outboxId: outbox.id });
   await until('native duplicate receipt', async () => (await ingestion()).outbox.some((r: Row) => r.id === outbox.id && r.receipt_attempts >= 2));
   expect(posts(await state())).toHaveLength(count);
-  for (const invalid of [{ invalid: true }, { stale: true }]) {
-    expect((await control('mail-callback', { key, type: 'delivered', ...invalid })).status).toBe(401);
-  }
-  expect((await state()).mail_webhook_receipts).toHaveLength(0);
-  expect((await control('mail-callback', { key, type: 'delivered', recipient: 'wrong@example.test', receiptId: 'wrong-recipient' })).status).toBe(200);
-  expect((await state()).mail_webhook_receipts[0].state).toBe('ignored');
   expect((await message(first.id)).state).toBe('accepted');
-  await receipt(key, 'delivered', 'first-delivered');
-  const receipts = (await state()).mail_webhook_receipts.length;
-  await receipt(key, 'delivered', 'first-delivered');
-  expect((await state()).mail_webhook_receipts).toHaveLength(receipts);
-  await receipt(key, 'sent', 'late-sent');
-  expect((await message(first.id)).state).toBe('delivered');
-  for (const item of s.mail_messages.filter((r: Row) => r.id !== first.id)) await receipt(item.idempotency_key, 'delivered');
-  await mark('readable immutable R2 mail, real reader versions, owner/event dedup, native duplicate and authenticated callback ordering');
+  expect(s.accepted.map((r: Row) => r.key).sort()).toEqual(s.mail_messages.map((r: Row) => r.idempotency_key).sort());
+  await mark('readable immutable R2 mail, real reader versions, owner/event dedup and native duplicate acceptance');
 
   // Historical backfill creates genuine archived events, never mail candidates.
   await ok(`/internal/sources/${sources[0]}/backfill`, 'POST', { requestId: 'feed04-history-run', windowDays: 30 }, 202);
@@ -180,7 +168,6 @@ test('FEED04 real mail Queue, signed callbacks, policy and unknown recovery', as
   expect(posts(retryState, retryUnknown.idempotency_key)).toHaveLength(unknownAttempts + 1);
   expect(posts(retryState, retryUnknown.idempotency_key)[0].payload).toEqual(posts(retryState, retryUnknown.idempotency_key)[1].payload);
   expect(retryState.accepted.filter((r: Row) => r.key === retryUnknown.idempotency_key)).toHaveLength(1);
-  await receipt(retryUnknown.idempotency_key, 'delivered');
   await mark('actual lost response stream creates diagnosable unknown; bounded retry reuses immutable key without another provider acceptance');
 
   // The browser sees actual delivery projections and subscription modes before clock travel.
@@ -219,7 +206,6 @@ test('FEED04 real mail Queue, signed callbacks, policy and unknown recovery', as
   expect(posts(s, digest.idempotency_key)).toHaveLength(2);
   expect(posts(s, digest.idempotency_key)[0].payload).toEqual(posts(s, digest.idempotency_key)[1].payload);
   expect(s.accepted.filter((r: Row) => r.key === digest.idempotency_key)).toHaveLength(1);
-  await receipt(digest.idempotency_key, 'delivered');
   await mark('controlled daily window, immutable digest membership and deadline-respecting idempotent 429 recovery');
 
   // New updates now match daily mode; build the next window without seeding state.
@@ -230,7 +216,6 @@ test('FEED04 real mail Queue, signed callbacks, policy and unknown recovery', as
     await pump(); return (await state()).mail_messages.find((r: Row) => r.state === 'submission_unknown');
   });
   expect(unknown.provider_id).toBeNull(); expect(unknown.delivered_at).toBeNull();
-  expect((await ok(`/internal/mail/${unknown.id}/reconcile`, 'POST', {})).reason).toBe('provider_identity_required');
   const unknownCount = posts(await state(), unknown.idempotency_key).length;
   await recover(); await pump(); expect(posts(await state(), unknown.idempotency_key)).toHaveLength(unknownCount);
   await control('set-entitlements', { userId: owner, access: false, limit: 3 });
@@ -239,37 +224,11 @@ test('FEED04 real mail Queue, signed callbacks, policy and unknown recovery', as
   expect((await message(unknown.id)).last_error).toBe('reconciliation_required');
   expect((await message(unknown.id)).next_attempt_at).toBeNull();
   expect((await ok('/internal/mail')).messages.find((r: Row) => r.id === unknown.id).state).toBe('submission_unknown');
-  await control('set-entitlements', { userId: owner, access: true, limit: 3 });
-  await receipt(unknown.idempotency_key, 'sent');
-  await control('mail-provider-event', { key: unknown.idempotency_key, event: 'delivered' });
-  expect((await ok(`/internal/mail/${unknown.id}/reconcile`, 'POST', {})).state).toBe('delivered');
-  const recoveredProvider = (await message(unknown.id)).provider_id;
-  expect((await state()).calls.some((r: Row) => r.method === 'GET' && r.path === `/emails/${recoveredProvider}`)).toBe(true);
-  expect(posts(await state(), unknown.idempotency_key)).toHaveLength(unknownCount);
-  await mark('unknown submission stops blind retries after policy/window change, signed identity plus actual provider lookup recovers');
-
-  await captureUpdate(mainId); await control('mail-clock', { advanceMs: 86400000 });
-  await control('mail-mode', { mode: 'callback-first' }); await recover();
-  const early = await until('delivered callback arrives before send response', async () => {
-    await pump(); return (await state()).mail_messages.find((r: Row) => r.id !== unknown.id && r.kind === 'daily_digest' && r.state === 'delivered' && r.created_at > unknown.created_at);
-  });
-  expect(early.delivered_at).not.toBeNull(); expect(early.attempts).toBe(1);
-  await receipt(early.idempotency_key, 'sent', 'early-late-sent');
-  expect((await message(early.id)).state).toBe('delivered');
-  await receipt(early.idempotency_key, 'bounced', 'verified-bounce');
-  await receipt(early.idempotency_key, 'delivered', 'late-delivered-after-bounce');
-  expect((await message(early.id)).state).toBe('bounced');
-  expect((await state()).mail_suppressions).toHaveLength(1);
-  const bounceCount = posts(await state()).length;
-  await captureUpdate(mainId); await control('mail-clock', { advanceMs: 86400000 }); await recover(); await pump();
-  expect(posts(await state())).toHaveLength(bounceCount);
-  expect((await state()).user_deliveries.some((r: Row) => r.state === 'pending')).toBe(true);
-  expect((await ok('/internal/mail')).messages.find((r: Row) => r.id === early.id).state).toBe('bounced');
   const final = await state(), finalIngestion = await ingestion();
   for (const item of final.mail_items) expect(finalIngestion.events.find((r: Row) => r.id === item.event_id).history_only).toBe(0);
   expect(new Set(final.user_deliveries.map((r: Row) => `${r.owner_sub}:${r.event_id}`)).size).toBe(final.user_deliveries.length);
   for (const accepted of final.accepted) expect(new Set(posts(final, accepted.key).map((r: Row) => JSON.stringify(r.payload))).size).toBe(1);
-  await mark('callback-before-response never regresses; verified bounce suppresses later mail and delayed receipts cannot undo it');
+  await mark('expired unknown submission stops blind retries and preserves safe deduplicated acceptance history');
 });
 
 function posts(s: Row, key?: string): Row[] { return s.calls.filter((r: Row) => r.method === 'POST' && (!key || r.key === key)); }
@@ -302,7 +261,6 @@ async function ok(path: string, method = 'GET', body?: Row, status = 200): Promi
 }
 async function pump() { await ok('/internal/capture-tasks/recover', 'POST', {}); }
 async function recover() { await ok('/internal/mail/recover', 'POST', {}, 202); await pump(); }
-async function receipt(key: string, type: string, receiptId?: string) { expect((await control('mail-callback', { key, type, ...(receiptId ? { receiptId } : {}) })).status).toBe(200); }
 async function captureUpdate(articleId: string) {
   generation++; await control('ingestion-content', { generation });
   const task = (await ok('/internal/capture-tasks', 'POST', { articleId, requestId: `feed04-content-${generation}` }, 202)).task;

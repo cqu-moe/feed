@@ -25,16 +25,15 @@ export function createMail(env,{now=()=>Date.now(),provider=createResendProvider
           (SELECT COUNT(DISTINCT i.event_id) FROM mail_items i WHERE i.message_id=m.id) AS event_count
         FROM mail_messages m WHERE m.id=?`).bind(id).first();
       if(!message)return;
-      let outcome=state==='submission_unknown'||state==='accepted'?'unverified':state==='cancelled'?'canceled'
+      const outcome=state==='submission_unknown'||state==='accepted'?'unverified':state==='cancelled'?'canceled'
         :state==='deferred'?'partial':'failure';
-      if(state==='delivered')outcome='success';
       captureFeedWorkerEvent(env,lifecycle,'feed_delivery_finalized',`feed_mail:${id}`,{
         trigger:'automatic',operation:'mail_delivery',flow:'notification',stage,outcome,
         operation_id:id,attempt_id:`${id}:${message.attempts}`,message_id:id,
         owner_sub:message.owner_sub,message_kind:message.kind,
         delivery_count:message.delivery_count,event_count:message.event_count,attempt_count:message.attempts,
-        state,error_code,provider_submission:['accepted','delivered','bounced','complained','rejected','submission_unknown'].includes(state),
-        delivered:state==='delivered',end_to_end_duration_ms:Math.max(0,now()-message.created_at),
+        state,error_code,provider_submission:['accepted','rejected','submission_unknown'].includes(state),
+        delivered:false,end_to_end_duration_ms:Math.max(0,now()-message.created_at),
         duration_basis:'message_created_to_final_state',
       });
     }catch{}
@@ -232,7 +231,7 @@ export function createMail(env,{now=()=>Date.now(),provider=createResendProvider
         ${checked?`AND ${checked.sql}`:''}`)
       .bind(token,at+2*minute,at,at,id,message.attempts,message.submitted_at,at,at,at-23.5*3600_000,...(checked?.args??[])).run();
     if(!acquired.meta.changes)return {id,state:'in_progress'};
-    // A webhook may commit while the claim is acquired. No network request has happened yet.
+    // Respect existing suppressions through the final preflight check.
     const suppression=await env.DB.prepare('SELECT reason FROM mail_suppressions WHERE recipient_hash=?').bind(message.recipient_hash).first();
     if(suppression){
       const uncertain=message.submitted_at!==null,state=uncertain?'submission_unknown':'cancelled';
@@ -285,12 +284,7 @@ export function createMail(env,{now=()=>Date.now(),provider=createResendProvider
   }
 
   async function recover(){
-    const receipts=await env.DB.prepare(`SELECT id FROM mail_webhook_receipts WHERE state='pending' AND next_attempt_at<=? AND attempts<6
-      ORDER BY received_at,id LIMIT ?`).bind(now(),limit).all();
-    for(const receipt of receipts.results){
-      try{await applyReceipt(receipt.id);}catch{await deferReceipt(receipt.id);}
-    }
-    if(!enabled())return {disabled:true,receipts:receipts.results.length};
+    if(!enabled())return {disabled:true};
     const prepared=await preparePending();
     const digests=await prepareDigests();
     const rows=await env.DB.prepare(`SELECT id,attempts FROM mail_messages WHERE state IN ('prepared','deferred','submitting','submission_unknown')
@@ -328,84 +322,7 @@ export function createMail(env,{now=()=>Date.now(),provider=createResendProvider
     return {...prepared,digests:digests.prepared,recovered:rows.results.length};
   }
 
-  async function receiveWebhook(request){
-    const event=await provider.verifyWebhook(request);
-    const object=await savePrivate(JSON.stringify(event));
-    await env.DB.prepare(`INSERT INTO mail_webhook_receipts(id,payload_key,payload_hash,received_at)
-      VALUES (?,?,?,?) ON CONFLICT(id) DO NOTHING`).bind(event.id,object.key,object.hash,now()).run();
-    const saved=await env.DB.prepare('SELECT payload_hash,state FROM mail_webhook_receipts WHERE id=?').bind(event.id).first();
-    if(saved.payload_hash!==object.hash){const error=new Error('webhook_receipt_conflict');error.status=409;throw error;}
-    if(saved.state!=='pending')return {received:true};
-    try{await applyReceipt(event.id);}catch{return {received:true,pending:true};}
-    return {received:true};
-  }
-
-  async function deferReceipt(id){
-    await env.DB.prepare(`UPDATE mail_webhook_receipts SET attempts=attempts+1,next_attempt_at=?,last_error='receipt_apply_failed'
-      WHERE id=? AND state='pending'`).bind(now()+5*minute,id).run();
-  }
-
-  async function reconcile(id){
-    if(!idPattern.test(id??''))return null;
-    const message=await env.DB.prepare('SELECT * FROM mail_messages WHERE id=?').bind(id).first();
-    if(!message)return null;
-    if(!message.provider_id)return {id,state:message.state,reason:'provider_identity_required'};
-    const result=await provider.get(message.provider_id);
-    if(result.status!=='found'||result.event==='unknown')return {id,state:message.state,reason:'provider_unavailable'};
-    const receiptId=`lookup:${id}:${result.event}`;
-    const event={id:receiptId,type:result.event,providerId:result.providerId,recipient:result.recipient,tags:result.tags,occurredAt:now()};
-    const object=await savePrivate(JSON.stringify(event));
-    await env.DB.prepare(`INSERT INTO mail_webhook_receipts(id,payload_key,payload_hash,received_at)
-      VALUES (?,?,?,?) ON CONFLICT(id) DO NOTHING`).bind(receiptId,object.key,object.hash,now()).run();
-    await applyReceipt(receiptId);
-    return {id,state:(await env.DB.prepare('SELECT state FROM mail_messages WHERE id=?').bind(id).first()).state};
-  }
-
-  async function applyReceipt(id){
-    const receipt=await env.DB.prepare("SELECT * FROM mail_webhook_receipts WHERE id=? AND state='pending'").bind(id).first();
-    if(!receipt)return;
-    const event=await readPrivate(receipt.payload_key,receipt.payload_hash);
-    const tagged=event.tags?.feed_message_id;
-    const message=await env.DB.prepare(`SELECT * FROM mail_messages WHERE provider_id=? OR id=? ORDER BY provider_id IS NULL LIMIT 1`)
-      .bind(event.providerId,idPattern.test(tagged??'')?tagged:'').first();
-    if(!message||event.type==='ignored'||message.submitted_at===null
-      ||(message.provider_id!==null&&message.provider_id!==event.providerId)
-      ||(tagged&&tagged!==message.id)||message.recipient_hash!==await sha(event.recipient.trim().toLowerCase())){
-      await env.DB.prepare("UPDATE mail_webhook_receipts SET state='ignored',processed_at=? WHERE id=? AND state='pending'").bind(now(),id).run();
-      return;
-    }
-    const columns={accepted:'accepted_at',delivered:'delivered_at',bounced:'bounced_at',complained:'complained_at'};
-    const column=columns[event.type];
-    if(!column)throw new Error('webhook_event_invalid');
-    const at=now(),state=`CASE WHEN complained_at IS NOT NULL OR ?='complained' THEN 'complained'
-      WHEN bounced_at IS NOT NULL OR ?='bounced' THEN 'bounced'
-      WHEN delivered_at IS NOT NULL OR ?='delivered' THEN 'delivered' ELSE 'accepted' END`;
-    const statements=[
-      env.DB.prepare(`UPDATE mail_messages SET provider_id=?,${column==='accepted_at'?'':`${column}=COALESCE(${column},?),`}
-        accepted_at=COALESCE(accepted_at,?),state=${state},lease_token=NULL,lease_until=NULL,
-        next_attempt_at=NULL,last_error=NULL,updated_at=? WHERE id=? AND (provider_id IS NULL OR provider_id=?)`)
-        .bind(event.providerId,...(column==='accepted_at'?[]:[event.occurredAt]),event.occurredAt,event.type,event.type,event.type,at,message.id,event.providerId),
-      env.DB.prepare(`UPDATE user_deliveries SET state=CASE
-        WHEN EXISTS(SELECT 1 FROM mail_messages WHERE id=? AND state IN ('bounced','complained')) THEN 'suppressed'
-        WHEN EXISTS(SELECT 1 FROM mail_messages WHERE id=? AND state='delivered') THEN 'delivered' ELSE 'accepted' END,
-        suppression_reason=(SELECT CASE WHEN state IN ('bounced','complained') THEN 'email_'||state ELSE NULL END FROM mail_messages WHERE id=?),
-        updated_at=? WHERE claimed_message_id=?`).bind(message.id,message.id,message.id,at,message.id),
-    ];
-    if(['bounced','complained'].includes(event.type))statements.push(env.DB.prepare(`INSERT INTO mail_suppressions(recipient_hash,reason,provider_id,created_at)
-      VALUES (?,?,?,?) ON CONFLICT(recipient_hash) DO UPDATE SET reason=CASE WHEN mail_suppressions.reason='complained' THEN 'complained' ELSE excluded.reason END`)
-      .bind(message.recipient_hash,event.type,event.providerId,at));
-    statements.push(env.DB.prepare("UPDATE mail_webhook_receipts SET state='processed',message_id=?,processed_at=? WHERE id=? AND state='pending'")
-      .bind(message.id,at,id));
-    const committed=await env.DB.batch(statements);
-    if(committed[0].meta.changes&&(event.type!=='accepted'||message.state!=='accepted')){
-      const current=await env.DB.prepare('SELECT state FROM mail_messages WHERE id=?').bind(message.id).first();
-      if(current?.state)await emitFinalized(message.id,current.state,{
-        stage:'provider_receipt',
-        error_code:['bounced','complained'].includes(event.type)?`email_${event.type}`:null,
-      });
-    }
-  }
-  return {preparePending,prepareDigests,deliver,recover,list,receiveWebhook,reconcile};
+  return {preparePending,prepareDigests,deliver,recover,list};
 }
 
 export async function handleMailMessage(body,env,dependencies){

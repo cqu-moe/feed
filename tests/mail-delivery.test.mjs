@@ -1,6 +1,5 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {createHmac} from 'node:crypto';
 import {subscriptionsFixture,subscriptionsInvoke,notificationInvoke,adminRequest,feedJobsInvoke} from './helpers/subscriptions-fixture.mjs';
 import {seedReadyEvent} from './helpers/notification-event.mjs';
 
@@ -13,12 +12,9 @@ async function telemetryEvents(fixture){
   return body.events;
 }
 
-test('mail telemetry separates provider acceptance from verified delivery',async()=>{
+test('mail telemetry records provider acceptance without claiming delivery',async()=>{
   const sent=[];
   const f=await subscriptionsFixture({clock:start,telemetryHarness:true,mailHarness:{async fetch(request){
-    if(request.method==='GET')return Response.json({
-      id:'88888888-8888-4888-8888-888888888888',to:['reader@example.test'],last_event:'delivered',tags:sent[0].body.tags,
-    });
     const body=await request.json();
     sent.push({key:request.headers.get('idempotency-key'),body});
     return Response.json({id:'88888888-8888-4888-8888-888888888888'});
@@ -30,7 +26,7 @@ test('mail telemetry separates provider acceptance from verified delivery',async
     await f.mailClock(start+120_000);await f.mail('preparePending');await f.replayMail();
     const view=await adminRequest(f.mf, f.admin,'/internal/mail',undefined,{method:'GET'});
     const messageId=view.body.messages[0].id;
-    let events=(await telemetryEvents(f)).filter(event=>event.event==='feed_delivery_finalized');
+    const events=(await telemetryEvents(f)).filter(event=>event.event==='feed_delivery_finalized');
     assert.equal(events.length,1);
     assert.equal(events[0].properties.state,'accepted');
     assert.equal(events[0].properties.outcome,'unverified');
@@ -39,17 +35,6 @@ test('mail telemetry separates provider acceptance from verified delivery',async
     assert.equal(events[0].properties.operation_id,messageId);
     assert.equal(events[0].properties.attempt_id,`${messageId}:1`);
     assert.equal(events[0].properties.owner_sub,'mail-owner');
-
-    const reconciled=await adminRequest(f.mf, f.admin,`/internal/mail/${messageId}/reconcile`,{});
-    assert.equal(reconciled.status,200,JSON.stringify(reconciled));
-    assert.equal(reconciled.body.state,'delivered');
-    events=(await telemetryEvents(f)).filter(event=>event.event==='feed_delivery_finalized');
-    assert.equal(events.length,2);
-    assert.equal(events[1].properties.outcome,'success');
-    assert.equal(events[1].properties.state,'delivered');
-    assert.equal(events[1].properties.delivered,true);
-    assert.equal(events[1].properties.operation_id,messageId);
-    assert.equal(events[1].properties.attempt_id,`${messageId}:1`);
     assert.equal(JSON.stringify(events).includes('reader@example.test'),false);
     assert.equal(JSON.stringify(events).includes(sent[0].body.subject),false);
     assert.equal(JSON.stringify(events).includes(sent[0].body.text),false);
@@ -106,7 +91,6 @@ test('repeated queue exhaustion before provider submission stops automatic recov
 test('two subscriptions and duplicate preparation submit one immutable version email',async()=>{
   const submissions=[];
   const fixture=await subscriptionsFixture({clock:start,mailHarness:{async fetch(request){
-    if(request.method==='GET')return Response.json({id:'11111111-1111-4111-8111-111111111111',to:['reader@example.test'],last_event:'delivered',tags:submissions[0].body.tags});
     submissions.push({key:request.headers.get('idempotency-key'),body:await request.json()});
     return Response.json({id:'11111111-1111-4111-8111-111111111111'});
   }}});
@@ -138,63 +122,7 @@ test('two subscriptions and duplicate preparation submit one immutable version e
     const event=await adminRequest(mf, admin,`/internal/notification-events/${eventId}`,undefined,{method:'GET'});
     assert.equal(event.body.deliveries.length,1);
     assert.equal(event.body.deliveries[0].state,'accepted');
-    const reconciled=await adminRequest(mf, admin,`/internal/mail/${view.body.messages[0].id}/reconcile`,{});
-    assert.equal(reconciled.status,200,JSON.stringify(reconciled));
-    assert.equal(reconciled.body.state,'delivered');
-    assert.equal(submissions.length,1);
   }finally{await mf.dispose();}
-});
-
-test('signed durable webhooks reconcile unknown submissions and out-of-order bounce suppresses only mail',async()=>{
-  const sent=[];
-  const f=await subscriptionsFixture({clock:start,mailHarness:{async fetch(request){sent.push(await request.json());return new Response('lost',{status:502});}}});
-  try{
-    const created=await subscriptionsInvoke(f.mf,'change',{id:'mail-owner'},{requestId:'mail-webhook-create',name:'及时通知',sourceIds:['jwc'],emailMode:'immediate'});
-    assert.equal(created.status,200);
-    const id=await seedReadyEvent(f.mf,{id:'d11111111111111111111111',sourceId:'jwc',firstSeenAt:start+1,observedAt:start+1,readyAt:start+2,publishedAt:new Date(start+1).toISOString(),datePrecision:'minute'});
-    await notificationInvoke(f.mf,'enqueueEvent',id);await notificationInvoke(f.mf,'replayMatchOutbox');
-    await f.mailClock(start+120_000);await f.mail('preparePending');await f.replayMail();
-    const messageId=sent[0].tags.find(tag=>tag.name==='feed_message_id').value;
-    const requests=new Map();
-    const sendHook=async(type,receiptId,overrides={})=>{
-      const body=JSON.stringify({type,created_at:new Date().toISOString(),data:{email_id:'44444444-4444-4444-8444-444444444444',to:['reader@example.test'],tags:{feed_message_id:messageId},...overrides}});
-      const timestamp=String(Math.floor(Date.now()/1000));
-      const signature=createHmac('sha256',Buffer.from('test-signing-key')).update(`${receiptId}.${timestamp}.${body}`).digest('base64');
-      const init={method:'POST',headers:{'content-type':'application/json','svix-id':receiptId,'svix-timestamp':timestamp,'svix-signature':`v1,${signature}`},body};
-      requests.set(receiptId,init);
-      return f.mf.dispatchFetch('https://feed.test/webhooks/resend',init);
-    };
-    await f.db.prepare("CREATE TRIGGER fail_receipt BEFORE INSERT ON mail_webhook_receipts BEGIN SELECT RAISE(ABORT,'receipt unavailable'); END").run();
-    let response=await sendHook('email.delivered','evt_delivered_1');
-    assert.equal(response.status,503);
-    await f.db.prepare('DROP TRIGGER fail_receipt').run();
-    await f.db.prepare("CREATE TRIGGER fail_receipt_apply BEFORE UPDATE ON mail_messages BEGIN SELECT RAISE(ABORT,'apply unavailable'); END").run();
-    response=await f.mf.dispatchFetch('https://feed.test/webhooks/resend',requests.get('evt_delivered_1'));
-    assert.equal(response.status,200,await response.text());
-    await f.db.prepare('DROP TRIGGER fail_receipt_apply').run();
-    await f.mail('recoverDisabled');
-    const recoveredWhileDisabled=await adminRequest(f.mf, f.admin,'/internal/mail',undefined,{method:'GET'});
-    assert.equal(recoveredWhileDisabled.body.messages[0].state,'delivered');
-    response=await f.mf.dispatchFetch('https://feed.test/webhooks/resend',requests.get('evt_delivered_1'));
-    assert.equal(response.status,200);
-    response=await sendHook('email.sent','evt_accepted_older');assert.equal(response.status,200);
-    let view=await adminRequest(f.mf, f.admin,'/internal/mail',undefined,{method:'GET'});
-    assert.equal(view.body.messages[0].state,'delivered');
-    assert.ok(view.body.messages[0].acceptedAt&&view.body.messages[0].deliveredAt);
-    response=await sendHook('email.bounced','evt_bounce_1');assert.equal(response.status,200);
-    response=await sendHook('email.delivered','evt_delivered_2');assert.equal(response.status,200);
-    view=await adminRequest(f.mf, f.admin,'/internal/mail',undefined,{method:'GET'});
-    assert.equal(view.body.messages[0].state,'bounced');
-    assert.ok(view.body.messages[0].deliveredAt&&view.body.messages[0].bouncedAt);
-    const second=await seedReadyEvent(f.mf,{id:'e11111111111111111111111',sourceId:'jwc',firstSeenAt:start+1,observedAt:start+1,readyAt:start+2,publishedAt:new Date(start+1).toISOString(),datePrecision:'minute'});
-    await notificationInvoke(f.mf,'enqueueEvent',second);await notificationInvoke(f.mf,'replayMatchOutbox');
-    assert.equal((await f.mail('preparePending')).prepared,0);
-    const event=await adminRequest(f.mf, f.admin,`/internal/notification-events/${second}`,undefined,{method:'GET'});
-    assert.equal(event.body.delivery.suppressionReason,'email_bounced');
-    const rss=await f.mf.dispatchFetch('https://feed.test'+created.body.subscription.rssUrl);
-    assert.equal(rss.status,200);assert.match(await rss.text(),/及时匹配通知/);
-    assert.equal(sent.length,1);
-  }finally{await f.mf.dispose();}
 });
 
 test('provider acceptance followed by a local commit failure retries the original message after its lease',async()=>{
@@ -214,31 +142,6 @@ test('provider acceptance followed by a local commit failure retries the origina
     assert.equal(sent.length,2);assert.deepEqual(sent[0],sent[1]);
     const view=await adminRequest(f.mf, f.admin,'/internal/mail',undefined,{method:'GET'});
     assert.equal(view.body.messages.length,1);assert.equal(view.body.messages[0].state,'accepted');
-  }finally{await f.mf.dispose();}
-});
-
-test('a delivered callback arriving before the send response cannot be downgraded by its later acceptance commit',async()=>{
-  let callback;
-  const f=await subscriptionsFixture({clock:start,mailHarness:{async fetch(request){
-    const mail=await request.json();await callback(mail);
-    return Response.json({id:'66666666-6666-4666-8666-666666666666'});
-  }}});
-  try{
-    callback=async mail=>{
-      const id='evt_early_delivered',timestamp=String(Math.floor(Date.now()/1000));
-      const body=JSON.stringify({type:'email.delivered',created_at:new Date().toISOString(),data:{email_id:'66666666-6666-4666-8666-666666666666',to:[mail.to],tags:{feed_message_id:mail.tags[0].value}}});
-      const signature=createHmac('sha256','test-signing-key').update(`${id}.${timestamp}.${body}`).digest('base64');
-      const response=await f.mf.dispatchFetch('https://feed.test/webhooks/resend',{method:'POST',body,headers:{'svix-id':id,'svix-timestamp':timestamp,'svix-signature':`v1,${signature}`}});
-      assert.equal(response.status,200);
-    };
-    await subscriptionsInvoke(f.mf,'change',{id:'mail-owner'},{requestId:'mail-early-webhook',name:'及时通知',sourceIds:['jwc'],emailMode:'immediate'});
-    const id=await seedReadyEvent(f.mf,{id:'f22222222222222222222222',sourceId:'jwc',firstSeenAt:start+1,observedAt:start+1,readyAt:start+2,publishedAt:new Date(start+1).toISOString(),datePrecision:'minute'});
-    await notificationInvoke(f.mf,'enqueueEvent',id);await notificationInvoke(f.mf,'replayMatchOutbox');
-    await f.mailClock(start+120_000);await f.mail('preparePending');await f.replayMail();
-    const message=await adminRequest(f.mf, f.admin,'/internal/mail',undefined,{method:'GET'});
-    assert.equal(message.body.messages[0].state,'delivered');
-    const event=await adminRequest(f.mf, f.admin,`/internal/notification-events/${id}`,undefined,{method:'GET'});
-    assert.equal(event.body.delivery.state,'delivered');
   }finally{await f.mf.dispose();}
 });
 

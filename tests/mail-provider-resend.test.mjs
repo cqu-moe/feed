@@ -1,11 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHmac } from 'node:crypto';
 
 import { createResendProvider } from '../worker/mail-provider-resend.mjs';
 
 const now = Date.parse('2026-10-12T04:00:00.000Z');
-const webhookSecret='whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw';
 
 test('send submits a fixed payload with the idempotency key and accepts a valid response', async () => {
   const calls = [];
@@ -126,10 +124,6 @@ test('outbound requests carry a bounded abort signal and classify aborts as unkn
     controller.abort();
     assert.deepEqual(await sendResult,
       {status:'unknown',code:'timeout'});
-    const getResult=provider.get('4ef9a417-02e9-4d39-ad75-9611e0fcc33c');
-    assert.equal(observedSignal,controller.signal);
-    assert.deepEqual(await getResult,
-      {status:'unavailable',code:'timeout'});
   }finally{
     AbortSignal.timeout=originalTimeout;
   }
@@ -152,145 +146,6 @@ test('the same idempotency key and immutable payload replay the original provide
   assert.deepEqual(bodies,[bodies[0],bodies[0]]);
 });
 
-test('get maps a singular recipient and tags from the email record', async () => {
-  const provider=createResendProvider({RESEND_API_KEY:'re_test_key'},{
-    fetch:async url=>{
-      assert.equal(url,'https://api.resend.com/emails/4ef9a417-02e9-4d39-ad75-9611e0fcc33c');
-      return new Response(JSON.stringify({
-        object:'email',
-        id:'4ef9a417-02e9-4d39-ad75-9611e0fcc33c',
-        to:['uu@401.moe'],
-        last_event:'delivered',
-        tags:[{name:'message_id',value:'event-001'}],
-      }),{status:200});
-    },
-    now:()=>now,
-  });
-
-  assert.deepEqual(await provider.get('4ef9a417-02e9-4d39-ad75-9611e0fcc33c'),{
-    status:'found',
-    providerId:'4ef9a417-02e9-4d39-ad75-9611e0fcc33c',
-    recipient:'uu@401.moe',
-    event:'delivered',
-    tags:{message_id:'event-001'},
-  });
-});
-
-test('get returns safe unavailable and not-found outcomes', async () => {
-  const cases=[
-    {status:404,expected:{status:'not_found'}},
-    {status:503,expected:{status:'unavailable',code:'server_error'}},
-    {status:200,body:'not json',expected:{status:'unavailable',code:'invalid_response'}},
-    {status:200,body:{id:'4ef9a417-02e9-4d39-ad75-9611e0fcc33c',to:[],last_event:'delivered'},
-      expected:{status:'unavailable',code:'invalid_response'}},
-  ];
-  for(const item of cases){
-    const provider=createResendProvider({RESEND_API_KEY:'re_test_key'},{
-      fetch:async()=>new Response(typeof item.body==='object'?JSON.stringify(item.body):item.body??'{}',{status:item.status}),
-      now:()=>now,
-    });
-    assert.deepEqual(await provider.get('4ef9a417-02e9-4d39-ad75-9611e0fcc33c'),item.expected);
-  }
-  const unavailable=createResendProvider({},{
-    fetch:async()=>{throw new Error('must not fetch');},
-    now:()=>now,
-  });
-  assert.deepEqual(await unavailable.get('4ef9a417-02e9-4d39-ad75-9611e0fcc33c'),
-    {status:'unavailable',code:'provider_unavailable'});
-  await assert.rejects(()=>unavailable.get('../escape'),
-    error=>error.status===400&&/Invalid mail provider id/.test(error.message));
-});
-
-test('verifyWebhook authenticates raw bytes and maps relevant events', async () => {
-  const provider=createResendProvider({RESEND_WEBHOOK_SECRET:webhookSecret},{now:()=>now});
-  const event=webhookEvent('email.bounced');
-  const result=await provider.verifyWebhook(signedRequest(event));
-
-  assert.deepEqual(result,{
-    id:'msg_001',
-    type:'bounced',
-    providerId:'56761188-7520-42d8-8898-ff6fc54ce618',
-    recipient:'uu@401.moe',
-    tags:{message_id:'event-001'},
-    occurredAt:Date.parse('2026-10-12T04:00:01.000Z'),
-    rawBody:JSON.stringify(event),
-  });
-});
-
-test('verifyWebhook accepts any valid v1 signature and ignores non-delivery events', async () => {
-  const provider=createResendProvider({RESEND_WEBHOOK_SECRET:webhookSecret},{now:()=>now});
-  const event=webhookEvent('email.opened');
-  const request=signedRequest(event,{
-    signatures:['v1,AAAA'.repeat(32).slice(0,67),signatureFor(event)],
-  });
-
-  assert.equal((await provider.verifyWebhook(request)).type,'ignored');
-});
-
-test('verifyWebhook maps every relevant Resend event type', async () => {
-  const provider=createResendProvider({RESEND_WEBHOOK_SECRET:webhookSecret},{now:()=>now});
-  for(const [source,type] of [
-    ['email.sent','accepted'],
-    ['email.delivered','delivered'],
-    ['email.bounced','bounced'],
-    ['email.complained','complained'],
-  ]){
-    assert.equal((await provider.verifyWebhook(signedRequest(webhookEvent(source)))).type,type);
-  }
-});
-
-test('verifyWebhook rejects replayed, changed, malformed, and oversized input safely', async () => {
-  const provider=createResendProvider({RESEND_WEBHOOK_SECRET:webhookSecret},{now:()=>now});
-  const event=webhookEvent('email.sent');
-  const checks=[
-    {request:signedRequest(event,{timestamp:now-301_000}),status:401},
-    {request:signedRequest({...event,data:{...event.data,subject:'changed'}},
-      {signatures:[signatureFor(event)]}),status:401},
-    {request:new Request('https://feed.cqu.moe/webhooks/resend',{
-      method:'POST',headers:{'svix-timestamp':String(now),'svix-signature':signatureFor(event)},body:'{}',
-    }),status:400},
-    {request:new Request('https://feed.cqu.moe/webhooks/resend',{
-      method:'POST',
-      headers:{
-        'svix-id':'msg_001',
-        'svix-timestamp':String(Math.floor(now/1000)),
-        'svix-signature':signatureForBody('{}'),
-      },
-      body:'{}',
-    }),status:400},
-  ];
-  for(const item of checks){
-    await assert.rejects(()=>provider.verifyWebhook(item.request),error=>{
-      assert.equal(error.status,item.status);
-      assert.equal(error.name,'MailProviderError');
-      assert.ok(!error.message.includes('uu@401.moe'));
-      return true;
-    });
-  }
-
-  const large=webhookEvent('email.sent');
-  large.data.subject='x'.repeat(256*1024);
-  await assert.rejects(()=>provider.verifyWebhook(signedRequest(large)),error=>error.status===413);
-});
-
-test('verifyWebhook rejects an oversized Content-Length before reading the body', async () => {
-  const provider=createResendProvider({RESEND_WEBHOOK_SECRET:webhookSecret},{now:()=>now});
-  const signed=signedRequest(webhookEvent('email.sent'));
-  const request=new Request('https://feed.cqu.moe/webhooks/resend',{
-    method:'POST',
-    headers:{...Object.fromEntries(signed.headers.entries()),'content-length':String(256*1024+1)},
-    body:'x',
-  });
-  await assert.rejects(()=>provider.verifyWebhook(request),error=>error.status===413);
-});
-
-test('verifyWebhook reports missing configuration without reading provider state', async () => {
-  const provider=createResendProvider({},{now:()=>now});
-  await assert.rejects(()=>provider.verifyWebhook(new Request('https://feed.cqu.moe/webhooks/resend',{
-    method:'POST',body:'{}',
-  })),error=>error.status===503&&error.name==='MailProviderError');
-});
-
 function snapshot(){
   return {
     from:'重大通知 <notifications@feed.cqu.moe>',
@@ -300,40 +155,4 @@ function snapshot(){
     text:'正文',
     tags:[{name:'message_id',value:'event-001'}],
   };
-}
-
-function webhookEvent(type){
-  return {
-    type,
-    created_at:'2026-10-12T04:00:01.000Z',
-    data:{
-      email_id:'56761188-7520-42d8-8898-ff6fc54ce618',
-      to:['uu@401.moe'],
-      subject:'通知标题',
-      tags:{message_id:'event-001'},
-    },
-  };
-}
-
-function signedRequest(event,{timestamp=now,signatures}={}){
-  const id='msg_001',body=JSON.stringify(event);
-  return new Request('https://feed.cqu.moe/webhooks/resend',{
-    method:'POST',
-    headers:{
-      'svix-id':id,
-      'svix-timestamp':String(Math.floor(timestamp/1000)),
-      'svix-signature':(signatures??[signatureFor(event)]).join(' '),
-    },
-    body,
-  });
-}
-
-function signatureFor(event,timestamp=now){
-  return signatureForBody(JSON.stringify(event),timestamp);
-}
-
-function signatureForBody(body,timestamp=now){
-  return `v1,${createHmac('sha256',Buffer.from(webhookSecret.slice(6),'base64'))
-    .update(`msg_001.${Math.floor(timestamp/1000)}.${body}`)
-    .digest('base64')}`;
 }

@@ -129,11 +129,11 @@ check-ready 读取指定 revision：已经 ready 就幂等结束；缺项则记�
 1. 已受理/已送达/永久取消就确认消息；未到 next_attempt_at 则持久延期。
 2. 请求 Auth 的 Feed 专用权益/已验证邮箱，重查订阅仍有效、邮件偏好及抑制记录。Auth 故障延期；明确无权/邮箱未验证暂停。未提交消息发现资格或收件人改变则取消并重新准备，不能修改已提交快照。
 3. 条件占用 message，持久化 `submitting`，用固定 idempotency_key 提交固定内容；保存 provider id、受理事实或错误。
-4. 网络结果不明保存 `submission_unknown`，通过服务商查询/webhook，或在其有效幂等窗口内用完全相同请求对账。超出窗口仍无法确认时转人工处理，不能因为 Queue 重试就发第二封。
+4. 网络结果不明保存 `submission_unknown`，在 Resend 幂等窗口内可重试完全相同的请求。超出窗口仍无法确认时到 Resend 后台核对，不能因为 Queue 重试就发第二封。
 
 可以在“已持久化延期/结果不明”后 ack，前提是定时恢复器确实扫描这些状态；未能保存状态则必须 retry。Queue 消费超时后，后继不能直接夺取邮件租约重发，要先判断之前是否可能提交。
 
-服务商 webhook 验签后先写唯一 receipt，再返回成功，异步应用状态。`email.sent/accepted`、收件服务器接收和用户阅读是不同事实。若选 Resend，其幂等键文档给出 24 小时窗口；数据库投递账本需保留更久，不能把服务商窗口当永久去重。[Resend 幂等说明](https://resend.com/docs/dashboard/emails/idempotency-keys) / [事件类型](https://resend.com/docs/webhooks/event-types)
+Feed 记录 Resend API 的受理结果；是否送达收件服务器由 Resend 记录。数据库投递账本保留得比 [Resend 的 24 小时幂等窗口](https://resend.com/docs/dashboard/emails/idempotency-keys) 更久。
 
 ## 交接、重试与恢复
 
@@ -150,7 +150,7 @@ Queue 启动器读取 task 与 attempt，调用指定 instance ID 的 create。�
 | 正文解析错误、验证码伪文件、缺附件 | 采集/完整性模块 | 保存证据与缺项；失败源不影响其他通知，不发布部分版本 |
 | OCR 失败 | OCR Workflow | 只重试该输入/处理步骤，不重跑列表或已成功附件 |
 | Auth 暂不可用 | 权益适配器 / 发送器 | 输出暂不可用、发送延期；不删除订阅，不解释为无限或永久撤权 |
-| 邮件永久退信/投诉 | 邮件模块 | 抑制对应收件地址，保留订阅和历史记录 |
+| 邮件永久退信/投诉 | Resend | 抑制对应收件地址，Feed 保留订阅和历史记录 |
 | Workflow 运行后失败 | task 恢复器 | D1 记录失败与明确恢复入口；**不会自动出现在原启动 Queue 的 DLQ** |
 
 每个外部调用仅由一个层负责自动重试：关闭 SDK 隐式重试或纳入同一预算，避免 Queue × Workflow × SDK 三层相乘。具体尝试次数、退避上限和费用上限由上线配置确定；每个策略必须是有界值，不能留无限重试。

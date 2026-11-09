@@ -558,7 +558,7 @@ export async function startFeedRuntime({ buildDir, stateDir, authDir, ingestion 
       async sensitiveValues() {
         // Short-lived mail OTPs can collide with numeric report metadata. Keep
         // them in the private mail fixture, outside the global byte inventory.
-        const values = [oauthClientSecret, rpcClientSecret, controlSecret, mailFixture?.bindings.RESEND_API_KEY, mailFixture?.bindings.RESEND_WEBHOOK_SECRET].filter(Boolean);
+        const values = [oauthClientSecret, rpcClientSecret, controlSecret, mailFixture?.bindings.RESEND_API_KEY].filter(Boolean);
         for (const table of ['session', 'oauthAccessToken', 'oauthRefreshToken']) {
           const rows = await authDb.prepare(`SELECT token FROM ${table}`).all();
           values.push(...rows.results.map(row => row.token).filter(Boolean));
