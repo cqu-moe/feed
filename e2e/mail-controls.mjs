@@ -13,7 +13,7 @@ await mkdir(root);
 const definitions = [
   { name: 'missing-auth', env: { FEED_E2E_AUTH_CHECKOUT: '' }, reason: /FEED_E2E_AUTH_CHECKOUT is required/, early: true },
   { name: 'zero-tests', args: ['--grep', '__no_feed04_test__', '--pass-with-no-tests'], reason: /suite was empty/ },
-  { name: 'wrong-oracle', env: { FEED_E2E_MAIL_WRONG_ORACLE: '1' }, reason: /expected ["']accepted["'] to be ["']delivered["']|Expected:\s*"delivered"[\s\S]*Received:\s*"accepted"/ },
+  { name: 'wrong-oracle', env: { FEED_E2E_MAIL_WRONG_ORACLE: '1' }, reason: /expected ["']accepted["'] to be ["']rejected["']|Expected:\s*"rejected"[\s\S]*Received:\s*"accepted"/ },
   { name: 'disabled-mail-consumer', env: { FEED_E2E_DISABLE_MAIL_CONSUMER: '1' }, reason: /Timed out waiting for native mail Queue provider acceptance/ },
   { name: 'wrong-heading', env: { FEED_E2E_BREAK_ASSERTION: '1' }, reason: /故意错误的邮件成功断言/ },
   { name: 'startup', env: { FEED_E2E_FAIL_STARTUP: '1' }, reason: /Injected startup failure after real Worker initialization/ },

@@ -225,7 +225,7 @@ export function validateIsolation(config) {
     if (vars[key] === "0") fail(`${key} must not be "0"; this code treats zero as uncapped accounting`);
     if (!/^[1-9][0-9]*$/.test(vars[key] ?? "")) fail(`${key} must be a positive bounded integer`);
   }
-  for (const key of ["POSTHOG_HOST", "POSTHOG_PROJECT_TOKEN", "MAIL_FROM", "RESEND_API_KEY", "FIRECRAWL_API_KEY", "TEXTIN_APP_ID", "TEXTIN_SECRET_CODE", "MISTRAL_API_KEY", "RESEND_WEBHOOK_SECRET", "BRIDGE_SECRET"]) {
+  for (const key of ["POSTHOG_HOST", "POSTHOG_PROJECT_TOKEN", "MAIL_FROM", "RESEND_API_KEY", "FIRECRAWL_API_KEY", "TEXTIN_APP_ID", "TEXTIN_SECRET_CODE", "MISTRAL_API_KEY", "BRIDGE_SECRET"]) {
     if (key in vars) fail(`${key} must not be placed in generated Wrangler vars`);
   }
   if (vars.ENVIRONMENT === "production") fail("ENVIRONMENT must not be production");
@@ -263,7 +263,7 @@ export function buildDeploymentInput({ browserClientId, rpcClientId, d1DatabaseI
     ],
     optionalSecretNamesForApprovedPaths: ["ADMIN_TOKEN"],
     forbiddenSecretNamesByDefault: [
-      "FIRECRAWL_API_KEY", "TEXTIN_APP_ID", "TEXTIN_SECRET_CODE", "MISTRAL_API_KEY", "RESEND_API_KEY", "RESEND_WEBHOOK_SECRET", "BRIDGE_SECRET",
+      "FIRECRAWL_API_KEY", "TEXTIN_APP_ID", "TEXTIN_SECRET_CODE", "MISTRAL_API_KEY", "RESEND_API_KEY", "BRIDGE_SECRET",
     ],
     externalAccessDefault: {
       enabled: false,

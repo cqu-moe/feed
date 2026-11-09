@@ -95,7 +95,7 @@ WHERE EXISTS (SELECT 1 FROM subscriptions WHERE id = :id AND owner_sub = :owner)
 | `user_deliveries` | `id, owner_sub, event_id, state, delivery_kind, available_at, claimed_message_id?, suppression_reason?, backlog_at?` | 唯一 `(owner_sub,event_id)`；索引 `(state,available_at,owner_sub)`；`backlog_at` 保留暂停积压事实，恢复/重匹配不改回即时提醒 |
 | `mail_messages` | `id, owner_sub, kind, state, payload_key, payload_hash, recipient_hash, idempotency_key, provider_id?, submitted_at?, accepted_at?, delivered_at?, bounced_at?, complained_at?, lease_token?, lease_until?, next_attempt_at?, attempts, last_error?` | `idempotency_key` 唯一；`provider_id` 非空时唯一；首次提交前固定快照。T12 再加入摘要窗口及分批身份 |
 | `mail_items` | `message_id, delivery_id, event_id, ordinal` | PK `(message_id,delivery_id)`；已提交/结果不明的 delivery 不得被另一 message 占用；历史取消消息可保留同一 delivery 的旧关联 |
-| `mail_webhook_receipts` | `id, message_id?, payload_key, payload_hash, state, received_at, processed_at?, attempts, next_attempt_at, last_error?` | 供应商回调 ID 主键；主动查询证据使用独立 `lookup:` 前缀；验签后持久化再返回成功；处理有界重试 |
+| `mail_webhook_receipts` | `id, message_id?, payload_key, payload_hash, state, received_at, processed_at?, attempts, next_attempt_at, last_error?` | 历史供应商回调及主动查询证据；保留供回溯，当前发送器不再读写 |
 
 事件只来自 ready 版本。历史基线也可以创建 `initial/history_only=1` 事件供 RSS 查询，但没有历史邮件资格；排版版本及 OCR 重做不创建 `update`。RSS GUID 使用永久稳定的 `urn:cqu-feed:event:<id>`，URL 指向对应 revision。正文和所有原件仍须登录检查 `feed.access`。
 
@@ -122,9 +122,9 @@ WHERE EXISTS (SELECT 1 FROM subscriptions WHERE id = :id AND owner_sub = :owner)
 
 每日 20:00 北京时间固定 UTC 窗口末端，选取截至窗口就绪、已匹配且仍 pending 的事件；按用户合并并持久化快照。**不只读取“上次游标以后的就绪时间”**：匹配延迟或 Auth 故障时的旧 pending 也要补入下一可发送批次。空集合不建邮件；同一窗口重复调度返回已有 message。正文过大时进入显式分批策略，首版阈值待供应商确定，不能静默丢条。
 
-发送前重查有效订阅、当前权益、mail_enabled、退信/投诉状态和 Auth 已验证邮箱。取消未提交消息后可以释放 delivery 重新组合；邮件一旦可能提交过，就固定收件人、内容和幂等键，不能用同一键换邮箱或加新条目。`accepted` 或 `submission_unknown` 都阻止摘要再次占用相同 delivery。Webhook 只前进事实（submitted/accepted/delivered/bounced），乱序事件不把已受理邮件退回未发送。
+发送前重查有效订阅、当前权益、mail_enabled、历史抑制记录和 Auth 已验证邮箱。取消未提交消息后可以释放 delivery 重新组合；邮件一旦可能提交过，就固定收件人、内容和幂等键，不能用同一键换邮箱或加新条目。`accepted` 或 `submission_unknown` 都阻止摘要再次占用相同 delivery。新邮件只记录提交状态；保留既有送达、退信和投诉记录。
 
-邮箱抑制按邮箱摘要保存到单独的 `mail_suppressions(email_hash,reason,created_at,cleared_at?)`；换邮箱不自动解除旧邮箱抑制。偏好/权益暂停期间保留候选，恢复后重新评估；积压的既有 pending 合并进摘要，避免立即补发大量及时邮件。此为技术默认，可在产品层调整。
+Feed 继续遵守 `mail_suppressions` 中按邮箱摘要保存的历史记录；新增退信和投诉由 Resend 处理。偏好/权益暂停期间保留候选，恢复后重新评估；积压的既有 pending 合并进摘要，避免立即补发大量及时邮件。此为技术默认，可在产品层调整。
 
 ## 5. 执行任务与事务消息
 

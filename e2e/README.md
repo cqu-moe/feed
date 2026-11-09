@@ -266,7 +266,7 @@ FEED_E2E_AUTH_CHECKOUT=.e2e/auth-checkout pnpm test:e2e:mail
 FEED_E2E_AUTH_CHECKOUT=.e2e/auth-checkout node e2e/mail-controls.mjs
 ```
 
-The mail suite starts with empty articles, events, mail/delivery/receipt tables
+The mail suite starts with empty articles, events, mail/delivery tables
 and R2. Real source verification and Discovery/Capture Workflows produce ready
 revisions. Real OAuth and subscription UI/API commands create two overlapping
 subscriptions. Native event/matching and mail Queues execute the built product;
@@ -277,20 +277,18 @@ message, delivery, receipt, acceptance or completion facts into product storage.
 Only the external school/browser responses and Resend boundary are synthetic.
 The mail provider ledger accepts only synthetic credentials, sender and
 `example.test` recipients, and enforces stable key/payload identity. Auth's
-verification email is separate from Feed's delivery ledger. Callbacks use HMAC
-Svix envelopes sent to the product `/webhooks/resend` route. Bad/stale signatures,
-wrong recipients, exact replays and late receipts exercise its real verifier and
-state transitions. A provider-accepted request with an interrupted response body
-must remain unknown; a signed identity and provider lookup recover it without
-inventing a completed message. An in-window retry reuses the original key and
-bytes. Outside the safe window, recovery leaves manual reconciliation pending.
+verification email is separate from Feed's delivery ledger. Provider acceptance
+is the end-to-end send boundary. A provider-accepted request with an interrupted
+response body must remain unknown; an in-window retry reuses the original key and
+bytes without a second provider acceptance. Outside the safe window, recovery
+stops blind retries and leaves the historical `submission_unknown` status visible.
 
 A test-only entry module forwards the compiled product exports and handlers.
 It advances **Feed and Auth `Date` / `Date.now()` together** for digest cutoffs,
 application retry windows and genuine OAuth session refresh, and can delay a
 native mail batch before forwarding it unchanged.
 It does not replace Queue consumers, Workflows, Auth RPC, mail assessment,
-rendering, storage or receipt application. Platform timers retain real time.
+rendering or storage. Platform timers retain real time.
 Both Worker clock readbacks are exported; this does not prove remote Cron
 scheduling or the passage of a real day. The shared synthetic school's publication dates
 use its declared Asia/Shanghai calendar day, including the UTC midnight boundary.
@@ -299,17 +297,17 @@ Before first submission the suite changes actual Auth entitlement/recipient
 facts and subscription settings, then releases the held native batch. It checks
 access, running quota, verification, address, pause and RPC credential failure.
 A separate outage binds the real Auth bundle without its database and reads back
-preserved backlog with no mail request. Daily digests, 429 recovery, unknown
-submission, callback-before-response and bounce suppression have independent
-D1/R2, provider-ledger and admin readbacks. Initial email revision links are read
-through the authenticated reader after later revisions exist.
+preserved backlog with no mail request. Daily digests, 429 recovery and unknown
+submission have independent D1/R2, provider-ledger and admin readbacks. Initial
+email revision links are read through the authenticated reader after later revisions exist.
 
 `public/<variant>/mail.json` contains sanitized ledger and D1/R2 snapshot hashes;
 `mail-checkpoints.json` records business checks. Both desktop and phone viewports
 run in each fresh round, twice in CI. The control runner requires the intended
-failure and physical cleanup for missing config, zero tests, a wrong delivered
-oracle, a disabled **mail-only** native consumer, a wrong heading, startup,
-cleanup, and combined startup/cleanup. It checks that the disabled mail consumer
+failure and physical cleanup for missing config, zero tests, an intentionally
+wrong submission-state assertion (`rejected` instead of `accepted`), a disabled
+**mail-only** native consumer, a wrong heading, startup, cleanup, and combined
+startup/cleanup. It checks that the disabled mail consumer
 still leaves real ready events and prepared messages with zero provider calls.
 Only per-control `public/` directories and the bounded `controls.json` summary
 are suitable for sharing. Real Resend sending/billing, mailbox receipt or reading,

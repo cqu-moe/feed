@@ -22,7 +22,6 @@ const stages = new Set([
   'preflight',
   'retry',
   'provider_submission',
-  'provider_receipt',
   'summary',
   'finished',
 ]);

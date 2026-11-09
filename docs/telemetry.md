@@ -113,16 +113,15 @@ Emitted only after the D1 batch that authoritatively commits a ready revision, r
 Emitted only after the authoritative mail ledger commit changes a message's material delivery state. Provider acceptance is not verified delivery.
 
 - `trigger`: `automatic`; `operation`: `mail_delivery`; `flow`: `notification`.
-- `stage`: `preflight`, `retry`, `provider_submission`, or `provider_receipt`.
+- `stage`: `preflight`, `retry`, or `provider_submission`.
 - `operation_id` / `message_id`: stable mail message ID.
-- `attempt_id`: `<message_id>:<attempt_count>`. A provider receipt uses the attempt count of the submission it reconciles and is not a new logical mail task.
+- `attempt_id`: `<message_id>:<attempt_count>`.
 - `owner_sub`: authenticated internal central user ID, included as an attribute only; the event still disables person processing.
 - `message_kind`: `immediate` or `daily_digest`.
 - `delivery_count`, `event_count`, `attempt_count`.
 - `state` and outcome mapping:
   - `accepted` → `outcome:unverified`, `provider_submission:true`, `delivered:false`
-  - `delivered` → `outcome:success`, `provider_submission:true`, `delivered:true`
-  - `bounced`, `complained`, `rejected` → `outcome:failure`
+  - `rejected` → `outcome:failure`
   - `cancelled` → `outcome:canceled`
   - `submission_unknown` → `outcome:unverified`
   - `deferred` at exhausted automatic recovery → `outcome:partial`
@@ -130,7 +129,7 @@ Emitted only after the authoritative mail ledger commit changes a message's mate
 - `end_to_end_duration_ms`: message creation to authoritative state observation.
 - `duration_basis`: `message_created_to_final_state`.
 
-The same message may legitimately produce an `accepted` event and later a `delivered`, `bounced`, or `complained` event. Deduplicate the logical message by `operation_id`; analyze delivery success only from `state='delivered'`, never from accepted alone.
+Deduplicate submissions by `operation_id`. Feed no longer emits delivery outcomes. Use Resend for current delivery metrics; older Feed events may still contain verified delivery, bounce, or complaint states.
 
 ### `feed_pipeline_summary`
 

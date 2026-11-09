@@ -70,11 +70,6 @@ export async function internalRoute(request,env,ctx){
   }
   if(url.pathname==='/internal/mail'&&request.method==='GET')return json(await createMail(env).list());
   if(url.pathname==='/internal/mail/digests/prepare'&&request.method==='POST')return json(await createMail(env).prepareDigests(),202);
-  const mailReconcile=/^\/internal\/mail\/([a-f0-9]{24})\/reconcile$/.exec(url.pathname);
-  if(mailReconcile&&request.method==='POST'){
-    const result=await createMail(env,{lifecycle:ctx}).reconcile(mailReconcile[1]);
-    return result?json(result):json({error:'Mail message not found'},404);
-  }
   if(['/internal/mail/prepare','/internal/mail/recover'].includes(url.pathname)&&request.method==='POST'){
     const mail=createMail(env,{lifecycle:ctx});
     return json(await (url.pathname.endsWith('/prepare')?mail.preparePending():mail.recover()),202);
