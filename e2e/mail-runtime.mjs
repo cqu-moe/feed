@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 
 const sha = bytes => createHash('sha256').update(Buffer.from(bytes)).digest('hex');
 // External provider only. No product event/message/delivery is inserted.
