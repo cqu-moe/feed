@@ -304,9 +304,10 @@ email revision links are read through the authenticated reader after later revis
 `public/<variant>/mail.json` contains sanitized ledger and D1/R2 snapshot hashes;
 `mail-checkpoints.json` records business checks. Both desktop and phone viewports
 run in each fresh round, twice in CI. The control runner requires the intended
-failure and physical cleanup for missing config, zero tests, a wrong delivered
-oracle, a disabled **mail-only** native consumer, a wrong heading, startup,
-cleanup, and combined startup/cleanup. It checks that the disabled mail consumer
+failure and physical cleanup for missing config, zero tests, an intentionally
+wrong submission-state assertion (`rejected` instead of `accepted`), a disabled
+**mail-only** native consumer, a wrong heading, startup, cleanup, and combined
+startup/cleanup. It checks that the disabled mail consumer
 still leaves real ready events and prepared messages with zero provider calls.
 Only per-control `public/` directories and the bounded `controls.json` summary
 are suitable for sharing. Real Resend sending/billing, mailbox receipt or reading,
