@@ -31,6 +31,7 @@ import {
   formatDateTime,
   formatPublicationDate,
   isPdf,
+  usePageTitle,
 } from './components';
 import { OcrReading } from './ocr-reading';
 import { captureFeedEvent } from './telemetry';
@@ -210,6 +211,13 @@ export function ArticleDetailPage() {
   const [params, setParams] = useSearchParams();
   const selectedRevisionId = params.get('revision') ?? '';
   const [state, setState] = useState<DetailState>({ kind: 'loading' });
+  usePageTitle(state.kind === 'success' ? state.data.article.title : {
+    loading: '正在加载通知',
+    error: '暂时无法加载通知',
+    forbidden: '这篇通知暂时无法访问',
+    unauthorized: '登录已过期',
+    'not-found': '未找到这篇通知',
+  }[state.kind]);
   const [revisionState, setRevisionState] = useState<RevisionListState>({ kind: 'loading' });
   const [openPanel, setOpenPanel] = useState<DetailPanel>(null);
   const [reloadKey, setReloadKey] = useState(0);

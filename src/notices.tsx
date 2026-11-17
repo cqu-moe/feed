@@ -29,6 +29,7 @@ import {
   LoginRequiredState,
   RetryButton,
   formatPublicationDate,
+  usePageTitle,
 } from './components';
 import { captureFeedEvent } from './telemetry';
 import './notices.css';
@@ -76,6 +77,7 @@ function dateRangeLabel(from: string, to: string): string {
 }
 
 export function ArticlesPage() {
+  usePageTitle('重大通知存档');
   const [params, setParams] = useSearchParams();
   const committedQuery = params.get('q') ?? '';
   const committedSite = params.get('site') ?? '';

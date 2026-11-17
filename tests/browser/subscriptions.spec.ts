@@ -91,3 +91,26 @@ test('compact subscriptions keep identity first and restore focus from their she
     await expect(editButton).toBeFocused();
   }
 });
+
+test('creating a subscription blocks an invalid draft and guides focus to the first correction', async ({ page }) => {
+  await installReadingRoutes(page);
+  const posts: unknown[] = [];
+  await page.route('**/api/subscriptions', route => {
+    if (route.request().method() === 'POST') posts.push(route.request().postDataJSON());
+    return route.fulfill({ json: subscriptionList });
+  });
+  await openSubscriptions(page);
+  await page.getByRole('button', { name: '新建订阅', exact: true }).first().click();
+  const sheet = page.getByRole('dialog', { name: '新建订阅' });
+  const name = sheet.getByLabel('订阅名称');
+  await sheet.getByRole('button', { name: '创建订阅', exact: true }).click();
+  await expect(name).toBeFocused();
+  await expect(name).toHaveAccessibleDescription('请填写订阅名称，并至少选择一个站点或栏目。');
+  await name.fill('课程提醒');
+  await expect(name).not.toHaveAccessibleDescription('请填写订阅名称，并至少选择一个站点或栏目。');
+  await sheet.getByRole('button', { name: '创建订阅', exact: true }).click();
+  const scope = sheet.getByRole('group', { name: '关注范围' });
+  await expect(scope).toBeFocused();
+  await expect(scope).toHaveAccessibleDescription(/请填写订阅名称，并至少选择一个站点或栏目。/);
+  expect(posts).toEqual([]);
+});

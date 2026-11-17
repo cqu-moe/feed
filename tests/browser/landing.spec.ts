@@ -7,6 +7,15 @@ async function openAnonymousLanding(page: Page, next: string) {
   await expect(page.getByRole('heading', { level: 1, name: /^重大通知/ })).toBeVisible();
 }
 
+test('anonymous landing keeps initial JavaScript below 600 kB', async ({ page }) => {
+  await openAnonymousLanding(page, '/');
+  const scriptBytes = await page.evaluate(() => performance.getEntriesByType('resource')
+    .filter(entry => /\.(?:js|mjs)$/.test(new URL(entry.name).pathname))
+    .reduce((total, entry) => total + (entry as PerformanceResourceTiming).decodedBodySize, 0));
+  expect(scriptBytes).toBeGreaterThan(0);
+  expect(scriptBytes).toBeLessThan(600_000);
+});
+
 test('saved theme applies before the app starts under a self-only script policy', async ({ page }) => {
   await installReadingRoutes(page, { authenticated: false });
   await page.addInitScript(() => localStorage.setItem('cqu-moe-theme', 'dark'));

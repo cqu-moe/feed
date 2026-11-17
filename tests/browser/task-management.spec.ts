@@ -79,3 +79,28 @@ test('a manual capture opens its queued task even when the page started on an em
   await expect(page.getByRole('link', { name: '查看通知' })).toHaveAttribute('href', '/articles/' + articleId);
   await expect(page.getByText('考试安排')).toBeVisible();
 });
+
+test('manual capture validation blocks invalid IDs and guides focus back to the field', async ({ page }) => {
+  await session(page);
+  const posts: unknown[] = [];
+  await page.route('**/internal/capture-tasks', route => {
+    if (route.request().method() === 'POST') posts.push(route.request().postDataJSON());
+    return route.fulfill({ json: { tasks: [] } });
+  });
+  await page.goto('/admin/tasks');
+  await page.getByRole('button', { name: '手动采集' }).click();
+  const field = page.getByLabel('通知 ID');
+  const submit = page.getByRole('button', { name: '发起一次采集' });
+  await expect(submit).toBeEnabled();
+  await submit.click();
+  await expect(field).toBeFocused();
+  await expect(field).toHaveAccessibleDescription('请填写通知链接中的 24 位通知 ID。');
+  await field.fill('g'.repeat(24));
+  await submit.click();
+  await expect(field).toBeFocused();
+  await expect(field).toHaveAccessibleDescription('请填写通知链接中的 24 位通知 ID。');
+  await field.fill('3'.repeat(24));
+  await expect(field).not.toHaveAccessibleDescription(/通知 ID/);
+  expect(await field.evaluate(input => (input as HTMLInputElement).checkValidity())).toBe(true);
+  expect(posts).toEqual([]);
+});

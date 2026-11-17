@@ -28,12 +28,8 @@ import {
 } from '@cqu-moe/ui';
 import { BellPlus, House, RefreshCw, UserRound } from 'lucide-react';
 import { parseSession, requestJson, type Session } from './api';
-import { AccessDeniedState, AdminDeniedState, FeedBrand, LoginRequiredState, LogoutButton, safeNext } from './components';
-import { ArticleDetailPage } from './article-detail';
+import { AccessDeniedState, AdminDeniedState, FeedBrand, LoginRequiredState, LogoutButton, safeNext, usePageTitle } from './components';
 import { AccessPage, AccountPage, LoginPage, SourcesPage } from './pages';
-import { AdminTasksPage } from './admin-tasks';
-import { AdminSourcesPage } from './admin-sources';
-import { SubscriptionsPage } from './subscriptions';
 import { ArticlesPage } from './notices';
 import {
   initFeedTelemetry,
@@ -190,6 +186,9 @@ function TelemetryRoute() {
 function RouteError() {
   const error = useRouteError();
   const status = isRouteErrorResponse(error) ? error.status : 0;
+  usePageTitle(status === 401 ? '登录已过期'
+    : status === 403 ? (window.location.pathname.startsWith('/admin/') ? '需要管理员权限' : '没有访问权限')
+    : status === 404 ? '未找到页面' : '页面加载失败');
 
   if (status === 401) return <LoginRequiredState />;
   if (status === 403 && window.location.pathname.startsWith('/admin/')) return <AdminDeniedState />;
@@ -219,6 +218,7 @@ function RouteError() {
 }
 
 function NotFound() {
+  usePageTitle('页面不存在');
   return (
     <>
       <PageHeader title="页面不存在" description="这个地址没有对应的通知或页面。" />
@@ -237,8 +237,22 @@ function NotFound() {
 }
 
 const router = createBrowserRouter([
-  { path: '/admin/tasks', loader: loadAdminSession, element: <><TelemetryRoute /><AdminTasksPage /></>, errorElement: <><TelemetryRoute /><RouteError /></> },
-  { path: '/admin/sources', loader: loadAdminSession, element: <><TelemetryRoute /><AdminSourcesPage /></>, errorElement: <><TelemetryRoute /><RouteError /></> },
+  {
+    path: '/admin/tasks', loader: loadAdminSession,
+    lazy: async () => {
+      const { AdminTasksPage } = await import('./admin-tasks');
+      return { element: <><TelemetryRoute /><AdminTasksPage /></> };
+    },
+    errorElement: <><TelemetryRoute /><RouteError /></>,
+  },
+  {
+    path: '/admin/sources', loader: loadAdminSession,
+    lazy: async () => {
+      const { AdminSourcesPage } = await import('./admin-sources');
+      return { element: <><TelemetryRoute /><AdminSourcesPage /></> };
+    },
+    errorElement: <><TelemetryRoute /><RouteError /></>,
+  },
   {
     path: '/reader/:articleId/revisions/:revisionId/:filename',
     loader: loadProtectedSession,
@@ -271,9 +285,9 @@ const router = createBrowserRouter([
     errorElement: <RouteError />,
     children: [
       { index: true, element: <ArticlesPage /> },
-      { path: 'articles/:id', element: <ArticleDetailPage /> },
+      { path: 'articles/:id', lazy: async () => ({ Component: (await import('./article-detail')).ArticleDetailPage }) },
       { path: 'sources', element: <SourcesPage /> },
-      { path: 'subscriptions', element: <SubscriptionsPage /> },
+      { path: 'subscriptions', lazy: async () => ({ Component: (await import('./subscriptions')).SubscriptionsPage }) },
       { path: 'account', element: <AccountPage /> },
       { path: '*', element: <NotFound /> },
     ],

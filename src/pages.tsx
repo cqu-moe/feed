@@ -21,6 +21,7 @@ import {
   RetryButton,
   StandaloneHeader,
   safeNext,
+  usePageTitle,
 } from './components';
 import { FeedLanding } from './landing';
 import { SourceDirectory } from './source-directory';
@@ -46,6 +47,7 @@ function fromResult<T>(
 }
 
 export function LoginPage() {
+  usePageTitle('登录');
   const [params] = useSearchParams();
   const next = safeNext(params.get('next'));
 
@@ -53,6 +55,7 @@ export function LoginPage() {
 }
 
 export function AccessPage() {
+  usePageTitle('开通 Feed 访问权限');
   return (
     <div className="feed-standalone-page">
       <StandaloneHeader />
@@ -86,6 +89,7 @@ function accountEmailLabel(account: AvailableSessionAccount) {
 }
 
 export function AccountPage() {
+  usePageTitle('账户与订阅');
   const { session } = useRouteLoaderData('feed-root') as { session: Session };
   const account = session.account;
   const availableAccount = account?.status === 'available' ? account : undefined;
@@ -144,6 +148,7 @@ export function AccountPage() {
 }
 
 export function SourcesPage() {
+  usePageTitle('采集状态');
   const { session } = useRouteLoaderData('feed-root') as { session: Session };
   const [state, setState] = useState<SourceState>({ kind: 'loading' });
   const [reloadKey, setReloadKey] = useState(0);

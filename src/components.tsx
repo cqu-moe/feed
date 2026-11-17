@@ -1,8 +1,14 @@
-import type { ReactNode } from 'react';
+import { useEffect, type ReactNode } from 'react';
 import { Link } from 'react-router';
 import { Button, PageHeader, PageState, ThemeMenu } from '@cqu-moe/ui';
 import { ExternalLink, LogOut, RefreshCw } from 'lucide-react';
 import type { Session } from './api';
+
+export function usePageTitle(title: string): void {
+  useEffect(() => {
+    document.title = `${title} · CQU Feed`;
+  }, [title]);
+}
 
 export function safeNext(value: string | null): string {
   if (!value || !value.startsWith('/') || value.startsWith('//')) return '/';

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link } from 'react-router';
 import { Alert, AlertDescription, AlertTitle, Button, ContentContainer, Input, Label, PageHeader, Tabs, TabsContent, TabsList, TabsTrigger } from '@cqu-moe/ui';
 import { Plus, RefreshCw } from 'lucide-react';
-import { StandaloneHeader } from './components';
+import { StandaloneHeader, usePageTitle } from './components';
 import { AdminMailPanel } from './admin-mail';
 import { AdminNotificationEvents } from './admin-notifications';
 import { AdminOperationsPanel } from './admin-operations';
@@ -12,7 +12,10 @@ import { TaskDirectory } from './task-directory';
 import { recoverListedTask } from './task-recovery';
 import './task-management.css';
 
+const captureIdError = '请填写通知链接中的 24 位通知 ID。';
+
 export function AdminTasksPage() {
+  usePageTitle('采集任务管理');
   const [tasks, setTasks] = useState<Task[] | null>(null);
   const [articleId, setArticleId] = useState('');
   const [selected, setSelected] = useState<string | null>(null);
@@ -25,6 +28,7 @@ export function AdminTasksPage() {
   const [showForm, setShowForm] = useState(false);
   const [filter, setFilter] = useState<TaskState | 'all'>('failed');
   const [initialLoading, setInitialLoading] = useState(true);
+  const [articleInvalid, setArticleInvalid] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -52,7 +56,7 @@ export function AdminTasksPage() {
     event.preventDefault();
     void action(async () => {
       const id = articleId.trim();
-      if (!/^[a-f0-9]{24}$/.test(id)) throw new Error('请填写通知链接中的 24 位通知 ID。');
+      if (!/^[a-f0-9]{24}$/.test(id)) throw new Error(captureIdError);
       if (intent.current?.articleId !== id) intent.current = { articleId: id, requestId: crypto.randomUUID() };
       const result = await requestJson('/internal/capture-tasks', parseCreated, {
         method: 'POST', body: JSON.stringify(intent.current),
@@ -98,8 +102,32 @@ export function AdminTasksPage() {
         {notice && <p role="status">{notice}</p>}
         {showForm && <form className="feed-card feed-admin-form" onSubmit={submit}>
           <Label htmlFor="capture-article-id">通知 ID</Label>
-          <Input id="capture-article-id" value={articleId} onChange={event => setArticleId(event.target.value)} placeholder="通知阅读链接中的 24 位 ID" maxLength={24} required disabled={busy} />
-          <Button type="submit" disabled={busy || !articleId}>{busy ? '正在处理…' : '发起一次采集'}</Button>
+          <Input
+            id="capture-article-id"
+            value={articleId}
+            onChange={event => {
+              event.currentTarget.setCustomValidity('');
+              setArticleId(event.target.value);
+              setArticleInvalid(false);
+            }}
+            onInvalid={event => {
+              setArticleInvalid(true);
+              event.currentTarget.setCustomValidity(captureIdError);
+            }}
+            placeholder="通知阅读链接中的 24 位 ID"
+            pattern="[a-f0-9]{24}"
+            autoComplete="off"
+            spellCheck={false}
+            aria-invalid={articleInvalid}
+            aria-describedby={articleInvalid ? 'capture-article-id-error' : undefined}
+            maxLength={24}
+            required
+            disabled={busy}
+          />
+          <p id="capture-article-id-error" hidden={!articleInvalid}>
+            {captureIdError}
+          </p>
+          <Button type="submit" disabled={busy}>{busy ? '正在处理…' : '发起一次采集'}</Button>
         </form>}
         <Tabs value={tab} onValueChange={setTab} className="feed-task-tabs">
           <TabsList variant="line" aria-label="管理视图">

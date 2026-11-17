@@ -5,6 +5,7 @@ import { ChevronLeft, ChevronRight, Download, Minus, Plus } from 'lucide-react';
 import { Document, Page, pdfjs } from 'react-pdf';
 import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist';
 import { captureFeedEvent } from './telemetry';
+import { usePageTitle } from './components';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
 import './pdf-reader.css';
@@ -90,6 +91,7 @@ export default function PdfReader() {
   const valid = /^[a-f0-9]{24}$/.test(articleId)
     && (revisionId === undefined || /^[A-Za-z0-9_-]+$/.test(revisionId))
     && /^attachment-\d+\.pdf$/.test(filename);
+  usePageTitle(valid ? `${filename} · PDF 阅读器` : '未找到 PDF');
   const file = revisionId
     ? `/api/articles/${articleId}/revisions/${encodeURIComponent(revisionId)}/files/${filename}`
     : `/api/files/${articleId}/${filename}`;
