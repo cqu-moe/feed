@@ -2,11 +2,13 @@ import {extractText,getDocumentProxy,getResolvedPDFJS} from 'unpdf';
 import {put,sha} from './utils.mjs';
 import {readingExcerpt} from './reading.mjs';
 export const PDF_TEXT_UNAVAILABLE='PDF 正文暂未提取到可搜索文字；可在下方阅读原文件。';
+const MAX_NATIVE_PAGES=200;
+const MAX_DOCUMENT_PAGES_FOR_OCR=100;
 export async function pdfPages(buffer){
   if(buffer.byteLength>12*1024*1024)throw new Error('PDF text extraction exceeds 12 MiB');
   const pdf=await getDocumentProxy(new Uint8Array(buffer),{isEvalSupported:false,disableFontFace:true});
   try{
-    if(pdf.numPages>100)throw new Error('PDF text extraction exceeds 100 pages');
+    if(pdf.numPages>MAX_NATIVE_PAGES)throw new Error(`PDF text extraction exceeds ${MAX_NATIVE_PAGES} pages`);
     const {OPS}=await getResolvedPDFJS(),pages=[];
     const imageOps=new Set(['paintImageXObject','paintInlineImageXObject','paintImageMaskXObject','paintImageXObjectRepeat','paintImageMaskXObjectRepeat','paintSolidColorImageMask'].map(key=>OPS[key]).filter(Number.isInteger));
     for(let number=1;number<=pdf.numPages;number++){
@@ -16,6 +18,8 @@ export async function pdfPages(buffer){
       // The user opted into OCR only when a page has no text layer. Even a
       // short caption/page number counts: never charge to replace existing text.
       const needsOcr=hasImages&&!text.replace(/\s/g,'').length;
+      if(needsOcr&&pdf.numPages>MAX_DOCUMENT_PAGES_FOR_OCR)
+        throw new Error(`PDF requiring OCR exceeds ${MAX_DOCUMENT_PAGES_FOR_OCR} pages`);
       pages.push({index:number-1,text,hasImages,needsOcr});
       page.cleanup();
     }
@@ -26,7 +30,7 @@ export async function pdfText(buffer){
   if(buffer.byteLength>12*1024*1024)throw new Error('PDF text extraction exceeds 12 MiB');
   const pdf=await getDocumentProxy(new Uint8Array(buffer),{isEvalSupported:false,disableFontFace:true});
   try{
-    if(pdf.numPages>100)throw new Error('PDF text extraction exceeds 100 pages');
+    if(pdf.numPages>MAX_NATIVE_PAGES)throw new Error(`PDF text extraction exceeds ${MAX_NATIVE_PAGES} pages`);
     const result=await extractText(pdf,{mergePages:true});
     return {text:result.text.trim(),totalPages:result.totalPages};
   }finally{await pdf.loadingTask.destroy();}

@@ -1,15 +1,19 @@
-export function mixedPdf({firstPageText='CQU mixed notice first page'}={}){
+export function mixedPdf({firstPageText='CQU mixed notice first page',nativePages=1,includeScan=true}={}){
   const text='BT /F1 12 Tf 72 120 Td ('+firstPageText+') Tj ET';
   const image='q 200 0 0 200 20 20 cm /Im0 Do Q';
+  const nativePage='<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>';
+  const extraPages=Array.from({length:nativePages-1},(_,i)=>`${9+i} 0 R`);
+  const kids=['3 0 R',...extraPages,...(includeScan?['6 0 R']:[])];
   return buildPdf([
     '<< /Type /Catalog /Pages 2 0 R >>',
-    '<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 >>',
-    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',
+    `<< /Type /Pages /Kids [${kids.join(' ')}] /Count ${kids.length} >>`,
+    nativePage,
     '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
     `<< /Length ${text.length} >>\nstream\n${text}\nendstream`,
     '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources << /XObject << /Im0 8 0 R >> >> /Contents 7 0 R >>',
     `<< /Length ${image.length} >>\nstream\n${image}\nendstream`,
     '<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 1 >>\nstream\nP\nendstream',
+    ...extraPages.map(()=>nativePage),
   ]);
 }
 function buildPdf(objects){
