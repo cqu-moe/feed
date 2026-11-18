@@ -25,6 +25,27 @@ test('formal OCR defaults to TextIn without Mistral credentials and preserves na
   }finally{await f.mf.dispose();}
 });
 
+test('long native PDFs finish with every page and no provider call; long scans stop before billing',async()=>{
+  for(const includeScan of [false,true]){
+    const f=await fixture({pdf:mixedPdf({nativePages:110,includeScan}),credentials:false});
+    try{
+      const task=await f.start();
+      const response=await f.call('/run',{taskId:task.id});
+      const state=await f.state();
+      assert.equal(state.calls.length,0);
+      if(includeScan){
+        assert.equal(response.status,500);
+        assert.match(state.tasks[0].last_error,/OCR.*100 pages/);
+      }else{
+        assert.equal(response.status,200,await response.text());
+        assert.equal(state.tasks[0].state,'succeeded');
+        assert.equal(state.outputs[0].pages.length,110);
+        assert.ok(state.outputs[0].pages.every((page,i)=>page.source==='native'&&page.index===i&&page.text==='CQU mixed notice first page'));
+      }
+    }finally{await f.mf.dispose();}
+  }
+});
+
 test('formal OCR adopts an existing MVP TextIn result across processor revisions without a new charge',async()=>{
   const f=await fixture({credentials:false});
   try{
@@ -130,7 +151,7 @@ test('concurrent formal and MVP jobs share the paid-request lease and cache',asy
   }finally{await f.call('/control',{mode:'normal'});await running;await f.mf.dispose();}
 });
 
-async function fixture({credentials=true}={}){
+async function fixture({credentials=true,pdf=mixedPdf()}={}){
   const bundle=await build({stdin:{contents:`
     import {ArchiveOcrWorkflow,ocrTaskStatements,withOcrIdentity} from './worker/archive-ocr.mjs';
     import {PdfOcrWorkflow,enqueuePdfOcr} from './worker/pdf-ocr.mjs';
@@ -196,7 +217,7 @@ async function fixture({credentials=true}={}){
         if(!/^PRAGMA\b/i.test(statement))await db.prepare(statement).run();
       }
     }
-    const bytes=Buffer.from(mixedPdf()),hash=createHash('sha256').update(bytes).digest('hex'),key='original.pdf';
+    const bytes=Buffer.from(pdf),hash=createHash('sha256').update(bytes).digest('hex'),key='original.pdf';
     await bucket.put(key,bytes);
     await db.prepare('INSERT INTO artifact_objects(sha256,r2_key,byte_size,media_type,verified_at) VALUES (?,?,?,?,?)')
       .bind(hash,key,bytes.length,'application/pdf',Date.now()).run();
