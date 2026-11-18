@@ -427,6 +427,77 @@ test('a blocked newer observation uses clear unready wording', async ({ page }) 
   await expect(page.getByText(/缺项或失败中/)).toHaveCount(0);
 });
 
+test('a missing attachment in the newest revision keeps verified history readable', async ({ page }) => {
+  const detail = readingDetail('html');
+  const oldDetail = readingDetail('html', oldRevisionId);
+  const missingRevision = {
+    ...detail.revision,
+    id: unreadyRevisionId,
+    revisionNo: 4,
+    observedAt: '2026-10-15T04:00:00Z',
+    readyAt: null,
+    state: 'blocked',
+    readable: true,
+    missingCount: 1,
+  };
+  const oldMaterial = Buffer.from('old-version-application.docx');
+  oldDetail.attachments[0] = {
+    ...oldDetail.attachments[0],
+    name: '已核验的历史推荐表.docx',
+    filename: 'attachment-4.docx',
+    url: `/api/articles/${articleId}/revisions/${oldRevisionId}/files/attachment-4.docx`,
+    downloadUrl: `/api/articles/${articleId}/revisions/${oldRevisionId}/files/attachment-4.docx?download=1`,
+    bytes: oldMaterial.byteLength,
+  };
+
+  await installReadingRoutes(page, {
+    oldDetail,
+    unreadyDetail: {
+      ...detail,
+      revision: missingRevision,
+      article: {
+        ...detail.article,
+        title: '2026年社团通知（附件暂时缺失）',
+        status: 'partial',
+        capturedAt: '2026-10-15T04:00:00Z',
+      },
+      attachments: [{
+        ...detail.attachments[0],
+        name: '推荐表.docx',
+        status: 'failed',
+        error: 'CAPTCHA attempt limit reached',
+        bytes: 0,
+        url: '',
+        downloadUrl: '',
+      }],
+    } as unknown as ReturnType<typeof readingDetail>,
+    revisions: [missingRevision, oldDetail.revision],
+    files: {
+      [pathname(oldDetail.attachments[0].downloadUrl)]: oldMaterial,
+    },
+  });
+  await page.goto(`/articles/${articleId}?revision=${unreadyRevisionId}`);
+
+  await expect(page.getByRole('heading', { level: 1, name: '2026年社团通知（附件暂时缺失）' })).toBeVisible();
+  await expect(page.getByText('推荐表.docx')).toBeVisible();
+  await expect(page.getByText('DOCX · 暂时缺失')).toBeVisible();
+  const historyLink = page.getByRole('link', { name: '打开已核验的历史完整版本（2026年10月11日 11:01）' });
+  await expect(historyLink).toHaveAttribute(
+    'href',
+    `/articles/${articleId}?revision=${oldRevisionId}`,
+  );
+  await historyLink.click();
+  await expect(page.getByText(/正在阅读 .+ 的历史版本/)).toBeVisible();
+  await expect(page.getByRole('link', { name: '已核验的历史推荐表.docx' }))
+    .toHaveAttribute('href', oldDetail.attachments[0].downloadUrl);
+
+  const downloadPromise = page.waitForEvent('download');
+  await page.getByRole('link', { name: '已核验的历史推荐表.docx' }).click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toBe('attachment-4.docx');
+  await expect(readFile((await download.path())!)).resolves.toEqual(oldMaterial);
+});
+
 test('directly opening an unready revision exposes only metadata, missing reasons, and a return entry', async ({ page }) => {
   const detail = readingDetail('html');
   const oldDetail = readingDetail('html', oldRevisionId);

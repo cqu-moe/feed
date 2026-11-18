@@ -68,6 +68,12 @@ test('HTTP upload, file-level import and ranked Chinese searches round-trip thro
     assert.ok(hit.excerpt.startsWith('…'));
     assert.equal(hit.match.href,'/reader/'+a+'/'+filename+(repeated?'':'?page=2'));
   }
+  const linked='e'.repeat(24);
+  await notice(f.db,linked,'垦荒精神','','2026-01-01');
+  await f.db.prepare("UPDATE articles SET status='linked' WHERE id=?").bind(linked).run();
+  assert.equal((await query({q:'垦荒'})).articles[0].id,linked);
+  assert.ok(!(await query({q:'垦荒',from:'2026-02-01'})).articles.some(row=>row.id===linked));
   fail=true;assert.equal((await query({q:'补考'})).status,503);
+  assert.deepEqual((await query({q:'垦荒'})).articles.map(row=>row.id),[linked]);
   assert.equal((await query({from:'2026-02-02'})).total,1);
 });

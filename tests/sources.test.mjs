@@ -79,7 +79,7 @@ const browserPlugin={
           const failure=globalThis.SOURCES_LIST_OPTIONS.failureUrl===url?globalThis.SOURCES_LIST_OPTIONS.failures?.shift():null;
           if(failure)throw Object.assign(new Error(failure.message),failure);
           const path=new URL(url).pathname;
-          const page=/\\/list(?:-[ab])?(?:-2)?\\.htm$/.test(path)?(path.includes('-2')?2:1):0;
+          const page=path==='/index/qnxx.htm'?1:/\\/list(?:-[ab])?(?:-2)?\\.htm$/.test(path)?(path.includes('-2')?2:1):0;
           const value=page?list(url,page):body(url);
           if(page&&globalThis.SOURCES_FAULT_BEFORE_COMMIT){globalThis.SOURCES_FAULT_BEFORE_COMMIT=false;globalThis.SOURCES_FAIL_BEFORE_BATCH=true;}
           if(page&&globalThis.SOURCES_FAULT_NEXT_LIST_COMMIT){
@@ -1340,6 +1340,36 @@ test('replacing a verified configuration fences queued live discovery and permit
       assert.equal((await request(mf,admin,`/internal/sources/${sourceId}`)).data.source.validationState,'verified');
     }finally{gate.release?.();await mf.dispose();}
   });
+});
+
+test('Youth Learning records dated WeChat links without capturing them',async()=>{
+  const {mf,db,admin,read}=await fixture({versioned:true,discoveryPages:1});
+  try{
+    const origin='https://youth.cqu.edu.cn',listUrl=origin+'/index/qnxx.htm';
+    const site=await request(mf,admin,'/internal/sites',{method:'POST',body:{name:'团委',origin}});
+    const saved=await request(mf,admin,'/internal/sources',{method:'POST',body:{
+      ...sourceCommand(site.data.site.id,listUrl),sampleArticleUrl:origin+'/info/1001/1.htm',
+    }});
+    const sourceId=saved.data.source.id;
+    await db.prepare("UPDATE sources SET enabled=1,validation_state='verified',baseline_cutoff_at='2026-01-01' WHERE id=?").bind(sourceId).run();
+    const url='https://mp.weixin.qq.com/s/official-article';
+    const row={url,title:'青年学习原文',publishedAt:'2026-02-02'};
+    await control(mf,'clock',{now:Date.parse('2026-02-03T03:00:00Z')});
+    await control(mf,'list-options',{articles:[row,row,{...row,url:url+'-old',publishedAt:'2025-12-01'}],chainPages:1});
+    const scheduled=await request(mf,admin,'/internal/sources/schedule',{method:'POST'});
+    await waitFor(async()=>{
+      const task=(await request(mf,admin,`/internal/capture-tasks/${scheduled.data.scheduled[0]}`)).data.task;
+      assert.equal(task.state,'succeeded',JSON.stringify(task));
+    });
+    const result=await(await read('/api/articles?source='+sourceId+'&q=青年学习')).json();
+    assert.equal(result.total,1);
+    const [article]=result.articles;
+    assert.equal(article.status,'linked');assert.equal(article.url,url);
+    assert.equal(article.capturedAt,null);
+    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM tasks WHERE kind='capture'").first()).n,0);
+    const manual=await request(mf,admin,'/internal/capture-tasks',{method:'POST',body:{articleId:article.id,requestId:'test-linked-manual'}});
+    assert.equal(manual.status,400);
+  }finally{await mf.dispose();}
 });
 
 test('a browser-recognized empty list records a successful live check',async()=>{

@@ -339,6 +339,14 @@ export function ArticleDetailPage() {
     : undefined;
   const activeRevisionId = revision?.id ?? selectedRevision?.id ?? currentRevisionId;
   const canReadRevision = !revision || revision.readable;
+  const historicalCompleteRevision = state.historical && revision
+    ? revisions.filter((item) => item.id !== revision.id && item.state === 'ready')
+      .sort((a, b) => b.revisionNo - a.revisionNo)[0]
+    : undefined;
+  const completeRevisionDirection = historicalCompleteRevision && revision
+    && Date.parse(historicalCompleteRevision.observedAt) >= Date.parse(revision.observedAt)
+    ? '更新'
+    : '历史';
   const partialSnapshot = revision && !canReadRevision
     && requirements?.some(item => item.kind === 'snapshot' && item.state === 'fulfilled')
     && article.snapshotUrl === `/api/articles/${article.id}/revisions/${revision.id}/snapshot`
@@ -361,8 +369,8 @@ export function ArticleDetailPage() {
     setParams(next, { replace: false });
   }
 
-  return (
-    <article className="feed-reading-page">
+  const header = (
+    <>
       <Link className="feed-back-link" to="/">
         <ArrowLeft aria-hidden="true" />
         返回通知列表
@@ -373,10 +381,17 @@ export function ArticleDetailPage() {
           description={`${article.sourceName} · 发布 ${formatPublicationDate(article.publishedAt)}`}
         />
         <a className="feed-reading-source" href={article.url} target="_blank" rel="noreferrer">
-          查看原网页
+          {article.status === 'linked' ? '阅读微信公众号原文' : '查看原网页'}
           <ExternalLink aria-hidden="true" />
         </a>
       </header>
+    </>
+  );
+  if (article.status === 'linked') return <article className="feed-reading-page">{header}</article>;
+
+  return (
+    <article className="feed-reading-page">
+      {header}
       <nav className="feed-reading-toolbar" aria-label="通知操作">
         {canReadRevision && ordinaryAttachments.length > 0 && (
           <a className="feed-text-action" href="#notice-attachments">
@@ -428,6 +443,17 @@ export function ArticleDetailPage() {
             正文和附件尚未完整。{partialSnapshot
               ? <a className="feed-text-action" href={partialSnapshot}>查看已保存的网页快照</a>
               : '此版本尚无可读的网页快照。'}
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {canReadRevision && historicalCompleteRevision && ordinaryAttachments.some((attachment) => !attachment.downloadUrl) && (
+        <Alert className="feed-revision-alert">
+          <AlertTitle>此版本附件暂时缺失</AlertTitle>
+          <AlertDescription>
+            <Link to={`?revision=${historicalCompleteRevision.id}`}>
+              打开已核验的{completeRevisionDirection}完整版本（{formatDateTime(historicalCompleteRevision.observedAt)}）
+            </Link>
           </AlertDescription>
         </Alert>
       )}
@@ -646,8 +672,8 @@ function HistorySheet({
                       type="button"
                       variant={active ? 'default' : 'outline'}
                       size="sm"
-                      disabled={item.state !== 'ready'}
-                      onClick={() => onSelect(item.id === currentRevisionId ? null : item.id)}
+                      disabled={!item.readable}
+                      onClick={() => onSelect(active && item.id === currentRevisionId ? null : item.id)}
                     >
                       {active ? '当前查看' : '查看版本'}
                     </Button>

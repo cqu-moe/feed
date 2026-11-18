@@ -22,6 +22,19 @@ test('Chinese search opens the reading route and browser Back restores the searc
   await expect(page.getByRole('link', { name: detail.article.title, exact: true })).toBeVisible();
 });
 
+test('a Youth Learning listing opens the original without archive controls', async ({ page }) => {
+  const { detail } = await installReadingRoutes(page);
+  const original = 'https://mp.weixin.qq.com/s/listed-article';
+  await page.route(`**/api/articles/${articleId}`, route => route.fulfill({ json: {
+    article: { ...detail.article, status: 'linked', url: original, bodyText: '', capturedAt: null },
+    attachments: [],
+  } }));
+  await page.goto(`/articles/${articleId}`);
+  await expect(page.getByRole('link', { name: '阅读微信公众号原文' })).toHaveAttribute('href', original);
+  await expect(page.getByRole('button', { name: '历史版本' })).toHaveCount(0);
+  await expect(page.getByRole('link', { name: '返回通知列表' })).toBeVisible();
+});
+
 for (const [status, title] of [
   [401, '登录已过期'],
   [403, '这篇通知暂时无法访问'],

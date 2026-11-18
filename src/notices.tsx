@@ -471,6 +471,7 @@ export function ArticlesPage() {
                   <div className="notice-main">
                     <p className="notice-kicker">
                       <span>{article.sourceName}</span>
+                      {article.status === 'linked' && <span>公众号原文</span>}
                       {date.value ? (
                         <time dateTime={date.value}>{date.label}</time>
                       ) : (
