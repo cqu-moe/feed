@@ -23,7 +23,7 @@ import {
 } from '@cqu-moe/ui';
 import { ExternalLink, Plus, RefreshCw } from 'lucide-react';
 import { adminRequestMessage } from './api';
-import { StandaloneHeader } from './components';
+import { StandaloneHeader, usePageTitle } from './components';
 import { readValidationSnapshot } from './admin-source-validation';
 
 type JsonRecord = Record<string, unknown>;
@@ -555,6 +555,7 @@ function BackfillControls({
 }
 
 export function AdminSourcesPage() {
+  usePageTitle('来源配置管理');
   const [identityReady, setIdentityReady] = useState(false);
   const [sites, setSites] = useState<Site[]>([]);
   const [sources, setSources] = useState<Source[]>([]);

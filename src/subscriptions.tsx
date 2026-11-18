@@ -56,7 +56,7 @@ import {
   type SubscriptionCreateResponse,
   type SubscriptionList,
 } from './api';
-import { LoginRequiredState, RetryButton, formatDateTime } from './components';
+import { LoginRequiredState, RetryButton, formatDateTime, usePageTitle } from './components';
 import { SubscriptionActivity } from './subscription-activity';
 import { captureFeedEvent } from './telemetry';
 
@@ -869,6 +869,7 @@ function SubscriptionRow({ subscription, data, onChanged }: {
 }
 
 export function SubscriptionsPage() {
+  usePageTitle('我的订阅');
   const [state, setState] = useState<ListState>({ kind: 'loading' });
   const [reloadKey, setReloadKey] = useState(0);
   const [filter, setFilter] = useState<SubscriptionFilter>('all');
@@ -881,6 +882,8 @@ export function SubscriptionsPage() {
   const saving = useRef(false);
   const createTriggerRef = useRef<HTMLElement | null>(null);
   const createTitleRef = useRef<HTMLHeadingElement | null>(null);
+  const createNameRef = useRef<HTMLInputElement | null>(null);
+  const createScopeRef = useRef<HTMLFieldSetElement | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -927,6 +930,8 @@ export function SubscriptionsPage() {
     if (!draft.name.trim() || (!draft.siteIds.length && !draft.sourceIds.length)) {
       setSaveState('error');
       setSaveError('请填写订阅名称，并至少选择一个站点或栏目。');
+      if (!draft.name.trim()) createNameRef.current?.focus();
+      else createScopeRef.current?.focus();
       return;
     }
     saving.current = true;
@@ -1193,6 +1198,7 @@ export function SubscriptionsPage() {
               <Label htmlFor="subscription-name">订阅名称</Label>
               <Input
                 id="subscription-name"
+                ref={createNameRef}
                 value={draft.name}
                 maxLength={80}
                 disabled={saveState === 'loading' || retryableCreateFailure}
@@ -1203,7 +1209,12 @@ export function SubscriptionsPage() {
               />
             </div>
 
-            <fieldset className="feed-subs-field" aria-describedby="subscription-scope-help">
+            <fieldset
+              className="feed-subs-field"
+              ref={createScopeRef}
+              tabIndex={-1}
+              aria-describedby={saveState === 'error' ? 'subscription-scope-help create-error' : 'subscription-scope-help'}
+            >
               <legend>关注范围</legend>
               <p id="subscription-scope-help">选择站点会订阅当前已验证栏目；之后新增的栏目不会自动加入。</p>
               <div className="feed-subs-site-options">
@@ -1265,9 +1276,9 @@ export function SubscriptionsPage() {
 
             {saveError && (
               <Alert variant="destructive">
-                <AlertTitle id="create-error">保存结果未确认</AlertTitle>
+                <AlertTitle>保存结果未确认</AlertTitle>
                 <AlertDescription>
-                  {saveError}
+                  <span id="create-error">{saveError}</span>
                   {retryableCreateFailure ? ' 可重试确认本次保存，已保存的订阅不会重复创建。' : ''}
                 </AlertDescription>
               </Alert>

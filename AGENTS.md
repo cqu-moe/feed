@@ -19,6 +19,10 @@
 
 ## Agent skills
 
+### Modern Web Guidance
+
+修改 HTML、CSS 或浏览器 JavaScript 前，使用 `modern-web-guidance` 检索并读取相关指南；全项目现代化审查按其扫描流程核实命中。项目适配与验收边界见 `docs/agents/modern-web-guidance.md`。
+
 ### Issue tracker
 
 任务与发布的规格使用 `cqu-moe/feed` GitHub Issues。见 `docs/agents/issue-tracker.md`。

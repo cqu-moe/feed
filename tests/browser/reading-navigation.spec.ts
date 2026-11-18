@@ -3,6 +3,7 @@ import { test, expect, articleId, installReadingRoutes } from './fixtures';
 test('Chinese search opens the reading route and browser Back restores the search', async ({ page }) => {
   const { detail } = await installReadingRoutes(page);
   await page.goto('/');
+  await expect(page).toHaveTitle('重大通知存档 · CQU Feed');
   await page.getByRole('searchbox', { name: '搜索通知' }).fill('优异生');
   const response = page.waitForResponse(value => {
     const url = new URL(value.url());
@@ -13,8 +14,10 @@ test('Chinese search opens the reading route and browser Back restores the searc
   await page.getByRole('link', { name: detail.article.title, exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/articles/${articleId}$`));
   await expect(page.getByRole('heading', { level: 1, name: detail.article.title })).toBeVisible();
+  await expect(page).toHaveTitle(`${detail.article.title} · CQU Feed`);
   await expect(page.getByText('请根据学校要求开展优异生培养工作。')).toBeVisible();
   await page.goBack();
+  await expect(page).toHaveTitle('重大通知存档 · CQU Feed');
   await expect(page.getByRole('searchbox', { name: '搜索通知' })).toHaveValue('优异生');
   await expect(page.getByRole('link', { name: detail.article.title, exact: true })).toBeVisible();
 });
@@ -32,6 +35,7 @@ for (const [status, title] of [
     });
     await page.goto(`/articles/${articleId}`);
     await expect(page.getByRole('heading', { name: title, exact: true })).toBeVisible();
+    await expect(page).toHaveTitle(`${title} · CQU Feed`);
     await expect(page.getByRole('heading', { name: detail.article.title, exact: true })).toHaveCount(0);
     await expect(page.getByText('请根据学校要求开展优异生培养工作。')).toHaveCount(0);
     await expect(page.getByRole('link', { name: /通知原件|网页快照|优异生申请表/ })).toHaveCount(0);
