@@ -25,8 +25,9 @@ export function createTaskRuntime(env,{now=()=>Date.now(),queue=env.FEED_JOBS,wo
     async submitCapture({articleId,requestId}){
       if(!idPattern.test(articleId??''))throw new ValidationError('articleId must be a 24-character lowercase hex id');
       if(!/^[A-Za-z0-9._:-]{8,100}$/.test(requestId??''))throw new ValidationError('requestId must contain 8-100 URI-safe characters');
-      const row=await env.DB.prepare('SELECT id,source_id FROM articles WHERE id=?').bind(articleId).first();
+      const row=await env.DB.prepare('SELECT id,source_id,status FROM articles WHERE id=?').bind(articleId).first();
       if(!row)throw new ValidationError('Article not found');
+      if(row.status==='linked')throw new ValidationError('此条目仅收录外部原文链接');
       const source=await createSources(env).find(row.source_id);
       if(!source)throw new ValidationError('Article source is not configured');
       const businessKey=`capture:${articleId}:${requestId}`,taskId=(await sha(businessKey)).slice(0,24);

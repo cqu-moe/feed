@@ -143,7 +143,7 @@ test('explicit datetime preserves minute precision and timezone', async ({ page 
   ]);
 });
 
-test('dated WeChat cards are skipped only on continuation pages, while empty/error pages still fail', async ({ page }) => {
+test('Youth Learning indexes dated WeChat links while other columns skip them only on continuation pages', async ({ page }) => {
   const bundle = await build({ entryPoints: ['worker/discovery.mjs'], bundle: true, write: false,
     platform: 'node', format: 'esm', plugins: [cloudflareEntrypointPlugin] });
   const { discoverList } = await import('data:text/javascript;base64,' + Buffer.from(bundle.outputFiles[0].text).toString('base64'));
@@ -154,6 +154,22 @@ test('dated WeChat cards are skipped only on continuation pages, while empty/err
     await page.goto(url);
     return { actions: { javascriptReturns: [{ value: await page.evaluate(options.actions[0].script) }] } };
   };
+  const youthList = 'https://youth.cqu.edu.cn/index/qnxx.htm';
+  const youthSource = { ...source, listUrl: youthList };
+  for (const listUrl of [youthList, 'https://youth.cqu.edu.cn/index/qnxx/2.htm']) {
+    const youth = await discoverList({}, youthSource, listUrl, { scrape });
+    expect(youth.articles).toEqual([expect.objectContaining({
+      url: 'https://mp.weixin.qq.com/s/public-article', title: '公众号文章', publishedDay: '2026-10-20', linkOnly: true,
+    })]);
+  }
+  const shortCard = html;
+  html = shortCard.replace('/s/public-article', '/s?__biz=example&amp;mid=1&amp;idx=1&amp;sn=abcdef');
+  expect((await discoverList({}, youthSource, youthList, { scrape })).articles[0].url)
+    .toBe('https://mp.weixin.qq.com/s?__biz=example&mid=1&idx=1&sn=abcdef');
+  html = shortCard.replace('/s/public-article', '/s?redirect=example');
+  await expect(discoverList({}, youthSource, youthList, { scrape, allowExternalOnly: true }))
+    .rejects.toThrow('No article links found in list');
+  html = shortCard;
   const url = 'https://youth.cqu.edu.cn/index/zdqn/2.htm';
   await expect(discoverList({}, source, url, { scrape })).rejects.toThrow('No article links found in list');
   const result = await discoverList({}, source, url, { scrape, allowExternalOnly: true });
@@ -166,6 +182,7 @@ test('dated WeChat cards are skipped only on continuation pages, while empty/err
     '<ul><li>2026-10-20<a href="https://other.example/s/public-article">其他外链</a></li></ul>',
   ]) {
     html = body;
+    await expect(discoverList({}, youthSource, youthList, { scrape })).rejects.toThrow('No article links found in list');
     await expect(discoverList({}, source, url, { scrape, allowExternalOnly: true })).rejects.toThrow('No article links found in list');
   }
 });

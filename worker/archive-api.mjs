@@ -67,6 +67,13 @@ async function versionedList(env,url,filters){
   return json(await articleCards(env,clauses,bindings,page,true));
 }
 
+export async function linkedTitleCards(env,filters,query){
+  const {clauses,bindings}=noticeWhere(filters,publishedDay,env.SOURCE_MANAGEMENT_ENABLED==='true');
+  clauses.push("a.status='linked' AND instr(lower(a.title),lower(?))>0");
+  bindings.push(query);
+  return (await articleCards(env,clauses,bindings,1,false)).articles;
+}
+
 // The archive list and related search must present the same title/date/reading identity.
 export async function relatedArticleCards(env,filters,ids){
   if(!ids.length)return [];

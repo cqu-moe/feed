@@ -30,13 +30,15 @@ function listPage(input,isExplicitlyEmptyList) {
     const title=(anchor.getAttribute('title')||heading?.innerText||anchor.innerText||'').replace(/^[●•·\s]+/,'').trim();
     const url=articleUrl(anchor);
     if(!url){
-      // Youth mixes local articles and dated WeChat cards. Recognize the latter
-      // only to distinguish a valid continuation from an empty/error page.
       let external;try{external=new URL(anchor.getAttribute('href'),location.href);}catch{continue;}
       const card=anchor.closest('li');
       if(title&&card&&external.origin==='https://mp.weixin.qq.com'&&/^\/s(?:\/|$)/.test(external.pathname)){
         const copy=card.cloneNode(true);copy.querySelectorAll('a').forEach(link=>link.remove());
-        if(date(copy.textContent))externalArticleCount++;
+        const publishedAt=date(copy.textContent);
+        if(publishedAt){
+          externalArticleCount++;
+          if(input.indexWeChat)articles.push({url:external.href,title,publishedAt});
+        }
       }
       continue;
     }
@@ -79,9 +81,11 @@ export async function discoverList(env,source,url,{scrape:scrapeDependency=scrap
   const target=canonicalUrl(url),origin=new URL(source.url).origin;
   if(target.origin!==origin)throw new Error('Unexpected list origin');
   const pattern=source.config?.articlePattern??source.articlePattern;
-  const actionSource={articlePattern:pattern};
+  const indexWeChat=target.origin==='https://youth.cqu.edu.cn'&&source.listUrl==='https://youth.cqu.edu.cn/index/qnxx.htm'
+    && /^\/index\/qnxx(?:\/\d+)?\.htm$/.test(target.pathname);
+  const actionSource={articlePattern:pattern,indexWeChat};
   const data=await scrapeDependency(env,target.href,{
-    source,formats:['links'],readiness:{articlePattern:pattern,allowExternalOnly},
+    source,formats:['links'],readiness:{articlePattern:pattern,allowExternalOnly:allowExternalOnly||indexWeChat},
     ...(siteAdmission?{siteAdmission}:{}),...(executionHandoff===false?{executionHandoff:false}:{}),
     actions:[{type:'executeJavascript',script:`var __name=value=>value; (${listPage.toString()})(${JSON.stringify(actionSource)},${isExplicitlyEmptyList.toString()})`}],
   });
@@ -89,16 +93,27 @@ export async function discoverList(env,source,url,{scrape:scrapeDependency=scrap
   if(typeof page==='string')page=JSON.parse(page);
   if(!page||!Array.isArray(page.articles))throw new Error('Invalid discovery list response');
   const articles=[];
+  const seen=new Set();
   for(const row of page.articles){
     let candidate;try{candidate=canonicalUrl(row.url);}catch{continue;}
-    if(candidate.origin!==origin||!new RegExp(pattern).test(candidate.pathname))continue;
+    const external=candidate.origin!==origin;
+    const title=String(row.title??'').trim().slice(0,300);
+    if(external){
+      if(!indexWeChat||candidate.origin!=='https://mp.weixin.qq.com'||!title)continue;
+      const shortLink=/^\/s\/[A-Za-z0-9_-]+$/.test(candidate.pathname);
+      const fullLink=candidate.pathname==='/s'&&['__biz','mid','idx','sn'].every(key=>candidate.searchParams.get(key));
+      if(!shortLink&&!fullLink)continue;
+    }else if(!new RegExp(pattern).test(candidate.pathname))continue;
     const published=publicationDate(row.publishedAt,source.timezone??'Asia/Shanghai');
+    if((external&&published.precision==='unknown')||seen.has(candidate.href))continue;
+    seen.add(candidate.href);
     articles.push({
-      url:candidate.href,title:String(row.title??'').trim().slice(0,300),
+      url:candidate.href,title,...(external?{linkOnly:true}:{}),
       ...published,
     });
   }
-  if(!articles.length&&page.explicitlyEmpty!==true&&!(allowExternalOnly&&page.externalArticleCount>0))throw new Error('No article links found in list');
+  const skippedExternalPage=!indexWeChat&&allowExternalOnly&&page.externalArticleCount>0;
+  if(!articles.length&&page.explicitlyEmpty!==true&&!skippedExternalPage)throw new Error('No article links found in list');
   return {
     articles,added:articles.length,dated:articles.filter(row=>row.precision!=='unknown').length,
     undated:articles.length-articles.filter(row=>row.precision!=='unknown').length,

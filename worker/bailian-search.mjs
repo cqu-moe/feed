@@ -1,6 +1,6 @@
 import {createBailianClient} from './bailian-client.mjs';
 import {lookupSearchDocuments} from './bailian-sync.mjs';
-import {relatedArticleCards} from './archive-api.mjs';
+import {linkedTitleCards,relatedArticleCards} from './archive-api.mjs';
 import {json} from './utils.mjs';
 
 const clean=text=>text.replace(/^#{1,6}\s+.*$/gm,'').replace(/\s+/gu,' ').trim();
@@ -42,6 +42,9 @@ function excerpt(content,query){
 
 let cooldownUntil=0; // Per Worker isolate; distributed quota is enforced by the provider.
 export async function bailianSearch(env,query,filters){
+  const linked=(await linkedTitleCards(env,filters,query)).slice(0,20);
+  const results=articles=>json({articles,total:articles.length,page:1,pageSize:20,searchKind:'related'});
+  if(linked.length===20)return results(linked);
   try{
     if(Date.now()<cooldownUntil)throw new Error('Cooling down');
     const hits=(await createBailianClient(env).search({query,tagGroups:filters.tagGroups})).slice(0,100);
@@ -49,7 +52,7 @@ export async function bailianSearch(env,query,filters){
     const byFile=new Map(docs.map(d=>[d.fileId,d]));
     const cards=await relatedArticleCards(env,filters,[...new Set(docs.map(d=>d.articleId))]);
     const byArticle=new Map(cards.map(c=>[c.id,c]));
-    const articles=[];
+    const articles=[...linked];
     for(const hit of hits){
       const doc=byFile.get(hit.fileId),card=doc&&byArticle.get(doc.articleId);
       const content=clean(hit.content)||hit.content.trim();
@@ -61,11 +64,12 @@ export async function bailianSearch(env,query,filters){
       if(articles.length===20)break;
     }
     console.info(JSON.stringify({event:'bailian_search',outcome:'ok',results:articles.length}));
-    return json({articles,total:articles.length,page:1,pageSize:20,searchKind:'related'});
+    return results(articles);
   }catch(e){
     if(e?.status===429)cooldownUntil=Date.now()+1_000;
     console.info(JSON.stringify({event:'bailian_search',outcome:e?.status===429?'rate_limited':'unavailable'}));
     // Never log the submitted query, signed URLs or returned document fragments.
+    if(linked.length)return results(linked);
     return json({error:'通知搜索暂时不可用，可以按条件浏览或稍后重试'},503);
   }
 }

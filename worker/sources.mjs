@@ -391,18 +391,26 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
       for(const row of candidates){
         const aid=await articleId(row.url);
         if(!isBackfill)processedArticleIds.add(aid);
-        const captureBusinessKey=`capture:${aid}:discovery-initial`;
-        const captureTaskId=(await sha(captureBusinessKey)).slice(0,24);
         statements.push(
           env.DB.prepare(`INSERT INTO articles(id,source_id,url,title,published_at,discovered_at,status)
-            SELECT ?,?,?,?,?,?,'pending' WHERE ${activeTask.sql} ON CONFLICT(url) DO NOTHING`)
-            .bind(aid,source.id,row.url,row.title,row.precision==='unknown'?'unknown':row.publishedDay,new Date(result.observedAt).toISOString(),...activeTask.args),
+            SELECT ?,?,?,?,?,?,? WHERE ${activeTask.sql} ON CONFLICT(url) DO UPDATE SET
+              title=excluded.title,published_at=excluded.published_at
+              WHERE articles.status='linked' AND excluded.status='linked' AND articles.source_id=excluded.source_id
+                AND (articles.title<>excluded.title OR articles.published_at<>excluded.published_at)`)
+            .bind(aid,source.id,row.url,row.title,row.precision==='unknown'?'unknown':row.publishedDay,new Date(result.observedAt).toISOString(),row.linkOnly?'linked':'pending',...activeTask.args),
           env.DB.prepare(`INSERT INTO article_sources(article_id,source_id,first_seen_at,last_seen_at,discovery_class,published_at,published_day,date_precision,source_timezone)
             SELECT ?,?,?,?,?,?,?,?,? WHERE ${activeTask.sql}
             ON CONFLICT(article_id,source_id) DO UPDATE SET last_seen_at=excluded.last_seen_at`)
             .bind(aid,source.id,result.observedAt,result.observedAt,
               isBackfill?'backfill':'live',row.precision==='minute'?row.publishedAt:null,row.precision==='unknown'?null:row.publishedDay,
               row.precision,source.timezone,...activeTask.args),
+        );
+        if(isBackfill)statements.push(env.DB.prepare(`INSERT INTO backfill_seen_articles(source_id,run_id,article_id)
+          SELECT ?,?,? WHERE ${activeTask.sql} ON CONFLICT DO NOTHING`).bind(source.id,context.runId,aid,...activeTask.args));
+        if(row.linkOnly)continue;
+        const captureBusinessKey=`capture:${aid}:discovery-initial`;
+        const captureTaskId=(await sha(captureBusinessKey)).slice(0,24);
+        statements.push(
           env.DB.prepare(`INSERT INTO tasks(id,kind,business_key,source_id,article_id,payload_json,state,priority,due_at,attempt_no,created_at,updated_at)
             SELECT ?,'capture',?,?,?,?,'queued',80,?,1,?,? WHERE ${activeTask.sql}
               AND EXISTS(SELECT 1 FROM article_sources WHERE article_id=? AND source_id=?)
@@ -413,8 +421,6 @@ export function createSources(env,{now=()=>Date.now(),scrape}={}){
           launchOutboxStatement(env,{id:await launchOutboxId(captureTaskId,1),taskId:captureTaskId,attempt:1,timestamp:at,
             guardSql:'kind=? AND '+activeTask.sql,guardArgs:['capture',...activeTask.args]}),
         );
-        if(isBackfill)statements.push(env.DB.prepare(`INSERT INTO backfill_seen_articles(source_id,run_id,article_id)
-          SELECT ?,?,? WHERE ${activeTask.sql} ON CONFLICT DO NOTHING`).bind(source.id,context.runId,aid,...activeTask.args));
         const association=await articleSourceAssociationStatements(env,{
           articleId:aid,sourceId:source.id,timestamp:at,discoveryTaskId:taskId,taskGuard:activeTask,
         });
